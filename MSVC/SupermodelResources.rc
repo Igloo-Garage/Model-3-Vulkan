@@ -1,0 +1,15 @@
+// Supermodel resources.
+//
+// Only the application icon lives here. The manifest is embedded by the linker
+// (/MANIFEST with AdditionalManifestFiles), not from this file, so that it stays a single
+// source of truth - embedding it twice makes the linker complain about a duplicate resource.
+//
+// 101 is the conventional first icon id; Windows picks the lowest-numbered ICON resource as
+// the application icon, so this one is what Explorer, the taskbar and Alt-Tab show. The same
+// id is loaded at run time to give the windows themselves a title-bar icon (see SetWindowIcon
+// in Main.cpp), which is why it is a #define rather than a bare number: the two uses have to
+// agree, and a mismatch would be invisible until someone looked at the title bar.
+
+#define IDI_SUPERMODEL 101
+
+IDI_SUPERMODEL ICON "..\\Src\\OSD\\Windows\\Supermodel.ico"

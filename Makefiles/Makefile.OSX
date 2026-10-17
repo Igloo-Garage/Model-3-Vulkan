@@ -1,0 +1,154 @@
+##
+## Supermodel
+## A Sega Model 3 Arcade Emulator.
+## Copyright 2003-2026 The Supermodel Team
+##
+## This file is part of Supermodel.
+##
+## Supermodel is free software: you can redistribute it and/or modify it under
+## the terms of the GNU General Public License as published by the Free
+## Software Foundation, either version 3 of the License, or (at your option)
+## any later version.
+##
+## Supermodel is distributed in the hope that it will be useful, but WITHOUT
+## ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+## FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+## more details.
+##
+## You should have received a copy of the GNU General Public License along
+## with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
+##
+
+#
+# Makefile.OSX
+#
+# Makefile for Mac OS X systems using clang.
+#
+
+
+###############################################################################
+# Build Options
+###############################################################################
+
+DELETE = rm -d -r -f
+
+
+###############################################################################
+# Release Package Options
+###############################################################################
+
+PKG_TYPE = tgz
+PKG_FILES = Frameworks/*.framework
+
+
+###############################################################################
+# Platform Configuration
+#
+# Edit library and include paths as needed.
+###############################################################################
+
+#
+# Must be included first
+#
+include Makefiles/Options.inc
+
+#
+# Toolchain
+#
+CC = clang
+CXX = clang
+LD = clang
+
+#
+# SDL
+#
+
+SDL_CFLAGS =
+SDL_LIBS = -framework SDL2 -framework SDL2_net -framework OpenGL -framework GLUT -framework Cocoa
+
+#
+# macOS-specific
+#
+
+PLATFORM_CXXFLAGS = -F./Frameworks -IFrameworks/SDL2.framework/Headers $(SDL_CFLAGS) -DSUPERMODEL_OSX
+PLATFORM_LDFLAGS = -F./Frameworks $(SDL_LIBS) -lz -lm -lstdc++ -Wl,-rpath,@executable_path/../Frameworks -Wl,-rpath,@executable_path/Frameworks
+PLATFORM_DIRS = Frameworks/SDL2_net.framework Frameworks/SDL2.framework
+PLATFORM_BINARY_EXTENSION =
+
+#
+# GitHub token
+#
+# In GitHub Actions, a token must be used to access the GitHub API (we use curl
+# and the GitHub API to download SDL dependencies). If GITHUB_TOKEN is passed to
+# the Makefile (which it will be in the GitHub Actions scripts), we pass the
+# token as an authorization header with curl. Otherwise, nothing.
+#
+ifdef GITHUB_TOKEN
+GITHUB_TOKEN_CURL_ARGUMENT = -H "Authorization: token $(GITHUB_TOKEN)"
+else
+GITHUB_TOKEN_CURL_ARGUMENT =
+endif
+
+
+###############################################################################
+# Core Makefile
+###############################################################################
+
+PLATFORM_SRC_FILES = \
+	Src/OSD/OSX/FileSystemPath.cpp
+
+include Makefiles/Rules.inc
+
+# -s (strip) is obsolete and ignored by Apple ld64; remove it to avoid potential warnings
+LDOPT := $(filter-out -s,$(LDOPT))
+
+clean:
+	$(SILENT)echo Cleaning up \"Frameworks\", \"$(BIN_DIR)\" and \"$(OBJ_DIR)\"...
+	$(SILENT)$(DELETE) $(BIN_DIR)
+	$(SILENT)$(DELETE) $(OBJ_DIR)
+	$(SILENT)$(DELETE) Frameworks/SDL2.* Frameworks/SDL2_net.*
+
+
+###############################################################################
+# SDL2 Frameworks
+#
+# SDL2 can be installed in different seemingly incompatible ways on macOS. The
+# simplest solution appears to be to download the framework files from the
+# official SDL repo.
+###############################################################################
+
+Frameworks:
+	$(info Creating directory     : $@)
+	$(SILENT)mkdir Frameworks
+
+Frameworks/SDL2.dmg.url: | Frameworks
+	$(info Finding Latest Release : $@)
+	$(SILENT)curl $(GITHUB_TOKEN_CURL_ARGUMENT) --retry 5 --retry-delay 2 --fail-with-body -s https://api.github.com/repos/libsdl-org/SDL/releases | awk '/"browser_download_url": "(.*SDL2-.*\.dmg)"/{m++; if (m>1) exit; print $$2 }' | tr -d '"' > $@
+
+Frameworks/SDL2_net.dmg.url: | Frameworks
+	$(info Finding Latest Release : $@)
+	$(SILENT)curl $(GITHUB_TOKEN_CURL_ARGUMENT) --retry 5 --retry-delay 2 --fail-with-body -s https://api.github.com/repos/libsdl-org/SDL_net/releases | awk '/"browser_download_url": "(.*SDL2_net-.*\.dmg)"/{m++; if (m>1) exit; print $$2 }' | tr -d '"' > $@
+
+Frameworks/SDL2.dmg: Frameworks/SDL2.dmg.url
+	$(info Downloading            : $(shell cat $@.url))
+	$(SILENT)curl $(GITHUB_TOKEN_CURL_ARGUMENT) "$(shell cat $@.url)" -sfL --output $@
+
+Frameworks/SDL2_net.dmg: Frameworks/SDL2_net.dmg.url
+	$(info Downloading            : $(shell cat $@.url))
+	$(SILENT)curl $(GITHUB_TOKEN_CURL_ARGUMENT) "$(shell cat $@.url)" -sfL --output $@
+
+Frameworks/SDL2.framework: Frameworks/SDL2.dmg
+	$(info Extracting             : $@)
+	$(SILENT)hdiutil attach -quiet Frameworks/SDL2.dmg
+	$(SILENT)cp -r /Volumes/SDL2/SDL2.framework Frameworks
+	$(SILENT)xattr -dr com.apple.quarantine $@
+	$(SILENT)hdiutil detach -quiet /Volumes/SDL2
+	$(SILENT)touch $@
+
+Frameworks/SDL2_net.framework: Frameworks/SDL2_net.dmg
+	$(info Extracting             : $@)
+	$(SILENT)hdiutil attach -quiet Frameworks/SDL2_net.dmg
+	$(SILENT)cp -r /Volumes/SDL2_net/SDL2_net.framework Frameworks
+	$(SILENT)xattr -dr com.apple.quarantine $@
+	$(SILENT)hdiutil detach -quiet /Volumes/SDL2_net
+	$(SILENT)touch $@
