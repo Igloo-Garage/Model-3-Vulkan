@@ -110,17 +110,39 @@ jobs:
       - name: Validate build
         run: |
           # Find the executable in bin/ directory (bin64/ on Windows)
+          set -o pipefail
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            ./bin64/supermodel.exe -print-games
+            ./bin64/supermodel.exe -print-games 2>&1 | tee validate.log
           else
-            ./bin/supermodel -print-games
+            ./bin/supermodel -print-games 2>&1 | tee validate.log
+          fi
+          status=$?
+          if [ $status -ne 0 ]; then
+            {
+              echo "### Validation failed on ${{ matrix.os }}"
+              echo '```'
+              tail -40 validate.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit $status
           fi
           # Remove auto-generated default Supermodel.ini. We do not want to bundle this into packages.
           rm Config/Supermodel.ini
           
       - name: Create package
         run: |
-          make -f Makefiles/${{ matrix.makefile }} pkg GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} SILENT=
+          set -o pipefail
+          make -f Makefiles/${{ matrix.makefile }} pkg GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} SILENT= 2>&1 | tee package.log
+          status=$?
+          if [ $status -ne 0 ]; then
+            {
+              echo "### Packaging failed on ${{ matrix.os }}"
+              echo '```'
+              grep -E 'error|Error|fatal|No such|Permission denied|not found' package.log | head -60
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit $status
+          fi
           
       - name: Find and upload package
         run: |
