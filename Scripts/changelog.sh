@@ -41,6 +41,15 @@ OUTPUT_FILE="$1"
 FROM_REF=${FROM_REF:-06594a5}
 REF=${REF:-$(git rev-parse --short HEAD)}
 
+# The default base is an upstream commit. A fork that does not carry the upstream history cannot
+# resolve it, and failing to resolve it used to abort the whole packaging step over a change log.
+if git rev-parse --verify --quiet "${FROM_REF}^{commit}" >/dev/null; then
+    RANGE="${FROM_REF}...${REF}"
+else
+    echo "Warning: ${FROM_REF} is not in this repository; listing the full history instead." >&2
+    RANGE="${REF}"
+fi
+
 # Write header directly to output file
 cat <<EOF > "${OUTPUT_FILE}"
 
@@ -62,7 +71,7 @@ cat <<EOF > "${OUTPUT_FILE}"
 EOF
 
 # Append git log directly to output file
-if ! git -c color.ui=never log ${FROM_REF}...${REF} --no-decorate --format=format:"Commit %h on %ad by %an%n%n%w(80,4,4)%B" --date=short >> "${OUTPUT_FILE}" ; then
+if ! git -c color.ui=never log ${RANGE} --no-decorate --format=format:"Commit %h on %ad by %an%n%n%w(80,4,4)%B" --date=short >> "${OUTPUT_FILE}" ; then
     echo "Unable to obtain Git log" >&2
     exit 1
 fi
