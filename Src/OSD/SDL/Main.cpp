@@ -331,6 +331,13 @@ static void RaiseProcessPriority()
  * loop stops depending on the message pump, i.e. runs on its own thread. Do not assume this hook
  * covers every configuration.
  */
+// The hook itself is Windows-only. UINT_PTR, HWND, the WM_* messages and SetTimer()/KillTimer() are
+// Win32 types and constants that do not exist under SDL's X11, Wayland or Cocoa back ends, so the
+// declarations have to sit inside the guard as well as the code that uses them. Guarding only the
+// body of SetModalLoopHook() - as an earlier revision did - left the declarations at file scope and
+// made a GCC/Clang build fail with "'UINT_PTR' does not name a type" before it ever reached the
+// function. Everything Windows-specific is now inside one block, and other targets compile a stub.
+#ifdef _WIN32
 static IEmulator* s_modalEmulator = nullptr;
 // Must not collide with SDL's own modal-loop timer, which uses a pointer as its id.
 static const UINT_PTR kModalFrameTimerId = 0x5F4D;
@@ -361,7 +368,11 @@ static void SDLCALL ModalLoopMessageHook(void* /*userdata*/, void* hWnd, unsigne
     break;
   }
 }
+#endif  // _WIN32
 
+// No-op away from Windows: there is no modal loop to keep alive there, because the frame loop is not
+// parked inside a Win32 DispatchMessage() call. Kept unconditional so the call sites stay free of
+// #ifdef noise.
 static void SetModalLoopHook(IEmulator* emulator)
 {
 #ifdef _WIN32
