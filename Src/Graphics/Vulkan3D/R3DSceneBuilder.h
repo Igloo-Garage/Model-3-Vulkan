@@ -25,6 +25,10 @@
 #include "../New3D/Model.h"
 #include "../New3D/PolyHeader.h"
 #include "../New3D/R3DData.h"
+// uint32_t is used throughout the interface below. MSVC gets it indirectly through one of the
+// headers above, so this was missing without ever being noticed; gcc does not, and the whole file
+// failed with "'uint32_t' does not name a type" on the first line that used it.
+#include <cstdint>
 #include <unordered_map>
 #include <vector>
 
