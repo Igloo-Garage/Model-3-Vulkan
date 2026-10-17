@@ -28,8 +28,10 @@ jobs:
       - name: Get version
         id: version
         run: |
-          VERSION=$(make -f Makefiles/Makefile.UNIX version)
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          # The fork's own version, not the upstream core version that `make version` prints.
+          FORK_VERSION=$(grep -E '^#define[[:space:]]+SUPERMODEL_FORK_VERSION' Src/Version.h | awk -F'"' '{print $2}')
+          FORK_DATE=$(grep -E '^#define[[:space:]]+SUPERMODEL_FORK_DATE' Src/Version.h | awk -F'"' '{print $2}')
+          echo "version=v${FORK_VERSION}-${FORK_DATE}" >> $GITHUB_OUTPUT
           
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -45,12 +47,12 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: "v${{ steps.version.outputs.version }}"
-          name: "Supermodel v${{ steps.version.outputs.version }}"
+          tag_name: "${{ steps.version.outputs.version }}"
+          name: "Supermodel-VK ${{ steps.version.outputs.version }}"
           files: |
             artifacts/*/*.zip
             artifacts/*/*.tar.gz
-          body: "Automated release with builds for Windows, Linux, and macOS."
+          body: "Automated Supermodel-VK build for Windows, Linux and macOS."
           draft: false
           prerelease: false
           generate_release_notes: true
