@@ -126,8 +126,10 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
             exit $status
           fi
-          # Remove auto-generated default Supermodel.ini. We do not want to bundle this into packages.
-          rm Config/Supermodel.ini
+          # Remove the auto-generated default Supermodel.ini. On Unix it lands in the working
+          # directory's Config; on Windows GetPath() anchors it to the executable's Data/Config, so
+          # the path below does not exist there and -f keeps the step from failing over it.
+          rm -f Config/Supermodel.ini
           
       - name: Create package
         run: |
