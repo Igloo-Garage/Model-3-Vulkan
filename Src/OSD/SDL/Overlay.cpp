@@ -71,11 +71,11 @@ bool g_visible = false;
  */
 enum class OverlayBackend
 {
-	None,
+	NoBackend,
 	Vulkan,
 	OpenGL
 };
-OverlayBackend g_backend = OverlayBackend::None;
+OverlayBackend g_backend = OverlayBackend::NoBackend;
 
 SDL_Window* g_window = nullptr;
 float g_uiScale = 1.0f;
@@ -90,7 +90,9 @@ bool g_haveSnapshot = false;
 // stateless.
 bool g_mouseDown[3] = {};
 bool g_keyDown[512] = {};            // indexed by Win32 virtual key
+#ifdef _WIN32
 POINT g_lastMouse = { -1, -1 };
+#endif
 
 // A frame's worth of ImGui draw data, kept so that building the UI and recording the GPU work can
 // happen at different points in the frame. ImGui::Render() is called at the end of NewFrame rather
@@ -124,7 +126,13 @@ const char* const kOverlayKeys[] = {
  * The second is that this is a small, fixed set of keys. The panel is sliders, combos and two
  * buttons - it needs arrows, Enter, Escape, Tab, Backspace and the digits for ImGui's ctrl-click
  * value entry, and nothing else.
+ *
+ * Windows only, along with IsDown() and g_lastMouse above. The table is spelled out in terms of
+ * VK_* constants, which exist in no other platform's headers: leaving these declarations at file
+ * scope - as they were - broke the Linux and macOS builds with "VK_TAB was not declared" and similar
+ * before the compiler ever reached FeedInput(), where the #ifdef was.
  */
+#ifdef _WIN32
 struct KeyMap
 {
 	ImGuiKey imgui;
@@ -169,6 +177,7 @@ bool IsDown(int vk)
 {
 	return (GetAsyncKeyState(vk) & 0x8000) != 0;
 }
+#endif  // _WIN32
 
 // Feeds one frame of input into ImGui by reading the physical device state.
 void FeedInput()
@@ -315,7 +324,7 @@ bool OverlayInit(Vulkan3D::CVulkanContext& context, SDL_Window* window, float ui
 		ImGui_ImplVulkan_Shutdown();
 		g_backendReady = false;
 	}
-	g_backend = OverlayBackend::None;
+	g_backend = OverlayBackend::NoBackend;
 
 	if (!EnsureContext(g_uiScale))
 		return false;
@@ -373,7 +382,7 @@ bool OverlayInitGL(SDL_Window* window, float uiScale)
 		ImGui_ImplOpenGL3_Shutdown();
 		g_backendReady = false;
 	}
-	g_backend = OverlayBackend::None;
+	g_backend = OverlayBackend::NoBackend;
 
 	if (!EnsureContext(g_uiScale))
 		return false;
@@ -414,7 +423,7 @@ void OverlayShutdown()
 			ImGui_ImplOpenGL3_Shutdown();
 		g_backendReady = false;
 	}
-	g_backend = OverlayBackend::None;
+	g_backend = OverlayBackend::NoBackend;
 	ImGui::DestroyContext(g_context);
 	g_context = nullptr;
 	// Hands the settings window its context back.
@@ -448,8 +457,10 @@ void OverlaySetVisible(Util::Config::Node& config, bool visible)
 		// key held down from before it opened.
 		std::memset(g_keyDown, 0, sizeof(g_keyDown));
 		std::memset(g_mouseDown, 0, sizeof(g_mouseDown));
+#ifdef _WIN32
 		g_lastMouse.x = -1;
 		g_lastMouse.y = -1;
+#endif
 	}
 	g_visible = visible;
 }
