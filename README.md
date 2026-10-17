@@ -22,11 +22,17 @@ The emulation core is upstream's. The rendering and presentation layers are rewo
 **Vulkan 1.3 backend** — `Src/Graphics/Vulkan3D/`, alongside the original OpenGL renderers. Per-frame
 vertex arenas are protected by fences, so long sessions do not leak or develop black patches.
 
+![GUI Settings](Docs/images/01GUI.jpg)
+
 **CRT post-processing** — scanlines, phosphor masks (aperture grille / slot / shadow) and glass glow,
 all computed from an integrated beam profile rather than point-sampled. Point sampling beats into
 broad light and dark bands at 4K; integrating over each pixel's footprint removes that dependency and
 lets any scanline count render smoothly. There is no geometry or curvature option — this does not
 attempt to simulate a spherical tube.
+
+![Game Screenshot 1](Docs/images/02game.jpg)
+
+![Game Screenshot 2](Docs/images/03game.jpg)
 
 **Standalone ImGui settings window** — the settings screen is the application shell. It stays alive
 for the whole run, so `Esc` returns to it instead of quitting the program, the way PCSX2 and other
