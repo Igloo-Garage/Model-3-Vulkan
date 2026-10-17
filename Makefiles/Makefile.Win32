@@ -88,11 +88,14 @@ ifneq (,$(findstring cmd.exe,$(shell echo %COMSPEC%)))
 	# and library directories
 	SDL2_INCLUDE_DIR = \msys64\mingw64\include\SDL2
 	SDL2_LIB_DIR = \msys64\mingw64\lib
-	SDL2_LIBS = -lmingw32 -lSDL2main -lSDL2 -Wl,--no-undefined -lshell32 -lsetupapi -ladvapi32 -luuid -lversion -limm32 -lwinmm -lgdi32 -luser32 -lm -pipe
+	SDL2_LIBS = -mwindows -lmingw32 -lSDL2main -lSDL2 -Wl,--no-undefined -lshell32 -lsetupapi -ladvapi32 -luuid -lversion -limm32 -lwinmm -lgdi32 -luser32 -lm -pipe
 	SDL2_CFLAGS =
 else
-	# Must strip out -mwindows so we don't create a GUI app (will not work in Command Prompt)
-	SDL2_LIBS = $(shell sdl2-config --static-libs | sed 's/-mwindows//g')
+	# Build a Windows-subsystem executable, the same as the MSVC project (Supermodel.vcxproj sets
+	# <SubSystem>Windows</SubSystem>). That is what keeps a console window from appearing when the
+	# program is started from Explorer. Command-line output still works because Main.cpp attaches to
+	# the parent console (AttachParentConsole), so -print-games prints in cmd/PowerShell.
+	SDL2_LIBS = -mwindows $(shell sdl2-config --static-libs)
 	SDL2_CFLAGS = $(shell sdl2-config --cflags)
 endif
 SDL2_LIBS += -lSDL2_net -liphlpapi
