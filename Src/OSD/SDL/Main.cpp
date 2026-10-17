@@ -132,8 +132,9 @@ extern "C" {
     __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 }
 
-// Matches IDI_SUPERMODEL in MSVC/SupermodelResources.rc. The two have to agree or the window icon
-// silently goes missing while the one in Explorer still looks right.
+// Matches IDI_SUPERMODEL in both resource scripts (MSVC/SupermodelResources.rc and
+// Src/OSD/Windows/SupermodelResources.rc). They all have to agree or the window icon silently goes
+// missing while the one in Explorer still looks right.
 #define IDI_SUPERMODEL 101
 #endif
 
