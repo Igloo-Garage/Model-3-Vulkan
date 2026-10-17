@@ -61,6 +61,23 @@ jobs:
             mingw64/mingw-w64-x86_64-SDL2
             mingw64/mingw-w64-x86_64-SDL2_net
 
+      # Vulkan-Headers are not committed: Libraries/ is ignored wholesale and they are fetched by
+      # Libraries/Get_Vulkan.cmd on a developer machine. The CI never ran that script, so the first
+      # Vulkan source file failed with "vulkan/vulkan.h: No such file or directory". Upstream never
+      # hit this because it has no Vulkan backend at all.
+      #
+      # Fetched natively rather than by running the .cmd, because this workflow is a matrix over
+      # Ubuntu, Windows and macOS and a batch file only covers one of them. The version matches
+      # Get_Vulkan.cmd so a CI build and a local build see the same headers.
+      - name: Fetch Vulkan headers
+        run: |
+          mkdir -p Libraries
+          curl -fsSL -o /tmp/vk-headers.zip \
+            https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v1.3.296.zip
+          unzip -q /tmp/vk-headers.zip -d /tmp/vk-headers
+          mv /tmp/vk-headers/Vulkan-Headers-1.3.296 Libraries/Vulkan-Headers
+          test -f Libraries/Vulkan-Headers/include/vulkan/vulkan.h
+
       - name: Build Supermodel
         run: |
           make -f Makefiles/${{ matrix.makefile }} release OPT="${OPT_INPUT:-"-O3"}" GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} SILENT=
