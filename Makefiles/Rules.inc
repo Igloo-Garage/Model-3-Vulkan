@@ -94,11 +94,11 @@ CXXFLAGS_GENERATE_DEPENDENCIES = $(filter-out -c,$(CXXFLAGS))
 SRC_FILES = \
 	Src/CPU/PowerPC/PPCDisasm.cpp \
 	Src/BlockFile.cpp \
-	Src/Pkgs/unzip.cpp \
-	Src/Pkgs/ioapi.cpp \
+	Src/Pkgs/unzip.c \
+	Src/Pkgs/ioapi.c \
 	Src/Model3/93C46.cpp \
-	Src/JTAG.cpp \
-	Src/Pkgs/glew.cpp \
+	Src/Model3/JTAG.cpp \
+	Src/Pkgs/glew.c \
 	Src/Graphics/Shader.cpp \
 	Src/Model3/Real3D.cpp \
 	Src/Graphics/New3D/GLSLShader.cpp \
