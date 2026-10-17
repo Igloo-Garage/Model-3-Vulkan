@@ -12,6 +12,10 @@ on:
 jobs:
   Build:
     strategy:
+      # Without this the first platform to fail cancels the other two, which hides whether a fault is
+      # platform-specific or common to all of them - the exact question when a build breaks only on
+      # the compilers that are not MSVC.
+      fail-fast: false
       matrix:
         os:
           - windows-latest
@@ -80,8 +84,29 @@ jobs:
 
       - name: Build Supermodel
         run: |
-          make -f Makefiles/${{ matrix.makefile }} release OPT="${OPT_INPUT:-"-O3"}" GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} SILENT=
-          
+          set -o pipefail
+          make -f Makefiles/${{ matrix.makefile }} release OPT="${OPT_INPUT:-"-O3"}" GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} SILENT= 2>&1 | tee build.log
+          status=${PIPESTATUS[0]}
+          if [ $status -ne 0 ]; then
+            {
+              echo "### Build failed on ${{ matrix.os }}"
+              echo '```'
+              grep -E 'error:|fatal error|Error [0-9]|undefined reference' build.log | head -60
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit $status
+          fi
+
+      # Only reached when the build above failed: the compile log is otherwise unreadable without
+      # admin rights on the repository (the job-log API refuses, and the web UI is a browser).
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ matrix.os }}
+          path: build.log
+          if-no-files-found: ignore
+
       - name: Validate build
         run: |
           # Find the executable in bin/ directory (bin64/ on Windows)
