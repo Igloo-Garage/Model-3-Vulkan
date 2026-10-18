@@ -170,6 +170,7 @@ SYSTEM REQUIREMENTS
 ------------------------------------------------------------------------
 
   * Windows 10 or Windows 11, 64-bit.
+  * macOS 11 or later, Apple Silicon or Intel.
   * For the Vulkan renderer (the default): a GPU and driver that
     provide Vulkan 1.3, or Vulkan 1.2 together with the two extensions
     VK_KHR_dynamic_rendering and VK_KHR_synchronization2. The 1.2 route
