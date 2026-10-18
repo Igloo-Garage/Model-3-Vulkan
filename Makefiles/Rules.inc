@@ -304,14 +304,14 @@ FORK_VERSION := $(shell sed -n 's/^#define[[:space:]]*SUPERMODEL_FORK_VERSION[[:
 FORK_DATE := $(shell sed -n 's/^#define[[:space:]]*SUPERMODEL_FORK_DATE[[:space:]]*"\([^"]*\)".*/\1/p' Src/Version.h)
 
 ifeq ($(strip $(FORK_VERSION)),)
-	# sed unavailable (e.g. a bare cmd.exe MinGW build): keep the old name rather than an empty one.
-	PKG_STAGE_NAME = supermodel-$(VERSION)
+# sed unavailable (e.g. a bare cmd.exe MinGW build): keep the old name rather than an empty one.
+PKG_STAGE_NAME = supermodel-$(VERSION)
 else
-	ifeq ($(strip $(FORK_DATE)),)
-		PKG_STAGE_NAME = Supermodel-VK.v$(FORK_VERSION)
-	else
-		PKG_STAGE_NAME = Supermodel-VK.v$(FORK_VERSION)-$(FORK_DATE)
-	endif
+ifeq ($(strip $(FORK_DATE)),)
+PKG_STAGE_NAME = Supermodel-VK.v$(FORK_VERSION)
+else
+PKG_STAGE_NAME = Supermodel-VK.v$(FORK_VERSION)-$(FORK_DATE)
+endif
 endif
 
 pkg/path: set_version
