@@ -21,6 +21,7 @@
 #include "../Src/OSD/SDL/SDLInputSystem.h"
 #include "../Src/Inputs/Inputs.h"
 #include "OSD/ConfigFile.h"
+#include "OSD/FileSystemPath.h"
 #include "OSD/Logger.h"
 #include "Graphics/Vulkan3D/VulkanContext.h"
 #include "Main.h"
@@ -35,6 +36,10 @@
 #include <shobjidl.h>
 #include <SDL_syswm.h>
 #include "../Src/OSD/Windows/DirectInputSystem.h"
+#endif
+
+#ifdef __APPLE__
+#include "OSX/FileDialogs.h"
 #endif
 
 /*
@@ -205,7 +210,7 @@ static void UiTextDim(const char* format, ...)
  * means a future change to how warnings look cannot silently repaint a status readout, which is what
  * would happen if each caller had its own copy of the value.
  */
-static const ImVec4 kAttentionColour(1.0f, 0.72f, 0.30f, 1.0f);
+static const ImVec4 kAttentionColour(0.620f, 0.360f, 0.000f, 1.00f); // #9E5C00 on warm paper
 
 /*
  * Warning-coloured line. Kept apart from UiTextDim so that a real problem does not read as one more
@@ -1280,6 +1285,25 @@ static std::filesystem::path PathFromUtf8(const std::string& text)
 }
 #endif
 
+/*
+ * Platform dispatch for the four pickers.
+ *
+ * Windows and macOS each have a native implementation under the same names; the remaining
+ * platforms have no picker wired up, and returning false leaves the text field as the only way to
+ * set a path (which is what the interface did before the dialogs existed).
+ */
+#if defined(__APPLE__)
+static bool BrowseFolder(SDL_Window* window, std::string& path) { return OSXFileDialogs::BrowseFolder(window, path); }
+static bool BrowseSettingsFile(SDL_Window* window, std::string& path) { return OSXFileDialogs::BrowseSettingsFile(window, path); }
+static bool BrowseImageFile(SDL_Window* window, std::string& path) { return OSXFileDialogs::BrowseImageFile(window, path); }
+static bool BrowseSaveFile(SDL_Window* window, std::string& path) { return OSXFileDialogs::BrowseSaveFile(window, path); }
+#elif !defined(_WIN32)
+static bool BrowseFolder(SDL_Window*, std::string&) { return false; }
+static bool BrowseSettingsFile(SDL_Window*, std::string&) { return false; }
+static bool BrowseImageFile(SDL_Window*, std::string&) { return false; }
+static bool BrowseSaveFile(SDL_Window*, std::string&) { return false; }
+#endif
+
 static std::string PathToUtf8(const std::filesystem::path& path)
 {
 #ifdef _WIN32
@@ -1293,7 +1317,10 @@ static std::vector<RomEntry> ScanRomFolder(const std::string& folder, const std:
 {
     std::vector<RomEntry> entries;
     std::error_code error;
-    std::filesystem::path directory = PathFromUtf8(folder);
+    // A relative setting is anchored to the executable's directory, the same convention the log and
+    // the game XML use. Without this, typing a relative path appeared to do nothing unless the
+    // program happened to have been started from exactly the right directory.
+    std::filesystem::path directory = PathFromUtf8(FileSystemPath::ResolvePath(folder));
     if (folder.empty() || !std::filesystem::is_directory(directory, error))
         return entries;
 
@@ -1618,7 +1645,7 @@ static void DrawTriggerPairingHint(Util::Config::Node& config)
     if (perTrigger == usesRz)
         return;     // consistent: RZAXIS with a per-trigger system, ZAXIS_POS with a shared one
 
-    UiTextColored(ImVec4(1.0f, 0.72f, 0.2f, 1.0f),
+    UiTextColored(kAttentionColour,
         "刹车绑定的扳机形式与当前输入系统不符，刹车会没反应。");
     UiTextDim("    当前是 %s，需要 %s（现为 %s）", system.c_str(), want, brake.c_str());
     if (UiButton("修复扳机绑定##FixTrigger"))
@@ -2270,7 +2297,7 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
             }
             else
             {
-                UiTextColored(ImVec4(1.0f, 0.72f, 0.2f, 1.0f),
+                UiTextColored(kAttentionColour,
                     "未检测到显示器的 57/58 Hz 模式，此项不可选。");
 
                 /*
@@ -2779,17 +2806,13 @@ static void DrawBezelSettings(Util::Config::Node& config, SDL_Window* window)
 		ImGui::SameLine();
 		if (UiButton("浏览##BezelBrowse", ImVec2(browseWidth, 0)))
 		{
-#ifdef _WIN32
-			std::string picked = imagePath;
+			std::string picked = FileSystemPath::ResolvePath(imagePath);
 			if (BrowseImageFile(window, picked))
 			{
 				imageShadow = picked;
 				std::snprintf(imageBuffer, sizeof(imageBuffer), "%s", picked.c_str());
 				config.Set("BezelImage", picked);
 			}
-#else
-			(void)window;
-#endif
 		}
 		UiTextDim("仅支持 PNG 格式。留空则使用内置机柜图。");
 	}
@@ -3237,7 +3260,7 @@ static bool LoadSettingsFromFile(Util::Config::Node& config, const std::string& 
         romNote = Util::Format() << Tr("ROM 目录：与当前相同（") << currentRom << Tr("）。");
         useFileRom = true;
     }
-    else if (std::filesystem::is_directory(PathFromUtf8(fileRom)))
+    else if (std::filesystem::is_directory(PathFromUtf8(FileSystemPath::ResolvePath(fileRom))))
     {
         romNote = Util::Format() << Tr("ROM 目录：已改用文件里的目录：") << fileRom;
         useFileRom = true;
@@ -3295,7 +3318,7 @@ static bool LoadSettingsFromFile(Util::Config::Node& config, const std::string& 
 
 static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<std::string, Game>& games, int& selectedGameIndex, bool& exit, bool& saveSettings, SDL_Window* window, std::shared_ptr<CInputs>& inputs, KeyBindState& kb)
 {
-    const ImVec4 clear_color = ImVec4(0.08f, 0.09f, 0.11f, 1.00f);
+    const ImVec4 clear_color = ImVec4(0.965f, 0.957f, 0.937f, 1.00f); // warm paper, matches the theme
     const std::string romPath = config["ROMPath"].ValueAs<std::string>();
     RefreshRoms(romPath, games);
     if (selectedGameIndex >= (int)g_roms.size())
@@ -3368,17 +3391,15 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
     ImGui::SameLine();
     if (UiButton("浏览", ImVec2(browseWidth, 0)))
     {
-#ifdef _WIN32
-        std::string picked = romPath;
+        // Seed the dialog with the directory the setting resolves to, so a relative value still
+        // opens the picker in the right place.
+        std::string picked = FileSystemPath::ResolvePath(romPath);
         if (BrowseFolder(window, picked))
         {
             romShadow = picked;
             std::snprintf(romBuffer, sizeof(romBuffer), "%s", picked.c_str());
             config.Set("ROMPath", picked);
         }
-#else
-        (void)window;
-#endif
     }
     ImGui::EndGroup();
     const float romRowHeight = ImGui::GetItemRectSize().y;
@@ -3392,7 +3413,7 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
 
     if (romPath.empty())
         UiText("请选择 ROM 目录。");
-    else if (!std::filesystem::is_directory(PathFromUtf8(romPath)))
+    else if (!std::filesystem::is_directory(PathFromUtf8(FileSystemPath::ResolvePath(romPath))))
         UiText("这个目录不存在。");
     else if (g_roms.empty())
         UiText("目录里没有 .zip。");
@@ -3437,7 +3458,7 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
                 const std::string rowLabel = display + "##" + entry.setName;
                 const bool dimRow = !entry.supported;
                 if (dimRow)
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.55f, 0.55f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.490f, 0.475f, 0.447f, 1.00f));
                 if (ImGui::Selectable(rowLabel.c_str(), selectedGameIndex == row, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick))
                     selectedGameIndex = row;
                 if (dimRow)
@@ -3710,12 +3731,11 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
         ImGui::SameLine();
         if (UiButton("另存为...", ImVec2(140, 0)))
         {
-#ifdef _WIN32
             // BrowseSaveFile() writes the chosen path back through its parameter, so the same
             // variable is both the suggested starting point and the result. Seeding it with the
             // settings file currently in use puts the dialog in the right folder and offers the
             // existing name, rather than dropping the user somewhere unrelated.
-            std::string target = g_settingsPath;
+            std::string target = FileSystemPath::ResolvePath(g_settingsPath);
             if (BrowseSaveFile(window, target))
             {
                 g_saveAsPath = target;
@@ -3724,7 +3744,6 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
                 g_statusNote = Tr("已保存到指定文件");
                 g_statusAt = ImGui::GetTime();
             }
-#endif
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
@@ -3738,7 +3757,6 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
         UiTextDim("会覆盖当前设置。ROM 目录只在文件里的目录存在时才会替换。");
         if (UiButton("选择文件", ImVec2(140, 0)))
         {
-#ifdef _WIN32
             std::string picked;
             if (BrowseSettingsFile(window, picked))
             {
@@ -3769,7 +3787,6 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
                     g_pendingPopup = "LoadFailed";
                 }
             }
-#endif
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
@@ -3837,9 +3854,161 @@ static float GetDPIScale(SDL_Window* window)
     return ddpi / 96.0f;
 }
 
+void ApplyUiTheme()
+{
+    ImGuiStyle& style = ImGui::GetStyle();
+    ImVec4* c = style.Colors;
+
+    /*
+     * Warm paper rather than pure white.
+     *
+     * Pure white is the obvious light-theme choice and the wrong one for a window someone keeps
+     * open in a dim room next to a running game: it glares, and every grey border becomes a hard
+     * line. A very slightly warm off-white lowers the brightness without tinting the game artwork
+     * shown alongside it, and white input fields still read as raised.
+     */
+    const ImVec4 paper      = ImVec4(0.965f, 0.957f, 0.937f, 1.00f); // #F6F4EF
+    const ImVec4 surface    = ImVec4(0.984f, 0.980f, 0.965f, 1.00f); // #FBFAF6
+    const ImVec4 popup      = ImVec4(0.992f, 0.988f, 0.973f, 1.00f); // #FDFCF8
+    const ImVec4 field      = ImVec4(1.000f, 1.000f, 1.000f, 1.00f);
+    const ImVec4 ink        = ImVec4(0.165f, 0.157f, 0.141f, 1.00f); // #2A2824
+    const ImVec4 inkDim     = ImVec4(0.490f, 0.475f, 0.447f, 1.00f); // #7D796F
+    const ImVec4 line       = ImVec4(0.867f, 0.847f, 0.808f, 1.00f); // #DDD8CE
+    const ImVec4 lineSoft   = ImVec4(0.906f, 0.890f, 0.855f, 1.00f); // #E7E3DA
+    const ImVec4 accent     = ImVec4(0.102f, 0.388f, 0.780f, 1.00f); // #1A63C7
+    const ImVec4 accentSoft = ImVec4(0.890f, 0.929f, 0.988f, 1.00f); // #E3EDFC
+    const ImVec4 hover      = ImVec4(0.941f, 0.933f, 0.914f, 1.00f); // #F0EEE9
+    const ImVec4 pressed    = ImVec4(0.902f, 0.890f, 0.863f, 1.00f); // #E6E3DC
+    const ImVec4 button     = ImVec4(0.933f, 0.922f, 0.898f, 1.00f); // #EEEBE5
+
+    c[ImGuiCol_Text]                  = ink;
+    c[ImGuiCol_TextDisabled]          = inkDim;
+    c[ImGuiCol_WindowBg]              = paper;
+    c[ImGuiCol_ChildBg]               = surface;
+    c[ImGuiCol_PopupBg]               = popup;
+    c[ImGuiCol_Border]                = line;
+    c[ImGuiCol_BorderShadow]          = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+    c[ImGuiCol_FrameBg]               = field;
+    c[ImGuiCol_FrameBgHovered]        = hover;
+    c[ImGuiCol_FrameBgActive]         = pressed;
+    c[ImGuiCol_TitleBg]               = paper;
+    c[ImGuiCol_TitleBgActive]         = paper;
+    c[ImGuiCol_TitleBgCollapsed]      = paper;
+    c[ImGuiCol_MenuBarBg]             = paper;
+    c[ImGuiCol_ScrollbarBg]           = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+    c[ImGuiCol_ScrollbarGrab]         = ImVec4(0.788f, 0.769f, 0.729f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabHovered]  = ImVec4(0.706f, 0.686f, 0.643f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabActive]   = accent;
+    c[ImGuiCol_CheckMark]             = accent;
+    c[ImGuiCol_SliderGrab]            = accent;
+    c[ImGuiCol_SliderGrabActive]      = ImVec4(0.078f, 0.310f, 0.639f, 1.00f);
+    c[ImGuiCol_Button]                = button;
+    c[ImGuiCol_ButtonHovered]         = accentSoft;
+    c[ImGuiCol_ButtonActive]          = ImVec4(0.831f, 0.886f, 0.973f, 1.00f);
+    c[ImGuiCol_Header]                = accentSoft;
+    c[ImGuiCol_HeaderHovered]         = ImVec4(0.851f, 0.902f, 0.976f, 1.00f);
+    c[ImGuiCol_HeaderActive]          = ImVec4(0.800f, 0.867f, 0.961f, 1.00f);
+    c[ImGuiCol_Separator]             = line;
+    c[ImGuiCol_SeparatorHovered]      = ImVec4(0.510f, 0.659f, 0.878f, 1.00f);
+    c[ImGuiCol_SeparatorActive]       = accent;
+    c[ImGuiCol_ResizeGrip]            = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+    c[ImGuiCol_ResizeGripHovered]     = accentSoft;
+    c[ImGuiCol_ResizeGripActive]      = accent;
+    c[ImGuiCol_InputTextCursor]       = ink;
+    c[ImGuiCol_TabHovered]            = accentSoft;
+    c[ImGuiCol_Tab]                   = button;
+    c[ImGuiCol_TabSelected]           = surface;
+    c[ImGuiCol_TabSelectedOverline]   = accent;
+    c[ImGuiCol_TabDimmed]             = ImVec4(0.949f, 0.941f, 0.922f, 1.00f);
+    c[ImGuiCol_TabDimmedSelected]     = surface;
+    c[ImGuiCol_TabDimmedSelectedOverline] = ImVec4(0.710f, 0.686f, 0.635f, 1.00f);
+    c[ImGuiCol_PlotLines]             = accent;
+    c[ImGuiCol_PlotLinesHovered]      = ImVec4(0.078f, 0.310f, 0.639f, 1.00f);
+    c[ImGuiCol_PlotHistogram]         = accent;
+    c[ImGuiCol_PlotHistogramHovered]  = ImVec4(0.078f, 0.310f, 0.639f, 1.00f);
+    c[ImGuiCol_TableHeaderBg]         = ImVec4(0.941f, 0.933f, 0.914f, 1.00f);
+    c[ImGuiCol_TableBorderStrong]     = line;
+    c[ImGuiCol_TableBorderLight]      = lineSoft;
+    c[ImGuiCol_TableRowBg]            = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+    c[ImGuiCol_TableRowBgAlt]         = ImVec4(0.165f, 0.157f, 0.141f, 0.035f);
+    c[ImGuiCol_TextLink]              = accent;
+    c[ImGuiCol_TextSelectedBg]        = ImVec4(0.812f, 0.878f, 0.973f, 1.00f);
+    c[ImGuiCol_TreeLines]             = line;
+    c[ImGuiCol_DragDropTarget]        = accent;
+    c[ImGuiCol_DragDropTargetBg]      = ImVec4(0.102f, 0.388f, 0.780f, 0.15f);
+    c[ImGuiCol_UnsavedMarker]         = accent;
+    c[ImGuiCol_NavCursor]             = accent;
+    c[ImGuiCol_NavWindowingHighlight] = ImVec4(0.102f, 0.388f, 0.780f, 0.70f);
+    c[ImGuiCol_NavWindowingDimBg]     = ImVec4(0.100f, 0.090f, 0.080f, 0.20f);
+    c[ImGuiCol_ModalWindowDimBg]      = ImVec4(0.100f, 0.090f, 0.080f, 0.28f);
+
+    // Airy but not loose: more spacing than ImGui's defaults, which are tuned for dense tool UIs.
+    style.WindowPadding = ImVec2(20.0f, 18.0f);
+    style.FramePadding = ImVec2(12.0f, 7.0f);
+    style.CellPadding = ImVec2(10.0f, 8.0f);
+    style.ItemSpacing = ImVec2(12.0f, 9.0f);
+    style.ItemInnerSpacing = ImVec2(8.0f, 6.0f);
+    style.IndentSpacing = 20.0f;
+    style.ScrollbarSize = 12.0f;
+    style.GrabMinSize = 12.0f;
+
+    style.WindowBorderSize = 0.0f;
+    style.ChildBorderSize = 1.0f;
+    style.PopupBorderSize = 1.0f;
+    style.FrameBorderSize = 0.0f;
+    style.TabBorderSize = 0.0f;
+    style.TabBarBorderSize = 0.0f;
+    style.TabBarOverlineSize = 2.0f;
+
+    style.WindowRounding = 14.0f;
+    style.ChildRounding = 12.0f;
+    style.FrameRounding = 8.0f;
+    style.PopupRounding = 12.0f;
+    style.ScrollbarRounding = 8.0f;
+    style.GrabRounding = 8.0f;
+    style.TabRounding = 9.0f;
+
+    style.WindowTitleAlign = ImVec2(0.0f, 0.5f);
+    style.SeparatorTextBorderSize = 1.0f;
+    style.SeparatorTextAlign = ImVec2(0.0f, 0.5f);
+    style.SeparatorTextPadding = ImVec2(0.0f, 8.0f);
+    style.SelectableTextAlign = ImVec2(0.0f, 0.0f);
+    style.DisabledAlpha = 0.45f;
+}
+
+/*
+ * Glyph ranges shared by every platform.
+ *
+ * The common-Chinese table covers the 2,500 characters the interface mostly uses, but not the
+ * arrows and geometric marks in the explanatory text, and not a handful of technical characters
+ * (frame, grille, phosphor, threshold...). Those used to render as the fallback '?' on Windows for
+ * the same reason; asking for them explicitly costs nothing in atlas size.
+ */
+static const ImWchar* UiGlyphRanges(ImFontAtlas* atlas)
+{
+    static ImVector<ImWchar> ranges;
+    if (ranges.empty())
+    {
+        ImFontGlyphRangesBuilder builder;
+        builder.AddRanges(atlas->GetGlyphRangesChineseSimplifiedCommon());
+        builder.AddText("←↑→↓↔↕·—–…×○□△▲▼●◆★☆✓✔✕⚠");
+        // The interface characters absent from the common-2,500 table. Written as universal
+        // character names rather than as the characters themselves so the translation audit does
+        // not mistake this lookup data for an untranslated label.
+        builder.AddText("\u5239\u576A\u5C4F\u5E27\u6208\u6273\u62DF\u64CE\u6749\u6756\u679A\u6805\u6D1B\u6D4F\u6E32\u6FB3\u73D1\u77F6\u8367\u836B\u8C15\u8F74\u94AE\u9608\u9891\u9988");
+        builder.BuildRanges(&ranges);
+    }
+    return ranges.Data;
+}
+
 void LoadUiFont(ImGuiIO& io, float scale)
 {
     const float size = 18.0f * scale;
+
+    // One CJK-capable file per platform, picked for a clean interface look. All three are UI faces
+    // rather than document faces: PingFang on macOS, Microsoft YaHei on Windows, Noto Sans CJK on
+    // Linux. The interface is otherwise entirely custom-drawn, so there is nothing to match
+    // metrically - only the text has to be readable and to have Chinese glyphs.
 #ifdef _WIN32
     const char* paths[] = {
         "C:\\Windows\\Fonts\\msyh.ttc",
@@ -3847,16 +4016,45 @@ void LoadUiFont(ImGuiIO& io, float scale)
         "C:\\Windows\\Fonts\\simhei.ttf",
         "C:\\Windows\\Fonts\\simsun.ttc",
     };
+#elif defined(__APPLE__)
+    const char* paths[] = {
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/STHeiti Medium.ttc",
+        "/System/Library/Fonts/STHeiti Light.ttc",
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        "/Library/Fonts/Arial Unicode.ttf",
+    };
+#else
+    const char* paths[] = {
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/wqy-microhei/wqy-microhei.ttc",
+        "/usr/share/fonts/wqy-zenhei/wqy-zenhei.ttc",
+    };
+#endif
+
+    const ImWchar* ranges = UiGlyphRanges(io.Fonts);
+
     for (const char* path : paths)
     {
         if (!std::filesystem::exists(path))
             continue;
+
         ImFontConfig cfg;
-        cfg.FontNo = 0;
-        if (io.Fonts->AddFontFromFileTTF(path, size, &cfg, io.Fonts->GetGlyphRangesChineseSimplifiedCommon()))
+        cfg.FontNo = 0;              // first face in a .ttc; PingFang.ttc starts with SC Regular
+        cfg.OversampleH = 2;
+        cfg.OversampleV = 1;
+        cfg.PixelSnapH = false;
+        if (io.Fonts->AddFontFromFileTTF(path, size, &cfg, ranges))
             return;
     }
-#endif
+
     io.Fonts->AddFontDefaultVector();
 }
 
@@ -3885,11 +4083,53 @@ GuiState* GuiCreate(const std::string& configPath, const Util::Config::Node& fil
     state->fullConfig = fileConfig;
     Util::Config::MergeINISections(&state->config, DefaultConfig(), state->fullConfig);
 
+    /*
+     * A settings file written before this build recorded the old Windows default, "C:/Downloads".
+     * On macOS that is a relative path that does not exist, so the game list started out empty and
+     * the reason was invisible. Replace that one value - and only that one - with the ROMs folder
+     * next to the executable; a path the user chose deliberately is left alone even when the volume
+     * is temporarily unavailable.
+     */
+#if defined(__APPLE__)
+    {
+        const std::string configured = state->config["ROMPath"].ValueAsDefault<std::string>("");
+        std::string trimmed = configured;
+        while (!trimmed.empty() && (trimmed.back() == ' ' || trimmed.back() == '\t'))
+            trimmed.pop_back();
+        const std::string lower = ToLowerAscii(trimmed);
+        // A drive-letter path can never name anything on this platform. Treating it as a stale
+        // setting covers both the old stock default (C:/Downloads) and a configuration file copied
+        // over from a Windows machine.
+        const bool windowsDrivePath = lower.size() >= 2 && lower[1] == ':' &&
+            lower[0] >= 'a' && lower[0] <= 'z';
+        std::error_code error;
+        const bool usable = !trimmed.empty() &&
+            std::filesystem::is_directory(PathFromUtf8(FileSystemPath::ResolvePath(trimmed)), error) && !error;
+        if (!usable && (trimmed.empty() || windowsDrivePath))
+        {
+            const std::string fallback = FileSystemPath::GetDefaultRomPath();
+            if (!fallback.empty())
+            {
+                state->config.Set("ROMPath", fallback);
+                // Also correct the copy that is written back when the window is merely closed, so
+                // the repair survives even without an explicit save.
+                state->fullConfig.Set("ROMPath", fallback);
+            }
+        }
+    }
+#endif
+
     SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "system");
     if (SDL_Init(SDL_INIT_VIDEO) < 0) {
         std::cerr << "SDL could not initialize! Error: " << SDL_GetError() << std::endl;
         return nullptr;
     }
+
+#ifdef __APPLE__
+    // SDL has created NSApplication by now. The interface is always the light theme, so make the
+    // native title bar and the file pickers light as well instead of following Dark Mode.
+    OSXFileDialogs::ApplyLightAppearance();
+#endif
 
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
@@ -4011,7 +4251,7 @@ GuiState* GuiCreate(const std::string& configPath, const Util::Config::Node& fil
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     ImGui::GetIO().IniFilename = nullptr;
-    ImGui::StyleColorsDark();
+    ApplyUiTheme();
 
     float scale = GetDPIScale(state->window);
     if (scale < 1.0f)

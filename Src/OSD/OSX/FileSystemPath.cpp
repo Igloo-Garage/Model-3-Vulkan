@@ -20,7 +20,14 @@
  **/
 
 #include "FileSystemPath.h"
+#include <cerrno>
+#include <climits>
+#include <cstdint>
+#include <cstdlib>
 #include <string>
+#include <sys/param.h>
+#include <sys/stat.h>
+#include <mach-o/dyld.h>
 
 namespace FileSystemPath
 {
@@ -46,15 +53,74 @@ namespace FileSystemPath
         }
     }
 
-    // Relative paths are left exactly as they were: this platform has no single installation
-    // directory, so the historical working-directory behaviour is the correct one here.
+    /*
+     * Anchors relative paths to the directory holding the executable.
+     *
+     * The release archive is a plain folder rather than a .app bundle, and it can be started from
+     * any working directory - from a terminal somewhere else, or through a launcher. Leaving a
+     * relative path relative to the working directory meant the same setting named different files
+     * depending on how the program was started. That is what made a typed relative ROM path appear
+     * to do nothing: it was looked for under whatever directory the shell happened to be in.
+     *
+     * An absolute path is returned unchanged, and so is a relative one when the executable's
+     * location cannot be determined.
+     */
     std::string ResolvePath(const std::string& path)
     {
-        return path;
+        if (path.empty() || path[0] == '/')
+            return path;
+
+        const std::string base = GetBasePath();
+        if (base.empty())
+            return path;
+
+        return base + path;
     }
 
+    // Directory holding the executable, with a trailing separator. Computed once: the executable
+    // cannot move while the process is running. _NSGetExecutablePath may return a symlinked path,
+    // so realpath() resolves it first; otherwise the "ROMs" folder would be created next to the
+    // symlink rather than next to the real binary.
     std::string GetBasePath()
     {
-        return "";
+        static const std::string base = []() -> std::string
+        {
+            char raw[PATH_MAX];
+            uint32_t size = sizeof(raw);
+            if (_NSGetExecutablePath(raw, &size) != 0)
+                return "";
+
+            char resolved[PATH_MAX];
+            const char* real = realpath(raw, resolved);
+            if (real == nullptr)
+                return "";
+
+            std::string path(real);
+            const size_t slash = path.find_last_of('/');
+            if (slash == std::string::npos)
+                return "";
+
+            return path.substr(0, slash + 1);
+        }();
+        return base;
+    }
+
+    std::string GetDefaultRomPath()
+    {
+        static const std::string roms = []() -> std::string
+        {
+            const std::string base = GetBasePath();
+            if (!base.empty())
+            {
+                // EEXIST is the normal case; a real failure is reported by the settings window as
+                // a missing directory rather than being hidden here.
+                (void)mkdir((base + "ROMs/").c_str(), 0775);
+            }
+
+            // Stored as a relative path on purpose: ResolvePath() anchors it to the executable's
+            // directory, so the whole folder can be moved without breaking the setting.
+            return "ROMs/";
+        }();
+        return roms;
     }
 }

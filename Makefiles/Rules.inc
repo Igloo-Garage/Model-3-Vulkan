@@ -418,6 +418,16 @@ $(OBJ_DIR)/%.o:	%.c | $(OBJ_DIR)
 	$(SILENT)$(CC) $(CFLAGS) $< -o $@
 
 #
+# Objective-C++ source files (the macOS file dialogs). A separate rule is needed because the %.cpp
+# rule only matches that extension; the compiler picks the language from the .mm extension itself.
+#
+$(OBJ_DIR)/%.o:	%.mm | $(OBJ_DIR)
+	$(info Generating dependencies: $< -> $(OBJ_DIR)/$(*F).d)
+	$(SILENT)$(CXX) -MM -MP -MT $(OBJ_DIR)/$(*F).o -MT $(OBJ_DIR)/$(*F).d $(CXXFLAGS_GENERATE_DEPENDENCIES) $< > $(OBJ_DIR)/$(*F).d
+	$(info Compiling              : $< -> $@)
+	$(SILENT)$(CXX) $(CXXFLAGS) $< -o $@
+
+#
 # Musashi 68K emulator
 #
 # All generated source files are emitted to the object directory. For MSVC,

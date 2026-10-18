@@ -96,7 +96,8 @@ endif
 ###############################################################################
 
 PLATFORM_SRC_FILES = \
-	Src/OSD/OSX/FileSystemPath.cpp
+	Src/OSD/OSX/FileSystemPath.cpp \
+	Src/OSD/OSX/FileDialogs.mm
 
 include Makefiles/Rules.inc
 
