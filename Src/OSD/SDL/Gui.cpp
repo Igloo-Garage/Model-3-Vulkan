@@ -3540,6 +3540,13 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
             UpdateTempValues(config, "Core", true);
             CreateControls(config, "Core");
             UpdateTempValues(config, "Core", false);
+
+            // The advanced rendering options used to live on their own tab. They are part of the
+            // same "how the emulator runs" decision as the core settings, and a separate page made
+            // them easy to miss, so they now sit below the core controls under their own heading.
+            UiSep("高级设置");
+            DrawAdvancedSettingsPanel(config, false);
+
             ImGui::EndTabItem();
             inputs = nullptr;
         }
@@ -3640,13 +3647,6 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
             UiTextDim("双击一行来修改。选中左边的游戏后，这里只显示那款游戏用到的按键。");
             UiTextDim("手柄编号：1=A/× 2=B/○ 3=X/□ 4=Y/△ 5=LB 6=RB 7=Back/Select 8=Start");
             ImGui::EndTabItem();
-        }
-        if (UiTabItem("高级设置"))
-        {
-            // overlayMode false: the settings window keeps the MSAA control and the (?) help markers.
-            DrawAdvancedSettingsPanel(config, false);
-            ImGui::EndTabItem();
-            inputs = nullptr;
         }
         ImGui::EndTabBar();
     }
