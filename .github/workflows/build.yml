@@ -99,6 +99,11 @@ jobs:
             grep -E 'error:|fatal error|Error [0-9]|undefined reference' build.log | head -20 | while IFS= read -r line; do
               echo "::error::$line"
             done
+            if ! grep -qE 'error:|fatal error|Error [0-9]|undefined reference' build.log; then
+              tail -20 build.log | while IFS= read -r line; do
+                echo "::error::$line"
+              done
+            fi
             exit $status
           fi
 
