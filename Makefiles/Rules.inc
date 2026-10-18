@@ -265,7 +265,7 @@ release:: all
 #
 # Github release flow (not yet used).
 #
-PKG_FILES += $(BIN_DIR)/$(SUPERMODEL_BINARY) Docs/README.txt Docs/LICENSE.txt Config Assets
+PKG_FILES += $(BIN_DIR)/$(SUPERMODEL_BINARY) Docs/README.txt Docs/README-VK.txt Docs/LICENSE.txt Config Assets
 
 pkg: pkg/$(PKG_TYPE)
 	$(info Cleaning up            : $(PKG_STAGE_PATH))
@@ -295,8 +295,27 @@ pkg/stage:: pkg/path
 	$(info Generating             : $(PKG_STAGE_PATH)/CHANGES.txt)
 	$(SILENT)./Scripts/changelog.sh $(PKG_STAGE_PATH)/CHANGES.txt
 
+#
+# The folder inside the archive is named after the fork. VERSION is the upstream core version and is
+# also compiled into SUPERMODEL_VERSION, which is written into save states, so it must not be used
+# for the distribution folder.
+#
+FORK_VERSION := $(shell sed -n 's/^#define[[:space:]]*SUPERMODEL_FORK_VERSION[[:space:]]*"\([^"]*\)".*/\1/p' Src/Version.h)
+FORK_DATE := $(shell sed -n 's/^#define[[:space:]]*SUPERMODEL_FORK_DATE[[:space:]]*"\([^"]*\)".*/\1/p' Src/Version.h)
+
+ifeq ($(strip $(FORK_VERSION)),)
+	# sed unavailable (e.g. a bare cmd.exe MinGW build): keep the old name rather than an empty one.
+	PKG_STAGE_NAME = supermodel-$(VERSION)
+else
+	ifeq ($(strip $(FORK_DATE)),)
+		PKG_STAGE_NAME = Supermodel-VK.v$(FORK_VERSION)
+	else
+		PKG_STAGE_NAME = Supermodel-VK.v$(FORK_VERSION)-$(FORK_DATE)
+	endif
+endif
+
 pkg/path: set_version
-	$(eval PKG_STAGE_PATH = pkg/supermodel-$(VERSION))
+	$(eval PKG_STAGE_PATH = pkg/$(PKG_STAGE_NAME))
 	$(eval PKG_PATH = pkg/supermodel-$(VERSION).$(PKG_TYPE))
 	@echo $(PKG_PATH)
 

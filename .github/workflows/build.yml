@@ -97,6 +97,34 @@ jobs:
             exit $status
           fi
 
+      - name: Verify macOS universal binary
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          lipo -info bin/supermodel | tee /tmp/lipo.txt
+          if ! grep -q x86_64 /tmp/lipo.txt || ! grep -q arm64 /tmp/lipo.txt; then
+            {
+              echo "### macOS binary is not universal"
+              echo '```'
+              cat /tmp/lipo.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          MINOS=$(otool -l bin/supermodel | awk '/minos/ {print $2; exit}')
+          echo "macOS deployment target: $MINOS"
+          case "$MINOS" in
+            10.*|11.*) ;;
+            *)
+              {
+                echo "### macOS deployment target is too new"
+                echo '```'
+                echo "minos: $MINOS"
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+              ;;
+          esac
+
       # Only reached when the build above failed: the compile log is otherwise unreadable without
       # admin rights on the repository (the job-log API refuses, and the web UI is a browser).
       - name: Upload build log
@@ -159,6 +187,28 @@ jobs:
           
           PKG_FILE="${PKG_FILES[0]}"
           echo "Found package: $PKG_FILE"
+
+          # The archive must contain the fork-named folder, not the upstream-style one the
+          # makefile used before. Checked here so a regression shows up in CI instead of in a
+          # downloaded archive.
+          if [[ "$PKG_FILE" == *.zip ]]; then
+            FIRST_ENTRY=$(unzip -Z1 "$PKG_FILE" | head -1)
+          else
+            FIRST_ENTRY=$(tar -tzf "$PKG_FILE" | head -1)
+          fi
+          echo "First archive entry: $FIRST_ENTRY"
+          case "$FIRST_ENTRY" in
+            Supermodel-VK.v*) ;;
+            *)
+              {
+                echo "### Unexpected top-level folder in the package"
+                echo '```'
+                echo "$FIRST_ENTRY"
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+              ;;
+          esac
           
           # This fork has its own version and date in Src/Version.h. Do not use `make version`
           # here: that target reports the upstream core version, which is also compiled into
