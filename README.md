@@ -130,6 +130,12 @@ A binary downloaded or built elsewhere needs one-time execution permission: righ
 Finder, choose **Open**, and confirm. See
 <https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unidentified-developer-mh40616/mac>.
 
+The macOS release is a universal binary (Apple Silicon and Intel), but it is packaged as a bare
+Unix executable rather than a `.app`. Keep `supermodel` in the extracted folder next to
+`Frameworks/`, open Terminal there, and run `./supermodel`. Vulkan 3D additionally requires
+MoltenVK (`brew install molten-vk`); without it the emulator falls back to the OpenGL New 3D
+renderer.
+
 ### Shaders
 
 The Vulkan shaders are compiled to SPIR-V by `Scripts/CompileVulkanShaders.cmd` (Windows) or
