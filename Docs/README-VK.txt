@@ -203,8 +203,10 @@ vulkan-1.dll, which is installed by the GPU driver.
 On macOS the package is a bare `supermodel` executable (universal,
 Apple Silicon and Intel) rather than an `.app`. Run it from Terminal in
 the extracted folder so it can find `Frameworks/` and `Config/`.
-Vulkan 3D needs MoltenVK (`brew install molten-vk`); without it the
-emulator falls back to the OpenGL New 3D renderer.
+Vulkan 3D needs MoltenVK (`brew install molten-vk`); the Homebrew
+locations are found automatically, so no environment variables are
+needed. Without it the emulator falls back to the OpenGL New 3D
+renderer.
 
 ------------------------------------------------------------------------
 QUICK START
