@@ -93,6 +93,20 @@ VkResult volkInitialize(void)
 	// Vulkan SDK uses this as the system-wide installation location, so we're going to fallback to this if all else fails
 	if (!module && getenv("DYLD_FALLBACK_LIBRARY_PATH") == NULL)
 		module = dlopen("/usr/local/lib/libvulkan.dylib", RTLD_NOW | RTLD_LOCAL);
+	// Homebrew installs MoltenVK under /opt/homebrew/lib on Apple Silicon and /usr/local/lib on
+	// Intel; dlopen does not search either directory on current macOS. Loading MoltenVK directly
+	// is enough - it exposes the Vulkan entry points itself - and saves the user from setting
+	// DYLD_LIBRARY_PATH and VK_ICD_FILENAMES by hand.
+	if (!module)
+		module = dlopen("/opt/homebrew/lib/libvulkan.dylib", RTLD_NOW | RTLD_LOCAL);
+	if (!module)
+		module = dlopen("/opt/homebrew/lib/libvulkan.1.dylib", RTLD_NOW | RTLD_LOCAL);
+	if (!module)
+		module = dlopen("/usr/local/lib/libvulkan.1.dylib", RTLD_NOW | RTLD_LOCAL);
+	if (!module)
+		module = dlopen("/opt/homebrew/lib/libMoltenVK.dylib", RTLD_NOW | RTLD_LOCAL);
+	if (!module)
+		module = dlopen("/usr/local/lib/libMoltenVK.dylib", RTLD_NOW | RTLD_LOCAL);
 	if (!module)
 		return VK_ERROR_INITIALIZATION_FAILED;
 
