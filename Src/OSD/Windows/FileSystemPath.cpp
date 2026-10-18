@@ -185,6 +185,13 @@ namespace FileSystemPath
         return BasePath();
     }
 
+    // Windows keeps the historical default: a romset that was just downloaded is usually still in
+    // the Downloads folder, and an existing Supermodel.ini keeps whatever the user chose anyway.
+    std::string GetDefaultRomPath()
+    {
+        return "C:/Downloads";
+    }
+
     std::string ResolvePath(const std::string& path)
     {
         if (IsAbsolute(path))
