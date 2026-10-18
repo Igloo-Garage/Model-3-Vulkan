@@ -300,8 +300,11 @@ pkg/stage:: pkg/path
 # also compiled into SUPERMODEL_VERSION, which is written into save states, so it must not be used
 # for the distribution folder.
 #
-FORK_VERSION := $(shell sed -n 's/^#define[[:space:]]*SUPERMODEL_FORK_VERSION[[:space:]]*"\([^"]*\)".*/\1/p' Src/Version.h)
-FORK_DATE := $(shell sed -n 's/^#define[[:space:]]*SUPERMODEL_FORK_DATE[[:space:]]*"\([^"]*\)".*/\1/p' Src/Version.h)
+# The sed address deliberately avoids the leading '#' of the #define line: GNU Make 3.81 (macOS)
+# treats any '#' inside $(shell ...) as the start of a comment, truncates the line and fails with
+# "unterminated variable reference". Matching "define ... NAME" avoids the character entirely.
+FORK_VERSION := $(shell sed -n '/define[[:space:]][[:space:]]*SUPERMODEL_FORK_VERSION[[:space:]][[:space:]]*"/ s/.*"\([^"]*\)".*/\1/p' Src/Version.h)
+FORK_DATE := $(shell sed -n '/define[[:space:]][[:space:]]*SUPERMODEL_FORK_DATE[[:space:]][[:space:]]*"/ s/.*"\([^"]*\)".*/\1/p' Src/Version.h)
 
 ifeq ($(strip $(FORK_VERSION)),)
 # sed unavailable (e.g. a bare cmd.exe MinGW build): keep the old name rather than an empty one.
