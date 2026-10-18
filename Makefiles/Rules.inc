@@ -83,8 +83,10 @@ COMMON_CFLAGS = -c $(ARCH) $(OPT) $(WARN) $(addprefix -I,$(sort $(INCLUDE_DIRS))
 CFLAGS = $(COMMON_CFLAGS) $(CSTD)
 CXXFLAGS = $(PLATFORM_CXXFLAGS) $(COMMON_CFLAGS) $(CXXSTD)
 LDFLAGS = -o $(BIN_DIR)/$(SUPERMODEL_BINARY) $(PLATFORM_LDFLAGS) $(LDOPT)
-CFLAGS_GENERATE_DEPENDENCIES = $(filter-out -c,$(CFLAGS))	# remove -c because clang will warn
-CXXFLAGS_GENERATE_DEPENDENCIES = $(filter-out -c,$(CXXFLAGS))
+# Remove -c because clang will warn, and remove the whole ARCH sequence: clang refuses dependency
+# output with multiple -arch options, and the dependency file is architecture-independent anyway.
+CFLAGS_GENERATE_DEPENDENCIES = $(filter-out -c $(ARCH),$(CFLAGS))
+CXXFLAGS_GENERATE_DEPENDENCIES = $(filter-out -c $(ARCH),$(CXXFLAGS))
 
 
 ###############################################################################
