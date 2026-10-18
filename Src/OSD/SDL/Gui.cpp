@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <map>
@@ -1320,9 +1321,10 @@ static std::filesystem::path PathFromUtf8(const std::string& text)
 /*
  * Platform dispatch for the four pickers.
  *
- * Windows and macOS each have a native implementation under the same names; the remaining
- * platforms have no picker wired up, and returning false leaves the text field as the only way to
- * set a path (which is what the interface did before the dialogs existed).
+ * Windows and macOS each have a native implementation under the same names. Linux has no portable
+ * dialog API and the emulator does not want a GTK or Qt dependency, so it asks the two command-line
+ * front ends that desktop environments provide: zenity (GTK) and kdialog (KDE). If neither is
+ * installed, the text field remains the only way to set a path, exactly as before.
  */
 #if defined(__APPLE__)
 static bool BrowseFolder(SDL_Window* window, std::string& path) { return OSXFileDialogs::BrowseFolder(window, path); }
@@ -1330,10 +1332,147 @@ static bool BrowseSettingsFile(SDL_Window* window, std::string& path) { return O
 static bool BrowseImageFile(SDL_Window* window, std::string& path) { return OSXFileDialogs::BrowseImageFile(window, path); }
 static bool BrowseSaveFile(SDL_Window* window, std::string& path) { return OSXFileDialogs::BrowseSaveFile(window, path); }
 #elif !defined(_WIN32)
-static bool BrowseFolder(SDL_Window*, std::string&) { return false; }
-static bool BrowseSettingsFile(SDL_Window*, std::string&) { return false; }
-static bool BrowseImageFile(SDL_Window*, std::string&) { return false; }
-static bool BrowseSaveFile(SDL_Window*, std::string&) { return false; }
+enum class DialogTool { None, Zenity, KDialog };
+
+static DialogTool DetectDialogTool()
+{
+    static const DialogTool tool = []() -> DialogTool
+    {
+        if (std::system("command -v zenity >/dev/null 2>&1") == 0)
+            return DialogTool::Zenity;
+        if (std::system("command -v kdialog >/dev/null 2>&1") == 0)
+            return DialogTool::KDialog;
+        return DialogTool::None;
+    }();
+    return tool;
+}
+
+// Single-quotes an argument for /bin/sh. The dialogs receive titles and paths that may contain
+// spaces, and a path may contain a quote; the '\'' sequence is the POSIX way to include one.
+static std::string ShellQuote(const std::string& text)
+{
+    std::string quoted = "'";
+    for (char c : text)
+    {
+        if (c == '\'')
+            quoted += "'\\''";
+        else
+            quoted += c;
+    }
+    quoted += "'";
+    return quoted;
+}
+
+static std::string RunDialogCommand(const std::string& command, int& status)
+{
+    status = -1;
+    if (command.empty())
+        return {};
+
+    FILE* pipe = popen(command.c_str(), "r");
+    if (pipe == nullptr)
+        return {};
+
+    std::string output;
+    char buffer[4096];
+    while (fgets(buffer, sizeof(buffer), pipe) != nullptr)
+        output += buffer;
+    status = pclose(pipe);
+
+    while (!output.empty() && (output.back() == '\n' || output.back() == '\r'))
+        output.pop_back();
+    return output;
+}
+
+static bool BrowseWithDialog(const std::string& command, std::string& path)
+{
+    int status = -1;
+    const std::string picked = RunDialogCommand(command, status);
+    if (status != 0 || picked.empty())
+        return false;
+
+    path = picked;
+    return true;
+}
+
+static bool BrowseFolder(SDL_Window*, std::string& path)
+{
+    const DialogTool tool = DetectDialogTool();
+    const std::string title = Tr("选择 Model 3 ROM 目录");
+    if (tool == DialogTool::Zenity)
+    {
+        std::string command = "zenity --file-selection --directory --title=" + ShellQuote(title);
+        if (!path.empty())
+            command += " --filename=" + ShellQuote(path + "/");
+        return BrowseWithDialog(command, path);
+    }
+    if (tool == DialogTool::KDialog)
+    {
+        const std::string command = "kdialog --getexistingdirectory " +
+            ShellQuote(path.empty() ? "." : path) + " --title " + ShellQuote(title);
+        return BrowseWithDialog(command, path);
+    }
+    return false;
+}
+
+static bool BrowseSettingsFile(SDL_Window*, std::string& path)
+{
+    const DialogTool tool = DetectDialogTool();
+    const std::string title = Tr("选择要载入的设置文件");
+    if (tool == DialogTool::Zenity)
+        return BrowseWithDialog("zenity --file-selection --title=" + ShellQuote(title), path);
+
+    if (tool == DialogTool::KDialog)
+    {
+        const std::string command = "kdialog --getopenfilename " +
+            ShellQuote(path.empty() ? "." : path) + " --title " + ShellQuote(title);
+        return BrowseWithDialog(command, path);
+    }
+    return false;
+}
+
+static bool BrowseImageFile(SDL_Window*, std::string& path)
+{
+    const DialogTool tool = DetectDialogTool();
+    const std::string title = Tr("选择背景图片（仅支持 PNG）");
+    if (tool == DialogTool::Zenity)
+    {
+        std::string command = "zenity --file-selection --title=" + ShellQuote(title) +
+            " --file-filter=" + ShellQuote(std::string(Tr("PNG 图片 (*.png)")) + " | *.png");
+        if (!path.empty())
+            command += " --filename=" + ShellQuote(path);
+        return BrowseWithDialog(command, path);
+    }
+    if (tool == DialogTool::KDialog)
+    {
+        const std::string command = "kdialog --getopenfilename " +
+            ShellQuote(path.empty() ? "." : path) + " " +
+            ShellQuote(std::string(Tr("PNG 图片 (*.png)")) + "|*.png") +
+            " --title " + ShellQuote(title);
+        return BrowseWithDialog(command, path);
+    }
+    return false;
+}
+
+static bool BrowseSaveFile(SDL_Window*, std::string& path)
+{
+    const DialogTool tool = DetectDialogTool();
+    const std::string title = Tr("设置另存为");
+    const std::string suggested = path.empty() ? std::string("Supermodel.ini") : path;
+    if (tool == DialogTool::Zenity)
+    {
+        return BrowseWithDialog("zenity --file-selection --save --title=" + ShellQuote(title) +
+            " --filename=" + ShellQuote(suggested), path);
+    }
+    if (tool == DialogTool::KDialog)
+    {
+        const std::string command = "kdialog --getsavefilename " + ShellQuote(suggested) + " " +
+            ShellQuote(std::string(Tr("Supermodel 设置 (*.ini)")) + "|*.ini") +
+            " --title " + ShellQuote(title);
+        return BrowseWithDialog(command, path);
+    }
+    return false;
+}
 #endif
 
 static std::string PathToUtf8(const std::filesystem::path& path)
@@ -4033,6 +4172,35 @@ static const ImWchar* UiGlyphRanges(ImFontAtlas* atlas)
     return ranges.Data;
 }
 
+#if !defined(_WIN32) && !defined(__APPLE__)
+/*
+ * Asks Fontconfig for a Simplified Chinese sans-serif face.
+ *
+ * The short list below covers the usual Noto and WenQuanYi locations, but a distribution is free to
+ * install its CJK fonts anywhere. Fontconfig already knows where they are - it is what the desktop
+ * itself uses - so querying it catches those layouts without linking against Fontconfig or
+ * shipping a font. Returns an empty string when fc-match is not installed or finds nothing.
+ */
+static std::string FindCjkFontWithFontconfig()
+{
+    FILE* pipe = popen("fc-match -f '%{file}' 'sans-serif:lang=zh-cn' 2>/dev/null", "r");
+    if (pipe == nullptr)
+        return {};
+
+    std::string path;
+    char buffer[1024];
+    while (fgets(buffer, sizeof(buffer), pipe) != nullptr)
+        path += buffer;
+
+    if (pclose(pipe) != 0)
+        return {};
+
+    while (!path.empty() && (path.back() == '\n' || path.back() == '\r' || path.back() == ' '))
+        path.pop_back();
+    return path;
+}
+#endif
+
 void LoadUiFont(ImGuiIO& io, float scale)
 {
     const float size = 18.0f * scale;
@@ -4073,19 +4241,30 @@ void LoadUiFont(ImGuiIO& io, float scale)
 
     const ImWchar* ranges = UiGlyphRanges(io.Fonts);
 
-    for (const char* path : paths)
+    auto addFont = [&](const char* path) -> bool
     {
-        if (!std::filesystem::exists(path))
-            continue;
+        if (path == nullptr || path[0] == '\0' || !std::filesystem::exists(path))
+            return false;
 
         ImFontConfig cfg;
         cfg.FontNo = 0;              // first face in a .ttc; PingFang.ttc starts with SC Regular
         cfg.OversampleH = 2;
         cfg.OversampleV = 1;
         cfg.PixelSnapH = false;
-        if (io.Fonts->AddFontFromFileTTF(path, size, &cfg, ranges))
+        return io.Fonts->AddFontFromFileTTF(path, size, &cfg, ranges) != nullptr;
+    };
+
+    for (const char* path : paths)
+        if (addFont(path))
             return;
-    }
+
+#if !defined(_WIN32) && !defined(__APPLE__)
+    // Tried last: a known-good Noto/WenQuanYi path wins, and an absent Fontconfig just returns an
+    // empty string. This is what catches a distribution that installs its CJK fonts elsewhere.
+    const std::string fontconfigFont = FindCjkFontWithFontconfig();
+    if (addFont(fontconfigFont.c_str()))
+        return;
+#endif
 
     io.Fonts->AddFontDefaultVector();
 }
