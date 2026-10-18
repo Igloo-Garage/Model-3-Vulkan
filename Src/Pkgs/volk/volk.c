@@ -18,7 +18,12 @@
 #endif
 
 #ifdef __APPLE__
+#	include <limits.h>
+#	include <mach-o/dyld.h>
+#	include <stdint.h>
+#	include <stdio.h>
 #	include <stdlib.h>
+#	include <string.h>
 #endif
 
 #ifdef __cplusplus
@@ -78,7 +83,34 @@ VkResult volkInitialize(void)
 	// note: function pointer is cast through void function pointer to silence cast-function-type warning on gcc8
 	vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)(void(*)(void))GetProcAddress(module, "vkGetInstanceProcAddr");
 #elif defined(__APPLE__)
-	void* module = dlopen("libvulkan.dylib", RTLD_NOW | RTLD_LOCAL);
+	void* module = NULL;
+
+	/*
+	 * The macOS release bundles MoltenVK in Frameworks/ next to the executable, so Vulkan works
+	 * without Homebrew or the Vulkan SDK. Try that first; the paths below are fallbacks for
+	 * developers and for installations that predate the bundle.
+	 */
+	char executablePath[PATH_MAX];
+	uint32_t executablePathSize = sizeof(executablePath);
+	if (_NSGetExecutablePath(executablePath, &executablePathSize) == 0)
+	{
+		char* lastSlash = strrchr(executablePath, '/');
+		if (lastSlash != NULL)
+		{
+			char bundledPath[PATH_MAX];
+			*lastSlash = '\0';
+			snprintf(bundledPath, sizeof(bundledPath), "%s/Frameworks/libMoltenVK.dylib", executablePath);
+			module = dlopen(bundledPath, RTLD_NOW | RTLD_LOCAL);
+			if (!module)
+			{
+				snprintf(bundledPath, sizeof(bundledPath), "%s/libMoltenVK.dylib", executablePath);
+				module = dlopen(bundledPath, RTLD_NOW | RTLD_LOCAL);
+			}
+		}
+	}
+
+	if (!module)
+		module = dlopen("libvulkan.dylib", RTLD_NOW | RTLD_LOCAL);
 	if (!module)
 		module = dlopen("libvulkan.1.dylib", RTLD_NOW | RTLD_LOCAL);
 	if (!module)

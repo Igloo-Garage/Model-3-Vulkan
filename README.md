@@ -132,10 +132,10 @@ Finder, choose **Open**, and confirm. See
 
 The macOS release is a universal binary (Apple Silicon and Intel), but it is packaged as a bare
 Unix executable rather than a `.app`. Keep `supermodel` in the extracted folder next to
-`Frameworks/`, open Terminal there, and run `./supermodel`. Vulkan 3D additionally requires
-MoltenVK (`brew install molten-vk`); the Homebrew locations are found automatically, so no
-environment variables are needed. Without MoltenVK the emulator falls back to the OpenGL New 3D
-renderer.
+`Frameworks/`, open Terminal there, and run `./supermodel`. MoltenVK is bundled in `Frameworks/`,
+so Vulkan 3D works without Homebrew or the Vulkan SDK; a system MoltenVK is also detected if
+present. Without either, the emulator falls back to the OpenGL New 3D renderer. The bundled
+MoltenVK is Apache-2.0; see `Frameworks/LICENSE-MoltenVK.txt`.
 
 ### Shaders
 
