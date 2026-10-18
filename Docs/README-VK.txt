@@ -215,6 +215,12 @@ folder next to the executable (created automatically if it is missing).
 Relative paths are resolved against that folder too, so typing `ROMs`
 works regardless of which directory the program was started from.
 
+On Linux the `Browse` buttons use the desktop's zenity or kdialog file
+picker when one is installed; without either, the path fields remain
+editable by hand. Chinese text uses Noto Sans CJK or WenQuanYi when
+present, and Fontconfig is asked for a Simplified Chinese face as a
+last resort.
+
 ------------------------------------------------------------------------
 QUICK START
 ------------------------------------------------------------------------
