@@ -112,7 +112,12 @@ Result CVulkanContext::InitDevice(SDL_Window* window, bool validation, bool vsyn
 
 	if (volkInitialize() != VK_SUCCESS)
 	{
+#ifdef __APPLE__
+		ErrorLog("Vulkan: no Vulkan implementation found. Install MoltenVK with "
+			"'brew install molten-vk' or the Vulkan SDK, or choose the New 3D renderer.");
+#else
 		ErrorLog("Vulkan: volkInitialize failed. Is vulkan-1.dll installed?");
+#endif
 		return Result::FAIL;
 	}
 	if (!CreateInstance())
