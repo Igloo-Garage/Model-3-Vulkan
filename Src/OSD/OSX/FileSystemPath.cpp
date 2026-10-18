@@ -31,8 +31,8 @@
 
 namespace FileSystemPath
 {
-    // Generates a path to be used by Supermodel files
-    std::string GetPath(PathType pathType)
+    // Relative location for each type, before it is anchored to the executable's directory.
+    static const char* SubPath(PathType pathType)
     {
         switch (pathType)
         {
@@ -47,10 +47,38 @@ namespace FileSystemPath
         case Saves:
             return "Saves/";
         case Screenshots:
-            return "";
+            return "Screenshots/";
         case Assets:
             return "Assets/";
         }
+        return "";
+    }
+
+    /*
+     * Generates a path to be used by Supermodel files.
+     *
+     * Anchored to the executable's directory rather than the working directory. The release is a
+     * plain folder that the user can start from Finder, from a Terminal somewhere else, or through
+     * a launcher; leaving Config relative to the working directory meant that in the latter cases
+     * the settings were read from and written to a stray Config folder that did not exist next to
+     * the program - the interface worked, but "save settings" had nowhere to go.
+     *
+     * The directories are created on demand for the same reason the other platforms do it: the
+     * package ships Config, NVRAM and Saves, but Analysis and Screenshots are created on first use,
+     * and a user who deletes one should not lose the feature silently.
+     */
+    std::string GetPath(PathType pathType)
+    {
+        const std::string base = GetBasePath();
+        if (base.empty())
+            return pathType == Log ? "" : SubPath(pathType);
+
+        if (pathType == Log)
+            return base;
+
+        const std::string path = base + SubPath(pathType);
+        (void)mkdir(path.c_str(), 0775);
+        return path;
     }
 
     /*
