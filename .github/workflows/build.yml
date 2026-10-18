@@ -94,6 +94,9 @@ jobs:
               grep -E 'error:|fatal error|Error [0-9]|undefined reference' build.log | head -60
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
+            grep -E 'error:|fatal error|Error [0-9]|undefined reference' build.log | head -20 | while IFS= read -r line; do
+              echo "::error::$line"
+            done
             exit $status
           fi
 
@@ -191,11 +194,14 @@ jobs:
           # The archive must contain the fork-named folder, not the upstream-style one the
           # makefile used before. Checked here so a regression shows up in CI instead of in a
           # downloaded archive.
+          # Redirect to a file rather than piping into head: GitHub's bash runs with pipefail, and
+          # closing the pipe early makes tar exit with SIGPIPE (status 2).
           if [[ "$PKG_FILE" == *.zip ]]; then
-            FIRST_ENTRY=$(unzip -Z1 "$PKG_FILE" | head -1)
+            unzip -Z1 "$PKG_FILE" > /tmp/package-list.txt
           else
-            FIRST_ENTRY=$(tar -tzf "$PKG_FILE" | head -1)
+            tar -tzf "$PKG_FILE" > /tmp/package-list.txt
           fi
+          FIRST_ENTRY=$(head -1 /tmp/package-list.txt)
           echo "First archive entry: $FIRST_ENTRY"
           case "$FIRST_ENTRY" in
             Supermodel-VK.v*) ;;
