@@ -299,7 +299,7 @@ static bool EnsureContext(float uiScale)
 	io.IniFilename = nullptr;
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
-	ImGui::StyleColorsDark();
+	ApplyUiTheme();
 	LoadUiFont(io, uiScale);
 	if (uiScale > 1.05f)
 		ImGui::GetStyle().ScaleAllSizes(uiScale);

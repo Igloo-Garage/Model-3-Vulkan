@@ -32,6 +32,8 @@
 #include <ctime>
 #include <string>
 
+#include "FileSystemPath.h"
+
 #define CONFIG_FILE_BANNER_HEAD \
    ";;\n" \
    ";; Supermodel Configuration File\n"
@@ -124,7 +126,7 @@ static const char s_defaultConfigFileSettings[] =
    "\n"
    "; Where the ROM sets (.zip) are kept. Point this at your own folder from the setting\n"
    "; window, or edit it here. Each .zip must contain a single game.\n"
-   "ROMPath = \"C:/Downloads\"\n"
+   "ROMPath = \"@ROMPATH@\"\n"
    "\n"
    "; Graphics\n"
    "New3DEngine = true\n"
@@ -377,10 +379,17 @@ static const char s_defaultConfigFileSettings[] =
 };
 
 // Complete contents of the default configuration file, written out whenever no
-// configuration file is present
+// configuration file is present. The ROM path is filled in at runtime because the
+// correct default differs by platform (see FileSystemPath::GetDefaultRomPath()).
 inline std::string DefaultConfigFileContents()
 {
-   return ConfigFileComment("Default settings.") + "\n" + "\n" + s_defaultConfigFileSettings;
+   std::string settings(s_defaultConfigFileSettings);
+   const std::string placeholder = "@ROMPATH@";
+   const std::string::size_type at = settings.find(placeholder);
+   if (at != std::string::npos)
+      settings.replace(at, placeholder.size(), FileSystemPath::GetDefaultRomPath());
+
+   return ConfigFileComment("Default settings.") + "\n" + "\n" + settings;
 }
 
 #endif  // INCLUDED_CONFIGFILE_H

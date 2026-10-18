@@ -57,6 +57,17 @@ namespace FileSystemPath
      * everything relative to the working directory instead of under Data\.
      */
     std::string GetBasePath();
+
+    /*
+     * Directory a fresh installation should look in for ROM sets.
+     *
+     * The release archives ship an empty "ROMs" folder next to the executable. On macOS, where
+     * the archive is a plain folder the user can put anywhere, the default is that folder and it
+     * is created when missing. Windows keeps the historical Downloads location, because that is
+     * where a downloaded romset usually still is. An empty result means the platform cannot name
+     * a sensible default.
+     */
+    std::string GetDefaultRomPath();
 }
 
 
