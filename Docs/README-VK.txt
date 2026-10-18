@@ -209,6 +209,12 @@ present. Without it the emulator falls back to the OpenGL New 3D
 renderer. The bundled MoltenVK is Apache-2.0; its licence is in
 `Frameworks/LICENSE-MoltenVK.txt`.
 
+The macOS build uses the native macOS file picker for the `Browse`
+buttons, and a fresh installation looks for ROM sets in the `ROMs`
+folder next to the executable (created automatically if it is missing).
+Relative paths are resolved against that folder too, so typing `ROMs`
+works regardless of which directory the program was started from.
+
 ------------------------------------------------------------------------
 QUICK START
 ------------------------------------------------------------------------
@@ -217,8 +223,10 @@ QUICK START
      self-contained and contains no absolute paths.
   2. Run Supermodel-VK.exe.
   3. Choose the folder that holds your game .zip files in the ROM
-     directory field. The default is C:\Downloads, and it is
-     remembered afterwards.
+     directory field. On Windows the default is C:\Downloads; on macOS
+     it is the `ROMs` folder next to the executable. The choice is
+     remembered afterwards. The `Browse` button opens the native file
+     picker on Windows and macOS.
   4. Select a game and start it. Double-clicking a game in the list
      also starts it.
   5. In a game:

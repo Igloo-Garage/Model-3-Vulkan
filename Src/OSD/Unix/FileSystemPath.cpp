@@ -167,4 +167,11 @@ namespace FileSystemPath
     {
         return "";
     }
+
+    // Kept for the Unix build's historical behaviour. The macOS implementation returns the ROMs
+    // folder next to the executable instead; this platform has no single installation directory.
+    std::string GetDefaultRomPath()
+    {
+        return "C:/Downloads";
+    }
 }

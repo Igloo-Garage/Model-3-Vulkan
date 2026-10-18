@@ -65,6 +65,16 @@ void GuiPostNotice(const std::string& text);
 void LoadUiFont(ImGuiIO& io, float scale);
 
 /*
+ * Applies the shared interface theme: the warm off-white palette, rounded corners and spacing used
+ * by both the settings window and the in-game overlay.
+ *
+ * Called on each ImGui context after it is created, before the font atlas is built. Keeping it in
+ * one function is what makes the two surfaces look like the same program - the overlay used to call
+ * StyleColorsDark() separately, which meant a change here would have left it dark.
+ */
+void ApplyUiTheme();
+
+/*
  * Draws the advanced rendering settings (MSAA, CRT filter, glow).
  *
  * overlayMode selects the presentation for the in-game panel: the long explanatory text and the (?)

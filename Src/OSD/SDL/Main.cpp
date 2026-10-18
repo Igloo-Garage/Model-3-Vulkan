@@ -3549,10 +3549,11 @@ Util::Config::Node DefaultConfig()
   
   config.Set("GameXMLFile", s_gameXMLFilePath);
   config.Set("InitStateFile", "");
-  // Where the setting window looks for ROM sets on a fresh install. C:\Downloads because a
-  // downloaded romset zip is almost always still sitting there; the user can point it anywhere from
-  // the Browse button, and an existing Supermodel.ini keeps whatever it already had.
-  config.Set<std::string>("ROMPath", "C:/Downloads", "ROM", "", "");
+  // Where the setting window looks for ROM sets on a fresh install. macOS points at the ROMs
+  // folder next to the executable (the release archive ships one) and creates it if needed;
+  // Windows keeps the historical Downloads folder. An existing Supermodel.ini keeps whatever
+  // path it already had, so this only decides where a new installation starts looking.
+  config.Set<std::string>("ROMPath", FileSystemPath::GetDefaultRomPath(), "ROM", "", "");
   // Control preset: "standard" (one layout shared by Xbox/PS pads), "keyboard" or "custom".
   // ControllerFamily records which pad family the user picked ("auto" for detection).
   // "8bitdo" is in the allow-list because DetectController() can return it - without the entry the
