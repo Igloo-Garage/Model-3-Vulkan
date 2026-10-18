@@ -38,7 +38,8 @@ DELETE = rm -d -r -f
 ###############################################################################
 
 PKG_TYPE = tgz
-PKG_FILES = Frameworks/*.framework
+# The macOS package bundles MoltenVK so Vulkan works without Homebrew or the Vulkan SDK.
+PKG_FILES = Frameworks/*.framework Frameworks/libMoltenVK.dylib Frameworks/MoltenVK_icd.json Frameworks/LICENSE-MoltenVK.txt
 
 
 ###############################################################################
@@ -72,7 +73,7 @@ SDL_LIBS = -framework SDL2 -framework SDL2_net -framework OpenGL -framework GLUT
 
 PLATFORM_CXXFLAGS = -F./Frameworks -IFrameworks/SDL2.framework/Headers $(SDL_CFLAGS) -DSUPERMODEL_OSX
 PLATFORM_LDFLAGS = $(ARCH) -F./Frameworks $(SDL_LIBS) -lz -lm -lstdc++ -Wl,-rpath,@executable_path/../Frameworks -Wl,-rpath,@executable_path/Frameworks
-PLATFORM_DIRS = Frameworks/SDL2_net.framework Frameworks/SDL2.framework
+PLATFORM_DIRS = Frameworks/SDL2_net.framework Frameworks/SDL2.framework Frameworks/libMoltenVK.dylib
 PLATFORM_BINARY_EXTENSION =
 
 #
@@ -117,7 +118,7 @@ clean:
 	$(SILENT)echo Cleaning up \"Frameworks\", \"$(BIN_DIR)\" and \"$(OBJ_DIR)\"...
 	$(SILENT)$(DELETE) $(BIN_DIR)
 	$(SILENT)$(DELETE) $(OBJ_DIR)
-	$(SILENT)$(DELETE) Frameworks/SDL2.* Frameworks/SDL2_net.*
+	$(SILENT)$(DELETE) Frameworks/SDL2.* Frameworks/SDL2_net.* Frameworks/libMoltenVK.dylib Frameworks/MoltenVK_icd.json Frameworks/LICENSE-MoltenVK.txt Frameworks/MoltenVK Frameworks/MoltenVK-macos.tar
 
 
 ###############################################################################
@@ -163,3 +164,26 @@ Frameworks/SDL2_net.framework: Frameworks/SDL2_net.dmg
 	$(SILENT)xattr -dr com.apple.quarantine $@
 	$(SILENT)hdiutil detach -quiet /Volumes/SDL2_net
 	$(SILENT)touch $@
+
+
+###############################################################################
+# MoltenVK
+#
+# Bundled so the macOS release needs no Homebrew or Vulkan SDK installation.
+# Only the universal dylib, its ICD manifest and the licence are packaged; the
+# SDK headers, static library, xcframework and samples are not.
+###############################################################################
+
+MOLTENVK_VERSION = 1.3.0
+MOLTENVK_URL = https://github.com/KhronosGroup/MoltenVK/releases/download/v$(MOLTENVK_VERSION)/MoltenVK-macos.tar
+MOLTENVK_SHA256 = 57b4184ded521b08a63e3642552ebef8b9e98c2f0bcffa49bd93bbe1301c173d
+
+Frameworks/libMoltenVK.dylib: | Frameworks
+	$(info Downloading            : MoltenVK $(MOLTENVK_VERSION))
+	$(SILENT)curl -fsSL --retry 5 --retry-delay 2 -o Frameworks/MoltenVK-macos.tar $(MOLTENVK_URL)
+	$(SILENT)echo "$(MOLTENVK_SHA256)  Frameworks/MoltenVK-macos.tar" | shasum -a 256 -c -
+	$(SILENT)tar -xf Frameworks/MoltenVK-macos.tar -C Frameworks
+	$(SILENT)cp Frameworks/MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib Frameworks/libMoltenVK.dylib
+	$(SILENT)cp Frameworks/MoltenVK/MoltenVK/dynamic/dylib/macOS/MoltenVK_icd.json Frameworks/MoltenVK_icd.json
+	$(SILENT)cp Frameworks/MoltenVK/LICENSE Frameworks/LICENSE-MoltenVK.txt
+	$(SILENT)rm -rf Frameworks/MoltenVK Frameworks/MoltenVK-macos.tar

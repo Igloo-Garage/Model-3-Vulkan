@@ -135,6 +135,22 @@ jobs:
               ;;
           esac
 
+      - name: Verify bundled MoltenVK
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          test -f Frameworks/libMoltenVK.dylib
+          file Frameworks/libMoltenVK.dylib
+          lipo -info Frameworks/libMoltenVK.dylib | tee /tmp/moltenvk.txt
+          if ! grep -q x86_64 /tmp/moltenvk.txt || ! grep -q arm64 /tmp/moltenvk.txt; then
+            {
+              echo "### Bundled MoltenVK is not universal"
+              echo '```'
+              cat /tmp/moltenvk.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
       # Only reached when the build above failed: the compile log is otherwise unreadable without
       # admin rights on the repository (the job-log API refuses, and the web UI is a browser).
       - name: Upload build log
@@ -226,6 +242,19 @@ jobs:
               exit 1
               ;;
           esac
+
+          if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+            if ! grep -q 'Frameworks/libMoltenVK.dylib' /tmp/package-list.txt || \
+               ! grep -q 'Frameworks/LICENSE-MoltenVK.txt' /tmp/package-list.txt; then
+              {
+                echo "### macOS package is missing the bundled MoltenVK"
+                echo '```'
+                head -20 /tmp/package-list.txt
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+          fi
           
           # This fork has its own version and date in Src/Version.h. Do not use `make version`
           # here: that target reports the upstream core version, which is also compiled into
