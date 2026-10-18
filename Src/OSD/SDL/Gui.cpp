@@ -575,10 +575,44 @@ static void CreateControls(Util::Config::Node& config, const std::string group)
                         if (HasDedicatedUI(key))
                             continue;
 
-                        const std::string widget = WidgetLabel(key);
-                        const char* uiLabel = widget.c_str();
+                        const std::string labelWithId = WidgetLabel(key);
+                        const std::string::size_type idPos = labelWithId.find("##");
+                        const std::string displayLabel = idPos == std::string::npos
+                            ? labelWithId : labelWithId.substr(0, idPos);
+                        const std::string idLabel = idPos == std::string::npos
+                            ? std::string("##") + key : labelWithId.substr(idPos);
+
                         auto index = vRange->GetIndex();
                         auto& list = vRange->GetList();
+
+                        /*
+                         * Where the label goes.
+                         *
+                         * ImGui draws a widget's label to the right of the widget itself, so a
+                         * long label on a narrow panel is simply clipped - which is what happens
+                         * to "SDL Constant Force Threshold" on macOS, where the settings panel is
+                         * narrower than on a 150% Windows desktop. Give the label a fixed share of
+                         * the row, and when even that is not enough move it above the widget and
+                         * let the widget use the full width. Checkboxes keep their inline label:
+                         * the box is small, so the label already has nearly the whole row.
+                         */
+                        const ImGuiStyle& style = ImGui::GetStyle();
+                        const float availableWidth = ImGui::GetContentRegionAvail().x;
+                        const float desiredItemWidth = availableWidth * 0.55f;
+                        const bool stackLabel = index != 0 &&
+                            (availableWidth - desiredItemWidth - style.ItemInnerSpacing.x) <
+                                ImGui::CalcTextSize(displayLabel.c_str()).x;
+
+                        const char* uiLabel = stackLabel ? idLabel.c_str() : labelWithId.c_str();
+                        if (stackLabel)
+                        {
+                            ImGui::TextWrapped("%s", displayLabel.c_str());
+                            ImGui::SetNextItemWidth(-FLT_MIN);
+                        }
+                        else if (index != 0)
+                        {
+                            ImGui::SetNextItemWidth(desiredItemWidth);
+                        }
 
                         auto ProcessCombo = [&](auto* valuePtr)
                         {
@@ -647,7 +681,6 @@ static void CreateControls(Util::Config::Node& config, const std::string group)
                             ImGui::Combo(uiLabel, &selectedIndex, sVectorChar.data(), (int)sVectorChar.size());
                             if (fixedRateOverride) {
                                 ImGui::EndDisabled();
-                                ImGui::SameLine();
                                 UiTextDim("（由「独占全屏 · 固定街机刷新率」决定）");
                             }
                             else {
@@ -657,7 +690,6 @@ static void CreateControls(Util::Config::Node& config, const std::string group)
                                 // misread as "exclusive mode overrides it". Worth saying plainly,
                                 // since the fixed-rate mode above does override it.
                                 if (isRefreshRate && config["ExclusiveFullscreen"].ValueAsDefault<bool>(false)) {
-                                    ImGui::SameLine();
                                     UiTextDim("（G-SYNC 下为呈现节奏，显示器跟随）");
                                 }
                             }
@@ -765,9 +797,9 @@ static void CreateControls(Util::Config::Node& config, const std::string group)
                         if (!applies)
                         {
                             ImGui::EndDisabled();
-                            ImGui::SameLine();
-                            // Tr() on the reason, not the format: UiTextDim runs its format string
-                            // through Tr() itself, so translating here keeps "%s" as the format.
+                            // The reason is a sentence, not a suffix: drawing it on the same line
+                            // squeezed it into whatever width was left beside the widget, which on
+                            // a narrow panel wrapped it one character per line.
                             UiTextDim("%s", Tr(ScopeReasonKey(scope)));
                         }
 
