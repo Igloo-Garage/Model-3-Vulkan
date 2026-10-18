@@ -85,8 +85,10 @@ jobs:
       - name: Build Supermodel
         run: |
           set -o pipefail
+          set +e
           make -f Makefiles/${{ matrix.makefile }} release OPT="${OPT_INPUT:-"-O3"}" GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} SILENT= 2>&1 | tee build.log
           status=${PIPESTATUS[0]}
+          set -e
           if [ $status -ne 0 ]; then
             {
               echo "### Build failed on ${{ matrix.os }}"
@@ -142,12 +144,14 @@ jobs:
         run: |
           # Find the executable in bin/ directory (bin64/ on Windows)
           set -o pipefail
+          set +e
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
             ./bin64/supermodel.exe -print-games 2>&1 | tee validate.log
           else
             ./bin/supermodel -print-games 2>&1 | tee validate.log
           fi
           status=$?
+          set -e
           if [ $status -ne 0 ]; then
             {
               echo "### Validation failed on ${{ matrix.os }}"
@@ -165,8 +169,10 @@ jobs:
       - name: Create package
         run: |
           set -o pipefail
+          set +e
           make -f Makefiles/${{ matrix.makefile }} pkg GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} SILENT= 2>&1 | tee package.log
           status=$?
+          set -e
           if [ $status -ne 0 ]; then
             {
               echo "### Packaging failed on ${{ matrix.os }}"
