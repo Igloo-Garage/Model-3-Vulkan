@@ -1469,6 +1469,12 @@ static int stbtt_InitFont_internal(stbtt_fontinfo *info, unsigned char *data, in
    // find a cmap encoding table we understand *now* to avoid searching
    // later. (todo: could make this installable)
    // the same regardless of glyph.
+   //
+   // Only accept subtable formats stbtt_FindGlyphIndex can actually read (0, 4, 6, 12). A font can
+   // carry several Unicode cmap records and the loop below keeps the last match, which on macOS 13
+   // PingFang.ttc is a format-14 variation-sequences table. That table is not a codepoint-to-glyph
+   // map, and the first lookup against it hit the assert in stbtt_FindGlyphIndex. Skipping it keeps
+   // the format-12 subtable that was found earlier in the list.
    numTables = ttUSHORT(data + cmap + 2);
    info->index_map = 0;
    for (i=0; i < numTables; ++i) {
@@ -1479,15 +1485,26 @@ static int stbtt_InitFont_internal(stbtt_fontinfo *info, unsigned char *data, in
             switch (ttUSHORT(data+encoding_record+2)) {
                case STBTT_MS_EID_UNICODE_BMP:
                case STBTT_MS_EID_UNICODE_FULL:
-                  // MS/Unicode
-                  info->index_map = cmap + ttULONG(data+encoding_record+4);
+                  {
+                     // MS/Unicode. Only accept formats stbtt_FindGlyphIndex can read; see the note
+                     // above the loop.
+                     stbtt_uint32 subtable = cmap + ttULONG(data+encoding_record+4);
+                     stbtt_uint16 format = ttUSHORT(data + subtable);
+                     if (format == 0 || format == 4 || format == 6 || format == 12)
+                        info->index_map = subtable;
+                  }
                   break;
             }
             break;
         case STBTT_PLATFORM_ID_UNICODE:
-            // Mac/iOS has these
-            // all the encodingIDs are unicode, so we don't bother to check it
-            info->index_map = cmap + ttULONG(data+encoding_record+4);
+            {
+               // Mac/iOS has these
+               // all the encodingIDs are unicode, so we don't bother to check it
+               stbtt_uint32 subtable = cmap + ttULONG(data+encoding_record+4);
+               stbtt_uint16 format = ttUSHORT(data + subtable);
+               if (format == 0 || format == 4 || format == 6 || format == 12)
+                  info->index_map = subtable;
+            }
             break;
       }
    }
