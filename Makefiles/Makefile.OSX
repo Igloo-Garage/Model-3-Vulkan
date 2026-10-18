@@ -106,9 +106,9 @@ include Makefiles/Rules.inc
 #
 # The deployment target must be stated explicitly. Without it clang stamps the runner's SDK version
 # into the binary (macOS 26 with the current CI Xcode), and the release then refuses to start on
-# anything older. 11.0 is the first Apple Silicon release; 10.15 is the oldest Intel release with
-# the C++17 library and std::filesystem the code needs.
-ARCH = -arch arm64 -arch x86_64 -Xarch_arm64 -mmacosx-version-min=11.0 -Xarch_x86_64 -mmacosx-version-min=10.15
+# anything older. 11.0 is the first Apple Silicon release and a reasonable floor for the Intel
+# slice as well; the code needs C++17 and std::filesystem, which macOS 10.15 already provides.
+ARCH = -arch arm64 -arch x86_64 -mmacosx-version-min=11.0
 
 # -s (strip) is obsolete and ignored by Apple ld64; remove it to avoid potential warnings
 LDOPT := $(filter-out -s,$(LDOPT))

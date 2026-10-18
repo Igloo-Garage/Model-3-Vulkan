@@ -148,7 +148,7 @@ build does not need glslang installed; the `.spv` intermediates are not committe
 
 | | |
 |---|---|
-| OS | Windows 10/11 (64-bit), Linux, or macOS |
+| OS | Windows 10/11 (64-bit), Linux, or macOS 11+ |
 | Vulkan | Driver providing Vulkan 1.1+ — for the Vulkan 3D renderer |
 | OpenGL | Driver providing OpenGL 4.1+ — for the New 3D and Legacy 3D renderers |
 
