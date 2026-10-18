@@ -198,7 +198,15 @@ static const std::string s_musicXMLFilePath = Util::Format() << FileSystemPath::
 // folder to another drive does not leave the setting pointing at where it used to live. The logger
 // anchors it to the executable's directory when it opens the file (see FileSystemPath::ResolvePath).
 // Only the shown default in the command-line help uses the resolved form.
+//
+// macOS has no Data/ directory: the package is a flat folder, so the log belongs next to the
+// executable instead. Without this the default resolved to <exe>/Data/Supermodel.log, a directory
+// that does not exist, and the log was silently not written.
+#ifdef SUPERMODEL_OSX
+static const std::string s_logOutputSetting = "Supermodel.log";
+#else
 static const std::string s_logOutputSetting = "Data/Supermodel.log";
+#endif
 static const std::string s_logFilePath = Util::Format() << FileSystemPath::GetPath(FileSystemPath::Log) << "Supermodel.log";
 
 std::string ResolveDataFileSetting(const std::string& configuredPath, const std::string& fileName)
