@@ -77,6 +77,9 @@ private:
 	// Assigned input system
 	std::shared_ptr<CInputSystem> m_system;
 
+	// True if the input maps an absolute position (eg a mouse pointer) rather than relative motion
+	bool m_absolute;
+
 	/*
 	 * Creates an input source using the current input system and assigns it to this input.
 	 */
@@ -149,6 +152,11 @@ public:
 	 * Appends a mapping to this input to create a multiple mapping assignment.
 	 */
 	void AppendMapping(const char *mapping);
+
+	/*
+	 * Marks the input as mapping an absolute position, bypassing any dead zone in its source.
+	 */
+	void SetAbsolute(bool absolute);
 
 	/*
 	 * Resets the mapping(s) assigned to this input to the input's default.

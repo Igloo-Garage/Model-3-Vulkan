@@ -695,7 +695,7 @@ CInputSource *CInputSystem::GetJoySource(int joyNum, EJoyPart joyPart)
     return m_emptySource;
 }
 
-void CInputSystem::CheckAllSources(unsigned readFlags, bool fullAxisOnly, bool &mseCentered, vector<CInputSource*> &sources, string &mapping, vector<CInputSource*> &badSources)
+void CInputSystem::CheckAllSources(unsigned readFlags, bool fullAxisOnly, vector<CInputSource*> &sources, string &mapping, vector<CInputSource*> &badSources)
 {
   // See if should read keyboards
   if (readFlags & READ_KEYBOARD)
@@ -713,17 +713,13 @@ void CInputSystem::CheckAllSources(unsigned readFlags, bool fullAxisOnly, bool &
   // See if should read mice
   if (readFlags & READ_MOUSE)
   {
-    // For mouse input, wait until mouse is in centre of display before parsing X- and Y-axis movements
-    if (!mseCentered)
-      mseCentered = ConfigMouseCentered();
-
     // Check all mouse sources for input, merging devices if required
     if ((readFlags & READ_MERGE_MOUSE) || m_numMice == ANY_MOUSE)
-      CheckMouseSources(ANY_MOUSE, fullAxisOnly, mseCentered, sources, mapping, badSources);
+      CheckMouseSources(ANY_MOUSE, fullAxisOnly, sources, mapping, badSources);
     else
     {
       for (int mseNum = 0; mseNum < m_numMice; mseNum++)
-        CheckMouseSources(mseNum, fullAxisOnly, mseCentered, sources, mapping, badSources);
+        CheckMouseSources(mseNum, fullAxisOnly, sources, mapping, badSources);
     }
   }
 
@@ -783,7 +779,7 @@ void CInputSystem::CheckKeySources(int kbdNum, bool fullAxisOnly, vector<CInputS
   }
 }
 
-void CInputSystem::CheckMouseSources(int mseNum, bool fullAxisOnly, bool mseCentered, vector<CInputSource*> &sources, string &mapping, vector<CInputSource*> &badSources)
+void CInputSystem::CheckMouseSources(int mseNum, bool fullAxisOnly, vector<CInputSource*> &sources, string &mapping, vector<CInputSource*> &badSources)
 {
   // Loop through all mouse parts
   for (int mseIndex = 0; mseIndex < NUM_MOUSE_PARTS; mseIndex++)
@@ -793,9 +789,8 @@ void CInputSystem::CheckMouseSources(int mseNum, bool fullAxisOnly, bool mseCent
     int axisNum;
     int axisDir;
     bool isAxis = GetAxisDetails(msePart, axisNum, axisDir);
-    bool isXYAxis = isAxis && (axisNum == AXIS_X || axisNum == AXIS_Y);
-    // Ignore X- & Y-axes if mouse hasn't been centered yet and filter axes according to fullAxisOnly
-    if ((isXYAxis && !mseCentered) || (isAxis && (IsFullAxis(msePart) != fullAxisOnly)))
+    // Filter axes according to fullAxisOnly
+    if (isAxis && (IsFullAxis(msePart) != fullAxisOnly))
       continue;
     // Get mouse source for mouse number and part and test to see if it is active (but was not previously) and that it is not a "bad" source
     CInputSource *source = GetMouseSource(mseNum, msePart);
@@ -1865,14 +1860,13 @@ bool CInputSystem::ReadMapping(char* buffer, unsigned bufSize, bool fullAxisOnly
     string mapping;
     vector<CInputSource*> badSources;
     vector<CInputSource*> sources;
-    bool mseCentered = false;
 
     // See which sources activated to begin with and from here on ignore these (this stops badly calibrated axes that are constantly "active"
     // from preventing the user from exiting read loop)
     if (!Poll())
         goto Cancelled;
 
-    CheckAllSources(readFlags, fullAxisOnly, mseCentered, badSources, badMapping, sources);
+    CheckAllSources(readFlags, fullAxisOnly, badSources, badMapping, sources);
 
     // Loop until have received meaningful inputs
     for (;;)
@@ -1895,7 +1889,7 @@ bool CInputSystem::ReadMapping(char* buffer, unsigned bufSize, bool fullAxisOnly
         }
 
         // Check all active sources
-        CheckAllSources(readFlags, fullAxisOnly, mseCentered, sources, mapping, badSources);
+        CheckAllSources(readFlags, fullAxisOnly, sources, mapping, badSources);
 
         // When some inputs have been activated, keep looping until they have all been released again.
         if (!sources.empty())
@@ -1919,7 +1913,6 @@ bool CInputSystem::ReadMapping(char* buffer, unsigned bufSize, bool fullAxisOnly
 
                 mapping.clear();
                 sources.clear();
-                mseCentered = false;
             }
         }
 
@@ -2432,6 +2425,11 @@ CInputSystem::CMseAxisInputSource::CMseAxisInputSource(CInputSystem *system, int
     m_deadPixels = Clamp((int)deadZone, 0, 99);
 }
 
+void CInputSystem::CMseAxisInputSource::SetAbsolute(bool absolute)
+{
+  m_absolute = absolute;
+}
+
 int CInputSystem::CMseAxisInputSource::ScaleAxisValue(int minVal, int offVal, int maxVal) const
 {
   int mseVal = m_system->GetMouseAxisValue(m_mseNum, m_axisNum);
@@ -2456,7 +2454,7 @@ int CInputSystem::CMseAxisInputSource::ScaleAxisValue(int minVal, int offVal, in
   if (mseVal == 0)
     return offVal;
   // Scale values from dead zone to display edge, taking positive or negative values only or using the whole axis range as required
-  int dZone = (mseVal > 0 ? m_deadPixels / 2 : m_deadPixels - m_deadPixels / 2);
+  int dZone = m_absolute ? 0 : (mseVal > 0 ? m_deadPixels / 2 : m_deadPixels - m_deadPixels / 2);
   if      (m_axisDir == AXIS_POS)  return Scale(mseVal, dZone, dZone, mseMax, minVal, offVal, maxVal);
   else if (m_axisDir == AXIS_NEG)  return Scale(mseVal, -dZone, -dZone, mseMin, minVal, offVal, maxVal);
   else if (m_axisDir == AXIS_FULL)

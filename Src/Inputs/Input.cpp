@@ -32,7 +32,7 @@
 #include "InputSystem.h"
 
 CInput::CInput(const char *inputId, const char *inputLabel, unsigned inputFlags, unsigned inputGameFlags, const char *defaultMapping, UINT16 initValue) : 
-	m_defaultMapping(defaultMapping), m_system(NULL), m_source(NULL),
+	m_defaultMapping(defaultMapping), m_system(NULL), m_absolute(false), m_source(NULL),
 	id(inputId), label(inputLabel), flags(inputFlags), gameFlags(inputGameFlags), value(initValue), prevValue(initValue)
 {
 	ResetToDefaultMapping();
@@ -73,6 +73,9 @@ void CInput::CreateSource()
 			}
 		}
 	}
+
+	if (m_source)
+		m_source->SetAbsolute(m_absolute);
 }
 
 void CInput::Initialize(std::shared_ptr<CInputSystem> system)
@@ -80,6 +83,14 @@ void CInput::Initialize(std::shared_ptr<CInputSystem> system)
 	m_system = system;
 
 	CreateSource();
+}
+
+void CInput::SetAbsolute(bool absolute)
+{
+	m_absolute = absolute;
+
+	if (m_source != NULL)
+		m_source->SetAbsolute(m_absolute);
 }
 
 std::shared_ptr<CInputSystem> CInput::GetInputSystem()

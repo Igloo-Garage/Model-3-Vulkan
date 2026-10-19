@@ -110,6 +110,12 @@ void CMultiInputSource::Release()
 	CInputSource::Release();
 }
 
+void CMultiInputSource::SetAbsolute(bool absolute)
+{
+	for (size_t i = 0; i < m_numSrcs; i++)
+		m_srcArray[i]->SetAbsolute(absolute);
+}
+
 bool CMultiInputSource::GetValueAsSwitch(bool &val) const
 {
 	if (m_isOr)
