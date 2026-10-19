@@ -40,6 +40,27 @@ namespace Vulkan3D
 }
 
 /*
+ * Crosshair state, drawn by the in-game overlay on top of everything else.
+ *
+ * Coordinates are window pixels, already mapped through the game viewport. The overlay renders the
+ * crosshair in its foreground draw list, which is recorded after the panel and the statistics
+ * readout and after every game layer, so nothing can cover it.
+ */
+struct OverlayCrosshairState
+{
+  bool visible = false;
+  unsigned players = 0;       // Bit 0 = player 1, bit 1 = player 2
+  float x[2] = {};
+  float y[2] = {};
+};
+
+/*
+ * Queues the crosshair for the next overlay frame. Safe to call every frame, including when the
+ * overlay backend is not available (the state is then simply ignored).
+ */
+void OverlaySetCrosshair(const OverlayCrosshairState& state);
+
+/*
  * In-game settings overlay.
  *
  * A panel of the renderer's post-processing controls drawn over the running game, so a CRT filter can
