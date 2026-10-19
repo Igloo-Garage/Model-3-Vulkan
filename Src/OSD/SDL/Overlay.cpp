@@ -100,6 +100,10 @@ POINT g_lastMouse = { -1, -1 };
 // asserts if a frame is begun and never ended, which a minimised window would otherwise cause.
 bool g_frameRendered = false;
 
+// Crosshair queued by the game loop and drawn in the ImGui foreground draw list, above every other
+// element of the frame.
+OverlayCrosshairState g_crosshair;
+
 const char* const kOverlayKeys[] = {
 	"PostFXAA",
 	"PostCRT",
@@ -431,6 +435,7 @@ void OverlayShutdown()
 	g_previousContext = nullptr;
 	g_visible = false;
 	g_haveSnapshot = false;
+	g_crosshair = OverlayCrosshairState();
 }
 
 bool OverlayVisible()
@@ -441,6 +446,11 @@ bool OverlayVisible()
 bool OverlayActive()
 {
 	return g_backendReady;
+}
+
+void OverlaySetCrosshair(const OverlayCrosshairState& state)
+{
+	g_crosshair = state;
 }
 
 void OverlaySetVisible(Util::Config::Node& config, bool visible)
@@ -470,18 +480,47 @@ void OverlayToggle(Util::Config::Node& config)
 	OverlaySetVisible(config, !g_visible);
 }
 
+/*
+ * Four inward-pointing triangles, the same shape the OpenGL crosshair draws. Sized from the window
+ * height so it stays readable at 480p and at 4K, and scaled by the UI scale like the rest of the
+ * overlay.
+ */
+static void DrawOverlayCrosshair(ImDrawList* draw, float cx, float cy, ImU32 color)
+{
+	const float displayHeight = ImGui::GetIO().DisplaySize.y;
+	const float scale = (displayHeight > 0.0f ? displayHeight / 480.0f : 1.0f) *
+		(g_uiScale > 0.0f ? g_uiScale : 1.0f);
+	const float dist = 2.0f * scale;
+	const float height = 9.6f * scale;
+	const float base = 4.8f * scale;
+
+	draw->AddTriangleFilled(ImVec2(cx, cy - dist),
+		ImVec2(cx - base / 2.0f, cy - dist - height),
+		ImVec2(cx + base / 2.0f, cy - dist - height), color);
+	draw->AddTriangleFilled(ImVec2(cx, cy + dist),
+		ImVec2(cx - base / 2.0f, cy + dist + height),
+		ImVec2(cx + base / 2.0f, cy + dist + height), color);
+	draw->AddTriangleFilled(ImVec2(cx - dist, cy),
+		ImVec2(cx - dist - height, cy - base / 2.0f),
+		ImVec2(cx - dist - height, cy + base / 2.0f), color);
+	draw->AddTriangleFilled(ImVec2(cx + dist, cy),
+		ImVec2(cx + dist + height, cy - base / 2.0f),
+		ImVec2(cx + dist + height, cy + base / 2.0f), color);
+}
+
 bool OverlayNewFrame(Util::Config::Node& config)
 {
 	/*
-	 * Also runs when only the statistics readout is on.
+	 * Also runs when only the statistics readout or the crosshair is on.
 	 *
-	 * The two share one ImGui context and one ImGui frame, so the readout cannot be drawn on a frame
-	 * that this function skipped - there would be no NewFrame for its window to belong to. The panel
-	 * is therefore conditional below while the frame itself is not.
+	 * They share one ImGui context and one ImGui frame, so neither can be drawn on a frame that this
+	 * function skipped - there would be no NewFrame for them to belong to. The panel is therefore
+	 * conditional below while the frame itself is not.
 	 */
 	const bool panel = OverlayVisible();
 	const bool stats = g_backendReady && StatsOsdEnabled();
-	if (!panel && !stats)
+	const bool crosshair = g_backendReady && g_crosshair.visible;
+	if (!panel && !stats && !crosshair)
 		return false;
 
 	ImGui::SetCurrentContext(g_context);
@@ -585,6 +624,23 @@ bool OverlayNewFrame(Util::Config::Node& config)
 	// Ended here rather than in the render callback so that a frame which never reaches the GPU - a
 	// minimised window, a dropped frame - cannot leave ImGui mid-frame.
 
+	/*
+	 * The crosshair goes into the foreground draw list, not a window: it is recorded after every
+	 * window and every game layer, so neither the settings panel nor the statistics readout can
+	 * cover it.
+	 */
+	if (crosshair)
+	{
+		ImDrawList* draw = ImGui::GetForegroundDrawList();
+		for (int player = 0; player < 2; player++)
+		{
+			if ((g_crosshair.players & (1u << player)) == 0)
+				continue;
+			DrawOverlayCrosshair(draw, g_crosshair.x[player], g_crosshair.y[player],
+				player == 0 ? IM_COL32(255, 0, 0, 255) : IM_COL32(0, 255, 0, 255));
+		}
+	}
+
 	ImGui::Render();
 
 	g_frameRendered = true;
@@ -600,7 +656,7 @@ void OverlayRender(VkCommandBuffer cmd)
 {
 	if (g_backend != OverlayBackend::Vulkan)
 		return;
-	if ((!OverlayVisible() && !StatsOsdEnabled()) || !g_frameRendered || g_context == nullptr)
+	if ((!OverlayVisible() && !StatsOsdEnabled() && !g_crosshair.visible) || !g_frameRendered || g_context == nullptr)
 		return;
 
 	/*
@@ -629,7 +685,7 @@ void OverlayRenderGL()
 {
 	if (g_backend != OverlayBackend::OpenGL)
 		return;
-	if ((!OverlayVisible() && !StatsOsdEnabled()) || !g_frameRendered || g_context == nullptr)
+	if ((!OverlayVisible() && !StatsOsdEnabled() && !g_crosshair.visible) || !g_frameRendered || g_context == nullptr)
 		return;
 
 	// Same ordering requirement as the Vulkan path above, for the same reason.
