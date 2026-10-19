@@ -2703,6 +2703,17 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
   // Hide mouse if fullscreen, enable crosshairs for gun games
   Inputs->GetInputSystem()->SetMouseVisibility(!s_runtime_config["FullScreen"].ValueAs<bool>());
   gameHasLightguns = !!(game.inputs & (Game::INPUT_GUN1|Game::INPUT_GUN2|Game::INPUT_ANALOG_GUN1|Game::INPUT_ANALOG_GUN2));
+
+  // Keep the simulated gun cursor on the game window while playing. SDL reports the pointer
+  // relative to the focused window, so without the grab it can wander onto another monitor and
+  // the crosshair maps outside the view. SDL releases the grab itself when the window loses
+  // focus; RunGameSession drops it explicitly on the way out.
+  if (gameHasLightguns)
+  {
+    SDL_SetWindowMouseGrab(s_window, SDL_TRUE);
+    InfoLog("Input: mouse confined to the game window for light gun aiming.");
+  }
+
   currentInputs = game.inputs;
   if (gameHasLightguns)
     videoInputs = Inputs;
@@ -5339,6 +5350,9 @@ static int RunGameSession(const ParsedCommandLine& cmd_line, std::shared_ptr<CLo
   delete Model3;
 
 Exit:
+  if (s_window != nullptr)
+    SDL_SetWindowMouseGrab(s_window, SDL_FALSE);
+
   // Give the pointer back to the settings window.
   //
   // A fullscreen game hides it through the Win32 ShowCursor() display count, and the settings window
