@@ -51,6 +51,26 @@ the [latest release](https://github.com/Igloo-Garage/Supermodel-VK/releases/late
   `Config/`, `NVRAM/`, `Saves/`, `Screenshots/` in the extracted folder on Linux and macOS).
   Moving the executable on its own starts with fresh settings.
 
+
+**For Ubuntu / Debian users:**
+```
+sudo apt update
+```
+```
+sudo apt install libsdl2-2.0-0 libsdl2-net-2.0-0 libglu1-mesa libgl1 zlib1g
+```
+```
+sudo apt install libvulkan1 mesa-vulkan-drivers
+```
+
+---
+**For Mac OS users:**
+* **macOS Gatekeeper fix:** Because the build isn't Apple-notarized, macOS will block it as an "unidentified developer." To unblock it:
+    1. Open **Terminal**.
+    2. Type `xattr -c -r ` *(make sure there is a space after `-c -r`)*.
+    3. Drag the unzipped Supermodel-VK folder directly into the Terminal window (it will paste the full path automatically).
+    4. Press **Enter**. You can now launch the emulator normally.
+  * **macOS Performance:** Vulkan runs via MoltenVK (translating Vulkan to Metal). On some setups, this overhead can lower frame rates. If you encounter slowdowns, simply switch the renderer to **OpenGL** in the settings window—it shares the exact same emulation core and visual features.
 ---
 
 ## What this fork changes
