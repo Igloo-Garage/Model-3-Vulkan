@@ -282,6 +282,15 @@ CInputs::CInputs(std::shared_ptr<CInputSystem> system)
 	fishingCast   = AddSwitchInput( "FishingCast",    "Cast",           Game::INPUT_FISHING, "NONE");
 	fishingSelect = AddSwitchInput( "FishingSelect",  "Select",         Game::INPUT_FISHING, "NONE");
 	fishingTension= AddAnalogInput("FishingTension", "Tension",	      Game::INPUT_FISHING, "NONE"); // getbass only
+
+	// Gun axes map absolute screen positions, so they must not apply the mouse dead zone.
+	for (int i = 0; i < 2; i++)
+	{
+		gunX[i]->SetAbsolute(true);
+		gunY[i]->SetAbsolute(true);
+		analogGunX[i]->SetAbsolute(true);
+		analogGunY[i]->SetAbsolute(true);
+	}
 }
 
 CInputs::~CInputs()
