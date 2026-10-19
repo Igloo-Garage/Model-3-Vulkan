@@ -2545,15 +2545,15 @@ static void UpdateOverlayCrosshair(CInputs *Inputs, uint32_t currentInputs, unsi
     };
 
     if ((crosshairs & 1) && (currentInputs & Game::INPUT_ANALOG_GUN1))
-      set(0, (float)Inputs->analogGunX[0]->value / 255.0f,
-        (255.0f - (float)Inputs->analogGunY[0]->value) / 255.0f);
+      set(0, (float)Inputs->analogGunX[0]->ValueAsFraction(),
+        (float)Inputs->analogGunY[0]->ValueAsFraction());
     else if ((crosshairs & 1) && (currentInputs & Game::INPUT_GUN1))
       set(0, ((float)Inputs->gunX[0]->value - 150.0f) / (651.0f - 150.0f),
         ((float)Inputs->gunY[0]->value - 80.0f) / (465.0f - 80.0f));
 
     if ((crosshairs & 2) && (currentInputs & Game::INPUT_ANALOG_GUN2))
-      set(1, (float)Inputs->analogGunX[1]->value / 255.0f,
-        (255.0f - (float)Inputs->analogGunY[1]->value) / 255.0f);
+      set(1, (float)Inputs->analogGunX[1]->ValueAsFraction(),
+        (float)Inputs->analogGunY[1]->ValueAsFraction());
     else if ((crosshairs & 2) && (currentInputs & Game::INPUT_GUN2))
       set(1, ((float)Inputs->gunX[1]->value - 150.0f) / (651.0f - 150.0f),
         ((float)Inputs->gunY[1]->value - 80.0f) / (465.0f - 80.0f));
@@ -3539,6 +3539,7 @@ static void WriteDefaultConfigurationFileIfNotPresent()
 static Result ConfigureInputs(CInputs *Inputs, Util::Config::Node *fileConfig, Util::Config::Node *runtimeConfig, const Game &game, bool configure)
 {
   Inputs->LoadFromConfig(*runtimeConfig);
+  Inputs->ApplyGameSpecificInputRanges(game);
 
   // If the user wants to configure the inputs, do that now
   if (configure)

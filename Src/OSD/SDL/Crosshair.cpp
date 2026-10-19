@@ -285,8 +285,8 @@ void CCrosshair::Update(uint32_t currentInputs, CInputs* Inputs, unsigned int xO
   // Convert gun coordinates to viewspace coordinates
   if (currentInputs & Game::INPUT_ANALOG_GUN1)
   {
-    x[0] = ((float)Inputs->analogGunX[0]->value / 255.0f);
-    y[0] = ((255.0f - (float)Inputs->analogGunY[0]->value) / 255.0f);
+    x[0] = (float)Inputs->analogGunX[0]->ValueAsFraction();
+    y[0] = (float)Inputs->analogGunY[0]->ValueAsFraction();
     // Analog guns have no off-screen position, so keep the crosshair visible while firing.
   }
   else if (currentInputs & Game::INPUT_GUN1)
@@ -298,8 +298,8 @@ void CCrosshair::Update(uint32_t currentInputs, CInputs* Inputs, unsigned int xO
   }
   if (currentInputs & Game::INPUT_ANALOG_GUN2)
   {
-    x[1] = ((float)Inputs->analogGunX[1]->value / 255.0f);
-    y[1] = ((255.0f - (float)Inputs->analogGunY[1]->value) / 255.0f);
+    x[1] = (float)Inputs->analogGunX[1]->ValueAsFraction();
+    y[1] = (float)Inputs->analogGunY[1]->ValueAsFraction();
     // Analog guns have no off-screen position, so keep the crosshair visible while firing.
   }
   else if (currentInputs & Game::INPUT_GUN2)

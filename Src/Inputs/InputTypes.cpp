@@ -107,6 +107,13 @@ CAxisInput::CAxisInput(const char *inputId, const char *inputLabel, unsigned inp
 	//
 }
 
+void CAxisInput::SetRange(UINT16 minVal, UINT16 offVal, UINT16 maxVal)
+{
+	m_minVal = minVal;
+	m_offVal = offVal;
+	m_maxVal = maxVal;
+}
+
 void CAxisInput::Poll()
 {
 	prevValue = value;

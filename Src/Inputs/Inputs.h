@@ -291,6 +291,11 @@ public:
    * Loads the input mapping assignments from the given config object.
    */
   void LoadFromConfig(const Util::Config::Node &config);
+
+  /*
+   * Adjusts input value ranges that differ from the defaults for a particular game.
+   */
+  void ApplyGameSpecificInputRanges(const Game &game);
   
   /*
    * Stores the current input mapping assignments to the given config object.

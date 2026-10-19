@@ -94,6 +94,11 @@ public:
 	void Poll();
 
 	/*
+	 * Changes the value range used to scale the input source and to normalise the value.
+	 */
+	void SetRange(UINT16 minVal, UINT16 offVal, UINT16 maxVal);
+
+	/*
 	 * Returns true if the input is currently activated (ie axis is not centered)
 	 */
 	bool HasValue() const;

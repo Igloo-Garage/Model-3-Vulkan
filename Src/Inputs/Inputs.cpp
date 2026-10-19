@@ -442,6 +442,32 @@ void CInputs::LoadFromConfig(const Util::Config::Node &config)
 	}
 }
 
+void CInputs::ApplyGameSpecificInputRanges(const Game &game)
+{
+	/*
+	 * The Lost World's gun hardware reports an 8-bit ADC value and the game then applies its own
+	 * fixed calibration to it before computing a screen position. The calibrated travel is narrower
+	 * than 0..255: an unmodified axis makes the in-game cursor overshoot the screen and sit down and
+	 * to the right of the emulator's crosshair, which is exactly the mismatch the crosshair was
+	 * showing. Restricting the axes to the calibrated travel makes the mouse span the screen from
+	 * edge to edge and lets the crosshair, which normalises with the same range, line up with the
+	 * game's own cursor.
+	 *
+	 * The limits were measured from the game's cursor at several positions and are used by the
+	 * Revision A and location test sets. The other analog gun games keep the full 0..255 range.
+	 */
+	if (game.name == "lostwsga" || game.name == "lostwsgp" || game.name == "lostwsgo")
+	{
+		for (int i = 0; i < 2; i++)
+		{
+			if (analogGunX[i] != nullptr)
+				analogGunX[i]->SetRange(15, 119, 222);
+			if (analogGunY[i] != nullptr)
+				analogGunY[i]->SetRange(250, 144, 38);   // Game ADC values 5..217, inverted
+		}
+	}
+}
+
 /*
  * IsVRSelected():
  *
