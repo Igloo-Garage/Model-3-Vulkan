@@ -2498,10 +2498,6 @@ bool BeginFrameVideo()
 
 void EndFrameVideo()
 {
-  // Show crosshairs for light gun games
-  if (s_crosshair && videoInputs)
-    s_crosshair->Update(currentInputs, videoInputs, xOffset, yOffset, xRes, yRes);
-
   if (s_vkContext)
   {
     s_vkContext->EndFrame();
@@ -2509,17 +2505,63 @@ void EndFrameVideo()
   else
   {
     /*
-     * The OpenGL overlay is recorded here, and this is the only place it can be.
-     *
-     * The game's own drawing is finished (this is the last thing before the buffer swap), the window's
-     * context is current, and the default framebuffer still holds the completed frame - which is
-     * exactly the state the Vulkan path reaches inside its renderer instead. It has to happen after
-     * every other pass, including the crosshairs above and the CRT filter's own pass, or the panel
-     * would be drawn over and then partly overwritten.
+     * The game's own drawing is finished. The overlay is recorded first so the crosshair can be
+     * drawn after it: the crosshair is the one thing that must never be covered, including by the
+     * settings panel and the statistics readout. The Vulkan path reaches the same result inside its
+     * renderer, where the crosshair is part of the overlay's foreground draw list.
      */
     OverlayRenderGL();
+
+    // Show crosshairs for light gun games
+    if (s_crosshair && videoInputs)
+      s_crosshair->Update(currentInputs, videoInputs, xOffset, yOffset, xRes, yRes);
+
     SDL_GL_SwapWindow(s_window);
   }
+}
+
+/*
+ * Builds the crosshair state for the Vulkan overlay.
+ *
+ * The OpenGL renderer draws its own crosshair directly; Vulkan has no equivalent, so it uses the
+ * overlay's foreground draw list. Positions are window pixels mapped through the game viewport,
+ * which is the same geometry the OpenGL crosshair uses. Clamping keeps the crosshair visible at the
+ * edge when the pointer is pushed against the window border.
+ */
+static void UpdateOverlayCrosshair(CInputs *Inputs, uint32_t currentInputs, unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned yRes)
+{
+  OverlayCrosshairState state;
+
+  const unsigned crosshairs = s_runtime_config["Crosshairs"].ValueAs<unsigned>() & 3;
+  if (s_vkContext && Inputs != nullptr && crosshairs != 0)
+  {
+    auto set = [&](int player, float nx, float ny)
+    {
+      nx = (std::max)(0.0f, (std::min)(1.0f, nx));
+      ny = (std::max)(0.0f, (std::min)(1.0f, ny));
+      state.x[player] = (float)xOffset + nx * (float)xRes;
+      state.y[player] = (float)yOffset + ny * (float)yRes;
+      state.players |= 1u << player;
+    };
+
+    if ((crosshairs & 1) && (currentInputs & Game::INPUT_ANALOG_GUN1))
+      set(0, (float)Inputs->analogGunX[0]->value / 255.0f,
+        (255.0f - (float)Inputs->analogGunY[0]->value) / 255.0f);
+    else if ((crosshairs & 1) && (currentInputs & Game::INPUT_GUN1))
+      set(0, ((float)Inputs->gunX[0]->value - 150.0f) / (651.0f - 150.0f),
+        ((float)Inputs->gunY[0]->value - 80.0f) / (465.0f - 80.0f));
+
+    if ((crosshairs & 2) && (currentInputs & Game::INPUT_ANALOG_GUN2))
+      set(1, (float)Inputs->analogGunX[1]->value / 255.0f,
+        (255.0f - (float)Inputs->analogGunY[1]->value) / 255.0f);
+    else if ((crosshairs & 2) && (currentInputs & Game::INPUT_GUN2))
+      set(1, ((float)Inputs->gunX[1]->value - 150.0f) / (651.0f - 150.0f),
+        ((float)Inputs->gunY[1]->value - 80.0f) / (465.0f - 80.0f));
+
+    state.visible = state.players != 0;
+  }
+
+  OverlaySetCrosshair(state);
 }
 
 
@@ -2937,6 +2979,9 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
     // Poll the inputs
     if (!Inputs->Poll(&game, xOffset, yOffset, xRes, yRes))
       quit = true;
+
+    // Queue the crosshair for the overlay before the ImGui frame is built below.
+    UpdateOverlayCrosshair(Inputs, currentInputs, xOffset, yOffset, xRes, yRes);
 
     /*
      * Build the in-game panel before the frame is rendered, so a value changed here reaches the
