@@ -330,7 +330,11 @@ bool CVulkan3D::CreatePipeline(bool translucent, bool overlay)
 	VkPipelineDepthStencilStateCreateInfo depth = {};
 	depth.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
 	depth.depthTestEnable = VK_TRUE;
-	depth.depthWriteEnable = translucent ? VK_FALSE : VK_TRUE;
+	// New3D draws both transparency layers with depth writes enabled (SetRenderStates sets
+	// glDepthMask(GL_TRUE) and only switches the compare to GREATER). Without the write, polygons
+	// later in the same layer paint over nearer ones regardless of depth; on the Carnotaurus that
+	// let the dark far side of the mouth cover the snout as a black patch.
+	depth.depthWriteEnable = VK_TRUE;
 	depth.depthCompareOp = overlay ? VK_COMPARE_OP_GREATER_OR_EQUAL : VK_COMPARE_OP_GREATER;
 	VkPipelineColorBlendAttachmentState blendAtt = {};
 	blendAtt.blendEnable = translucent ? VK_TRUE : VK_FALSE;
