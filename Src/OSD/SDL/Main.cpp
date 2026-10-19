@@ -2762,11 +2762,13 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
   else
     videoInputs = nullptr;
 
-  // Gun games get crosshairs by default so the mouse fallback is visible without any setup.
+  // Gun games get a player 1 crosshair by default so the mouse fallback is visible without
+  // any setup. Player 2 is left off: the SDL backend exposes a single mouse, and an unmapped P2
+  // gun would otherwise leave a stationary crosshair in the middle of the screen.
   if (gameHasLightguns && s_runtime_config["Crosshairs"].ValueAs<unsigned>() == 0)
   {
-    s_runtime_config.Get("Crosshairs").SetValue(3);
-    InfoLog("Crosshairs: enabled for light gun game.");
+    s_runtime_config.Get("Crosshairs").SetValue(1);
+    InfoLog("Crosshairs: enabled for player 1 light gun.");
   }
 
   // Attach the inputs to the emulator
