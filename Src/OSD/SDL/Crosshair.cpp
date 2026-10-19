@@ -287,7 +287,7 @@ void CCrosshair::Update(uint32_t currentInputs, CInputs* Inputs, unsigned int xO
   {
     x[0] = ((float)Inputs->analogGunX[0]->value / 255.0f);
     y[0] = ((255.0f - (float)Inputs->analogGunY[0]->value) / 255.0f);
-    offscreenTrigger[0] = Inputs->analogTriggerLeft[0]->value || Inputs->analogTriggerRight[0]->value;
+    // Analog guns have no off-screen position, so keep the crosshair visible while firing.
   }
   else if (currentInputs & Game::INPUT_GUN1)
   {
@@ -300,7 +300,7 @@ void CCrosshair::Update(uint32_t currentInputs, CInputs* Inputs, unsigned int xO
   {
     x[1] = ((float)Inputs->analogGunX[1]->value / 255.0f);
     y[1] = ((255.0f - (float)Inputs->analogGunY[1]->value) / 255.0f);
-    offscreenTrigger[1] = Inputs->analogTriggerLeft[1]->value || Inputs->analogTriggerRight[1]->value;
+    // Analog guns have no off-screen position, so keep the crosshair visible while firing.
   }
   else if (currentInputs & Game::INPUT_GUN2)
   {
