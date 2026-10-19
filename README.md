@@ -7,11 +7,49 @@ Model 3 arcade emulator.**
 
 Version `0.9.0.3a-20261017`, based on upstream `v0.3a-20261017-git-b05ef21`.
 
+**[Download the latest release](https://github.com/Igloo-Garage/Supermodel-VK/releases/latest)** —
+unzip and run, nothing to install.
+
 Model 3 debuted in 1996 with Virtua Fighter 3 and Scud Race, and for the three years that followed it
 was the most powerful 3D hardware of any gaming platform. Developed by Real3D, then a Lockheed Martin
 company, with a heritage rooted in flight-simulator technology, it could store, transform, light and
 rasterise tens of thousands of polygons per frame at a fluid 57.524 frames per second. No public
 documentation for the platform exists; everything known about it was reverse engineered.
+
+---
+
+## Download and run
+
+No installer and no command line: download, extract, run. Grab the archive for your platform from
+the [latest release](https://github.com/Igloo-Garage/Supermodel-VK/releases/latest):
+
+| Platform | Archive | Start it with |
+| --- | --- | --- |
+| Windows 10/11 (64-bit) | `Supermodel-VK.v…for.Windows.zip` | double-click `supermodel.exe` |
+| Linux (x86-64) | `Supermodel-VK.v…for.Linux.tar.gz` | `./supermodel` |
+| macOS 11+ (universal) | `Supermodel-VK.v…for.macOS.tar.gz` | `./supermodel` |
+
+1. Extract the archive anywhere you can write to. Keep the folder together — the executable and the
+   data folders beside it are the program; there is nothing to install.
+2. Start it. The settings window opens directly.
+3. Use the path field at the top of the left column (or its **Browse** button) to point at the folder
+   holding your ROM set `.zip` files. The game list fills in; double-click a game, or select it and
+   press **Start Game**. The archive ships an empty `ROMs/` folder you can use for this.
+
+`Esc` returns to the settings window instead of quitting. `Tab` opens the in-game quick settings.
+
+**First-run notes**
+
+- No game data is included. You need your own Model 3 ROM sets, one `.zip` per game.
+- The build is not code-signed. If Windows SmartScreen shows "Windows protected your PC", choose
+  **More info → Run anyway**.
+- Vulkan is the default renderer. It needs a Vulkan 1.3 driver (1.2 with dynamic rendering and
+  synchronisation2 also qualifies); otherwise the emulator falls back to OpenGL 4.1 for that
+  session and says so in the settings window. On Linux, the fallback needs a working
+  OpenGL driver; install `libvulkan1` and `mesa-vulkan-drivers` to use Vulkan.
+- Settings, NVRAM, save states and logs stay next to the executable (`Data\` on Windows;
+  `Config/`, `NVRAM/`, `Saves/`, `Screenshots/` in the extracted folder on Linux and macOS).
+  Moving the executable on its own starts with fresh settings.
 
 ---
 
@@ -62,7 +100,10 @@ No game data is included or distributed. You need your own ROMs.
 
 ---
 
-## Building
+## Build from source
+
+Only needed if you want to modify the code or build for a platform without a release archive.
+Release users can stop after **Download and run** above.
 
 ### Fetch the libraries first
 
@@ -109,9 +150,14 @@ mingw32-make -f Makefiles/Makefile.Win32
 ### Linux
 
 ```
-sudo apt install libsdl2-dev libsdl2-net-dev libglu1-mesa-dev
+sudo apt install build-essential pkg-config libsdl2-dev libsdl2-net-dev libglu1-mesa-dev zlib1g-dev
+sudo apt install libvulkan1 mesa-vulkan-drivers   # runtime for the Vulkan renderer
 make -f Makefiles/Makefile.UNIX
 ```
+
+The binary is written to `bin/supermodel`; run it from the repository root so it picks up `Config/`
+and `Assets/`. Vulkan headers are vendored under `Libraries/Vulkan-Headers`, so no Vulkan SDK is
+required to build.
 
 ### macOS
 
@@ -150,7 +196,7 @@ build does not need glslang installed; the `.spv` intermediates are not committe
 | | |
 |---|---|
 | OS | Windows 10/11 (64-bit), Linux, or macOS 11+ |
-| Vulkan | Driver providing Vulkan 1.1+ — for the Vulkan 3D renderer |
+| Vulkan | Driver providing Vulkan 1.3, or Vulkan 1.2 with `VK_KHR_dynamic_rendering` and `VK_KHR_synchronization2` — for the Vulkan 3D renderer |
 | OpenGL | Driver providing OpenGL 4.1+ — for the New 3D and Legacy 3D renderers |
 
 Nothing else needs installing. The C++ runtime, SDL2 and SDL2_net are linked statically, so the
