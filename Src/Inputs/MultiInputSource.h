@@ -76,6 +76,8 @@ public:
 
 	void Release();
 
+	void SetAbsolute(bool absolute) override;
+
 	bool GetValueAsSwitch(bool &val) const;
 
 	bool GetValueAsAnalog(int &val, int minVal, int offVal, int maxVal);	

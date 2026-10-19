@@ -65,6 +65,12 @@ public:
 
 	virtual void Release();
 
+	/*
+	 * Marks the source as mapping an absolute position rather than a relative motion.
+	 * Sources that apply a dead zone can use this to bypass it.
+	 */
+	virtual void SetAbsolute(bool) {}
+
 	//
 	// Static helper methods
 	//

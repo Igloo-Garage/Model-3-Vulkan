@@ -2702,13 +2702,19 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
 
   // Hide mouse if fullscreen, enable crosshairs for gun games
   Inputs->GetInputSystem()->SetMouseVisibility(!s_runtime_config["FullScreen"].ValueAs<bool>());
-  gameHasLightguns = !!(game.inputs & (Game::INPUT_GUN1|Game::INPUT_GUN2));
-  gameHasLightguns |= game.name == "lostwsga";
+  gameHasLightguns = !!(game.inputs & (Game::INPUT_GUN1|Game::INPUT_GUN2|Game::INPUT_ANALOG_GUN1|Game::INPUT_ANALOG_GUN2));
   currentInputs = game.inputs;
   if (gameHasLightguns)
     videoInputs = Inputs;
   else
     videoInputs = nullptr;
+
+  // Gun games get crosshairs by default so the mouse fallback is visible without any setup.
+  if (gameHasLightguns && s_runtime_config["Crosshairs"].ValueAs<unsigned>() == 0)
+  {
+    s_runtime_config.Get("Crosshairs").SetValue(3);
+    InfoLog("Crosshairs: enabled for light gun game.");
+  }
 
   // Attach the inputs to the emulator
   Model3->AttachInputs(Inputs);
@@ -3508,6 +3514,27 @@ static Result ConfigureInputs(CInputs *Inputs, Util::Config::Node *fileConfig, U
     else
       puts("Configuration aborted...");
     puts("");
+  }
+
+  // Light gun games with no explicit mapping fall back to the mouse. Only player 1 is
+  // wired up: the SDL backend exposes a single pointer. Applied after the interactive
+  // configuration so these mappings stay in memory and are never written back.
+  if (game.inputs & (Game::INPUT_GUN1|Game::INPUT_GUN2|Game::INPUT_ANALOG_GUN1|Game::INPUT_ANALOG_GUN2))
+  {
+    auto appendMissing = [](CInput *input, const char *mapping)
+    {
+      if (input != nullptr && strstr(input->GetMapping(), "MOUSE_") == nullptr)
+        input->AppendMapping(mapping);
+    };
+
+    appendMissing(Inputs->gunX[0].get(), "MOUSE_XAXIS");
+    appendMissing(Inputs->gunY[0].get(), "MOUSE_YAXIS");
+    appendMissing(Inputs->analogGunX[0].get(), "MOUSE_XAXIS");
+    appendMissing(Inputs->analogGunY[0].get(), "MOUSE_YAXIS");
+    appendMissing(Inputs->trigger[0].get(), "MOUSE_LEFT_BUTTON");
+    appendMissing(Inputs->analogTriggerLeft[0].get(), "MOUSE_LEFT_BUTTON");
+    appendMissing(Inputs->analogTriggerRight[0].get(), "MOUSE_RIGHT_BUTTON");
+    InfoLog("Input: mouse fallback mappings applied to player 1 light gun.");
   }
 
   return Result::OKAY;

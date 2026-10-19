@@ -401,7 +401,7 @@ private:
    */
   CInputSource *GetJoySource(int joyNum, EJoyPart joyPart);
 
-  void CheckAllSources(unsigned readFlags, bool fullAxisOnly, bool &mseCentered, std::vector<CInputSource*> &sources, std::string &mapping, std::vector<CInputSource*> &badSources);
+  void CheckAllSources(unsigned readFlags, bool fullAxisOnly, std::vector<CInputSource*> &sources, std::string &mapping, std::vector<CInputSource*> &badSources);
 
   /*
    * Finds any currently activated key sources for the given keyboard number (or all keyboards if ANY_KEYBOARD supplied)
@@ -415,7 +415,7 @@ private:
    * and adds them to the sources vector, aswell as constructing the corresponding mapping(s) in the given string.
    * If fullAxisOnly is true, then only sources that represent a full axis range (eg MouseXAxis) are considered.
    */
-  void CheckMouseSources(int mseNum, bool fullAxisOnly, bool mseCentered, std::vector<CInputSource*> &sources, std::string &mapping, std::vector<CInputSource*> &badSources);
+  void CheckMouseSources(int mseNum, bool fullAxisOnly, std::vector<CInputSource*> &sources, std::string &mapping, std::vector<CInputSource*> &badSources);
 
   /*
    * Finds any currently activated joystick sources for the given joystick number (or all joysticks if ANY_JOYSTICK supplied)
@@ -933,6 +933,7 @@ public:
     int m_axisNum;      // Axis number (AXIS_X, AXIS_Y or AXIS_Z)
     int m_axisDir;          // Axis direction (AXIS_FULL, AXIS_INVERTED, AXIS_POSITIVE or AXIS_NEGATIVE)
     int m_deadPixels;       // Size in pixels of dead zone in centre of axis
+    bool m_absolute = false; // True if the axis maps absolute screen coordinates (no dead zone)
 
     /*
      * Scales the mouse axis value to the given range.
@@ -941,6 +942,8 @@ public:
 
   public:
     CMseAxisInputSource(CInputSystem *system, int mseNum, int axisNum, int axisDir, unsigned deadZone);
+
+    void SetAbsolute(bool absolute) override;
 
     bool GetValueAsSwitch(bool &val) const;
 
