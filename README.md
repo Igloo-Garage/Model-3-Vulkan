@@ -123,6 +123,16 @@ attempt to simulate a spherical tube.
 
 ![Game Screenshot 2](Docs/images/03game.jpg)
 
+**Widescreen without stretching** — Widescreen widens the 3D field of view instead of scaling the
+picture horizontally, so the extra width is real scenery and the HUD stays anchored to the screen
+edges. The image below alternates between native aspect and widescreen; both are the same scene,
+car and camera position.
+
+<p align="center">
+  <img src="Docs/images/compare-aspect.gif" width="900" alt="Native aspect vs widescreen">
+</p>
+
+
 **Standalone ImGui settings window** — the settings screen is the application shell. It stays alive
 for the whole run, so `Esc` returns to it instead of quitting the program, the way PCSX2 and other
 emulators behave. Settings that need a fresh session say so; the rest apply immediately.
