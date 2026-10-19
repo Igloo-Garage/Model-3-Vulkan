@@ -20,8 +20,8 @@ documentation for the platform exists; everything known about it was reverse eng
 
 ## Download and run
 
-No installer and no command line: download, extract, run. Grab the archive for your platform from
-the [latest release](https://github.com/Igloo-Garage/Supermodel-VK/releases/latest):
+No installer. Grab the archive for your platform from the
+[latest release](https://github.com/Igloo-Garage/Supermodel-VK/releases/latest):
 
 | Platform | Archive | Start it with |
 | --- | --- | --- |
@@ -29,48 +29,79 @@ the [latest release](https://github.com/Igloo-Garage/Supermodel-VK/releases/late
 | Linux (x86-64) | `Supermodel-VK.v…for.Linux.tar.gz` | `./supermodel` |
 | macOS 11+ (universal) | `Supermodel-VK.v…for.macOS.tar.gz` | `./supermodel` |
 
-1. Extract the archive anywhere you can write to. Keep the folder together — the executable and the
-   data folders beside it are the program; there is nothing to install.
-2. Start it. The settings window opens directly.
+### Windows
+
+1. Extract the `.zip` anywhere you can write to. Keep the folder together — the executable and the
+   data folders beside it are the program.
+2. Run `supermodel.exe`. The settings window opens directly.
 3. Use the path field at the top of the left column (or its **Browse** button) to point at the folder
-   holding your ROM set `.zip` files. The game list fills in; double-click a game, or select it and
-   press **Start Game**. The archive ships an empty `ROMs/` folder you can use for this.
+   holding your ROM set `.zip` files. The archive ships an empty `ROMs/` folder you can use.
+4. Double-click a game, or select it and press **Start Game**.
 
-`Esc` returns to the settings window instead of quitting. `Tab` opens the in-game quick settings.
+### Before first run
 
-**First-run notes**
+**For Ubuntu / Debian users:**
+
+```bash
+sudo apt update
+sudo apt install libsdl2-2.0-0 libsdl2-net-2.0-0 libglu1-mesa libgl1 zlib1g
+sudo apt install libvulkan1 mesa-vulkan-drivers   # Vulkan renderer; OpenGL works without it
+sudo apt install zenity fonts-noto-cjk            # optional: Browse dialogs + Chinese UI text
+```
+
+- `zenity` is what the **Browse** buttons call. KDE users can install `kdialog` instead. Without
+  either, type the path by hand.
+- `fonts-noto-cjk` is only for the Chinese interface; `fonts-wqy-microhei` is a much smaller
+  substitute. The English UI works without either.
+- `mesa-vulkan-drivers` provides Vulkan for AMD/Intel GPUs. NVIDIA's proprietary driver ships its
+  own ICD, so the package is unnecessary there (and harmless if installed).
+- Then extract and run:
+
+  ```bash
+  tar -xzf Supermodel-VK.*.for.Linux.tar.gz
+  cd Supermodel-VK.*
+  ./supermodel
+  ```
+
+- `Permission denied` → `chmod +x supermodel`.
+- `error while loading shared libraries` → `ldd ./supermodel | grep "not found"` names what is
+  missing.
+- No window over SSH: it needs an X11/Wayland session. If Wayland misbehaves, try
+  `SDL_VIDEODRIVER=x11 ./supermodel`.
+- Optional diagnostics: `sudo apt install vulkan-tools mesa-utils`, then `vulkaninfo --summary`
+  and `glxinfo -B`. If OpenGL fails on a minimal install, add `libgl1-mesa-dri`.
+- No sound: make sure PipeWire (`pipewire-pulse`) or PulseAudio is running.
+- Linux builds are less battle-tested than Windows; please report issues with your GPU/driver and
+  the terminal output. Add `-log-output=Supermodel.log` to write a log file next to the executable.
+
+**For macOS users:**
+
+macOS Gatekeeper fix: because the build isn't Apple-notarized, macOS will block it as an
+"unidentified developer." To unblock it:
+
+1. Open **Terminal**.
+2. Type `xattr -c -r ` *(make sure there is a space after `-c -r`)*.
+3. Drag the unzipped Supermodel-VK folder directly into the Terminal window (it will paste the full
+   path automatically).
+4. Press **Enter**. You can now launch the emulator normally.
+
+**macOS performance:** Vulkan runs via MoltenVK (translating Vulkan to Metal). On some setups this
+overhead can lower frame rates. If you encounter slowdowns, switch the renderer to **OpenGL** in the
+settings window — it shares the same emulation core and visual features.
+
+### All platforms
 
 - No game data is included. You need your own Model 3 ROM sets, one `.zip` per game.
 - The build is not code-signed. If Windows SmartScreen shows "Windows protected your PC", choose
   **More info → Run anyway**.
-- Vulkan is the default renderer. It needs a Vulkan 1.3 driver (1.2 with dynamic rendering and
+- Vulkan is the default renderer and needs a Vulkan 1.3 driver (1.2 with dynamic rendering and
   synchronisation2 also qualifies); otherwise the emulator falls back to OpenGL 4.1 for that
-  session and says so in the settings window. On Linux, the fallback needs a working
-  OpenGL driver; install `libvulkan1` and `mesa-vulkan-drivers` to use Vulkan.
+  session and says so in the settings window.
+- `Esc` returns to the settings window instead of quitting; `Tab` opens the in-game quick settings.
 - Settings, NVRAM, save states and logs stay next to the executable (`Data\` on Windows;
   `Config/`, `NVRAM/`, `Saves/`, `Screenshots/` in the extracted folder on Linux and macOS).
   Moving the executable on its own starts with fresh settings.
 
-
-**For Ubuntu / Debian users:**
-```
-sudo apt update
-```
-```
-sudo apt install libsdl2-2.0-0 libsdl2-net-2.0-0 libglu1-mesa libgl1 zlib1g
-```
-```
-sudo apt install libvulkan1 mesa-vulkan-drivers
-```
-
----
-**For Mac OS users:**
-* **macOS Gatekeeper fix:** Because the build isn't Apple-notarized, macOS will block it as an "unidentified developer." To unblock it:
-    1. Open **Terminal**.
-    2. Type `xattr -c -r ` *(make sure there is a space after `-c -r`)*.
-    3. Drag the unzipped Supermodel-VK folder directly into the Terminal window (it will paste the full path automatically).
-    4. Press **Enter**. You can now launch the emulator normally.
-  * **macOS Performance:** Vulkan runs via MoltenVK (translating Vulkan to Metal). On some setups, this overhead can lower frame rates. If you encounter slowdowns, simply switch the renderer to **OpenGL** in the settings window—it shares the exact same emulation core and visual features.
 ---
 
 ## What this fork changes
@@ -219,8 +250,11 @@ build does not need glslang installed; the `.spv` intermediates are not committe
 | Vulkan | Driver providing Vulkan 1.3, or Vulkan 1.2 with `VK_KHR_dynamic_rendering` and `VK_KHR_synchronization2` — for the Vulkan 3D renderer |
 | OpenGL | Driver providing OpenGL 4.1+ — for the New 3D and Legacy 3D renderers |
 
-Nothing else needs installing. The C++ runtime, SDL2 and SDL2_net are linked statically, so the
-executable has no DLL dependencies beyond `vulkan-1.dll`, which the graphics driver provides.
+Nothing else needs installing on Windows: the C++ runtime, SDL2 and SDL2_net are linked
+statically, so the executable has no DLL dependencies beyond `vulkan-1.dll`, which the graphics
+driver provides. The Linux build links SDL2, SDL2_net, GL and GLU dynamically, so those runtime
+packages must be installed (see the `apt` line above). Vulkan is loaded at runtime and is optional:
+without `libvulkan1` and a driver the emulator uses OpenGL.
 
 ---
 
