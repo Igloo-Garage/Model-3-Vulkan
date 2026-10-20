@@ -260,16 +260,15 @@ jobs:
           # here: that target reports the upstream core version, which is also compiled into
           # SUPERMODEL_VERSION and written into save states.
           FORK_VERSION=$(grep -E '^#define[[:space:]]+SUPERMODEL_FORK_VERSION' Src/Version.h | awk -F'"' '{print $2}')
-          FORK_DATE=$(grep -E '^#define[[:space:]]+SUPERMODEL_FORK_DATE' Src/Version.h | awk -F'"' '{print $2}')
           PLATFORM="${{ runner.os }}"
           
           # Copy the package with the name used for distribution. GitHub turns spaces in release
           # asset names into dots; use dots directly so the name is stable and the release action
           # recognises (and replaces) an asset it uploaded on an earlier run.
           if [[ "$PKG_FILE" == *.zip ]]; then
-            NEW_NAME="Supermodel-VK.v${FORK_VERSION}-${FORK_DATE}.for.${PLATFORM}.zip"
+            NEW_NAME="Supermodel-VK.v${FORK_VERSION}.for.${PLATFORM}.zip"
           else
-            NEW_NAME="Supermodel-VK.v${FORK_VERSION}-${FORK_DATE}.for.${PLATFORM}.tar.gz"
+            NEW_NAME="Supermodel-VK.v${FORK_VERSION}.for.${PLATFORM}.tar.gz"
           fi
           
           cp "$PKG_FILE" "$NEW_NAME"
