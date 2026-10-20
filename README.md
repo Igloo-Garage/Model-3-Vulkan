@@ -1,23 +1,52 @@
 # Supermodel-VK
 
-**A Vulkan-focused fork of [Supermodel](https://github.com/trzy/Supermodel), the open-source Sega
-Model 3 arcade emulator.**
-
-<https://github.com/Igloo-Garage/Supermodel-VK>
-
-Version `0.9.0.3a-20261017`, based on upstream `v0.3a-20261017-git-b05ef21`.
-
-**[Download the latest release](https://github.com/Igloo-Garage/Supermodel-VK/releases/latest)** —
-unzip and run, nothing to install.
-
 Model 3 debuted in 1996 with Virtua Fighter 3 and Scud Race, and for the three years that followed it
 was the most powerful 3D hardware of any gaming platform. Developed by Real3D, then a Lockheed Martin
 company, with a heritage rooted in flight-simulator technology, it could store, transform, light and
 rasterise tens of thousands of polygons per frame at a fluid 57.524 frames per second. No public
 documentation for the platform exists; everything known about it was reverse engineered.
 
----
+**A Vulkan-focused fork of [Supermodel](https://github.com/trzy/Supermodel), the open-source Sega
+Model 3 arcade emulator.**
 
+## 🚧 Sega Model 3 Arcade Emulator - Progress Update & Sneak Peek ##
+
+I've been hard at work polishing the upcoming release **v0.9.2**!  
+This update focuses heavily on refining the UI/launcher experience and introducing a seamless in-game overlay menu, alongside several long-awaited bug fixes.
+
+Here is a rundown of the latest progress:
+
+### 🎮 UI & Launcher Enhancements
+* **Integrated Box Art & Cover Display:** Game covers are finally here! The game list now displays box art, making title browsing much more visual and intuitive.
+* **Smoother Input Configuration:** Resolved the micro-stutter/lag that occurred whenever navigating to the controls page. Button mapping has also been moved forward for quicker, more ergonomic access.
+* **Streamlined UI Text:** Stripped away redundant and cluttered descriptions from the original interface for a cleaner, modern look.
+* **Custom Resolution Fix:** Fixed a bug where custom resolution settings failed to take effect.
+
+<div align="center">
+  <img src="./Assets/UI_v0.9.2_preview.webp" width="750" alt="UI and Launcher Preview">
+  <p><em>▲ New UI layout featuring integrated box art display</em></p>
+</div>
+
+### 🖥️ In-Game Experience & Graphical Fixes
+* **New In-Game Quick Menu (OSD):** Bring up an in-game menu at any time during gameplay to toggle widescreen mode on the fly, cycle through CRT shaders/filters, and manage save states—all without having to exit back to check.
+
+<div align="center">
+  <img src="./Assets/OSD_v0.9.2_preview.webp" width="750" alt="In-Game OSD Menu Preview">
+  <p><em>▲ Quick in-game overlay for real-time video, shader, and save state adjustments</em></p>
+</div>
+
+* **Visual & Rendering Fixes:**
+  * Fixed an issue where an abnormal blue line would occasionally appear along the top edge of the screen in certain titles.
+  * Resolved geometry rendering bugs (e.g., the dinosaur boss glitch in *The Lost World: Jurassic Park* where the eyes and flesh separated from the skeleton).
+
+---
+### 🚀 Current Status & Beta Preview
+All core features are now basically functional, and I am currently running final stability and performance tests. A stable release will be published as soon as packaging is finalized.
+
+Can't wait to take it for a spin? A beta build is available for early testing here:  
+Version `0.9.0.3a-20261017`, based on upstream `v0.3a-20261017-git-b05ef21`.
+
+---
 ## Download and run
 
 No installer. Grab the archive for your platform from the
