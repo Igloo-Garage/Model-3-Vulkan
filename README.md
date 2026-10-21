@@ -9,12 +9,8 @@ documentation for the platform exists; everything known about it was reverse eng
 **A Vulkan-focused fork of [Supermodel](https://github.com/trzy/Supermodel), the open-source Sega
 Model 3 arcade emulator.**
 
-## 🚧 Sega Model 3 Arcade Emulator - Progress Update & Sneak Peek ##
-
-I've been hard at work polishing the upcoming release **v0.9.2**!  
+## 🚧 Sega Model 3 Arcade Emulator ## released **v0.9.2**!  
 This update focuses heavily on refining the UI/launcher experience and introducing a seamless in-game overlay menu, alongside several long-awaited bug fixes.
-
-Here is a rundown of the latest progress:
 
 ### 🎮 UI & Launcher Enhancements
 * **Integrated Box Art & Cover Display:** Game covers are finally here! The game list now displays box art, making title browsing much more visual and intuitive.
@@ -38,13 +34,6 @@ Here is a rundown of the latest progress:
 * **Visual & Rendering Fixes:**
   * Fixed an issue where an abnormal blue line would occasionally appear along the top edge of the screen in certain titles.
   * Resolved geometry rendering bugs (e.g., the dinosaur boss glitch in *The Lost World: Jurassic Park* where the eyes and flesh separated from the skeleton).
-
----
-### 🚀 Current Status & Beta Preview
-All core features are now basically functional, and I am currently running final stability and performance tests. A stable release will be published as soon as packaging is finalized.
-
-Can't wait to take it for a spin? A beta build is available for early testing here:  
-Version `0.9.0.3a-20261017`, based on upstream `v0.3a-20261017-git-b05ef21`.
 
 ---
 ## Download and run
@@ -139,8 +128,6 @@ The emulation core is upstream's. The rendering and presentation layers are rewo
 
 **Vulkan 1.3 backend** — `Src/Graphics/Vulkan3D/`, alongside the original OpenGL renderers. Per-frame
 vertex arenas are protected by fences, so long sessions do not leak or develop black patches.
-
-![GUI Settings](Docs/images/01GUI.jpg)
 
 **CRT post-processing** — scanlines, phosphor masks (aperture grille / slot / shadow) and glass glow,
 all computed from an integrated beam profile rather than point-sampled. Point sampling beats into
