@@ -1,11 +1,5 @@
 # Supermodel-VK
 
-Model 3 debuted in 1996 with Virtua Fighter 3 and Scud Race, and for the three years that followed it
-was the most powerful 3D hardware of any gaming platform. Developed by Real3D, then a Lockheed Martin
-company, with a heritage rooted in flight-simulator technology, it could store, transform, light and
-rasterise tens of thousands of polygons per frame at a fluid 57.524 frames per second. No public
-documentation for the platform exists; everything known about it was reverse engineered.
-
 **A Vulkan-focused fork of [Supermodel](https://github.com/trzy/Supermodel), the open-source Sega
 Model 3 arcade emulator.**
 
