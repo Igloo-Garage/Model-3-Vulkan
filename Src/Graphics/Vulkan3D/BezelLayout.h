@@ -81,13 +81,23 @@ inline void ComputeBezelGameRect(int extentWidth, int extentHeight,
 		 * The two cases are one branch because they want the same rectangle. They differ in where the
 		 * extra width comes from - the tile layer being stretched, or the 3D frustum being widened -
 		 * not in what the picture occupies.
+		 *
+		 * The vertical bounds still come from the emulated picture rather than from the output. Using
+		 * the full output height was only correct when the picture filled it; under integer scaling
+		 * the picture is letterboxed, and the 2D layer sits `correction` pixels above the 3D viewport,
+		 * so an output-height rectangle leaves that overhang visible as a bright line along the top
+		 * edge. The non-wide branch below computes exactly the bounds wanted here.
 		 */
+		int y = extentHeight - (yOffset + yRes) + correction;
+		int h = yRes - 2 * correction;
+		if (y < 0) { h += y; y = 0; }
+		if (y + h > extentHeight) h = extentHeight - y;
+		if (h < 0) h = 0;
+
 		outX = 0;
-		outY = correction;
+		outY = y;
 		outW = extentWidth;
-		outH = extentHeight - 2 * correction;
-		if (outY < 0) { outH += outY; outY = 0; }
-		if (outH < 0) outH = 0;
+		outH = h;
 		return;
 	}
 

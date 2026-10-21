@@ -80,8 +80,9 @@ private:
 	void GenerateCompositeMips(VkCommandBuffer cmd);
 
 	// Bezel backdrop.
-	bool LoadBezelImage();
+	bool LoadBezelImage(bool updateDescriptor = false);
 	bool UploadBezel(VkCommandBuffer cmd);
+	void UpdateBezelDescriptor();
 	void DrawBezelPass(VkCommandBuffer cmd);
 	void BezelGameRect(int& x, int& y, int& w, int& h) const;
 	void PictureRect(int& x, int& y, int& w, int& h) const;

@@ -1337,6 +1337,16 @@ void StatsOsdSetTargetRate(float hz)
 
 bool StatsOsdBorderlessJudderPending()
 {
+	/*
+	 * Only the composited paths have the problem this names. An exclusive session holds one panel
+	 * scan per frame - either VRR tracking the emulator or a fixed 57/58 Hz mode - so an uneven
+	 * panel-scan ratio there describes a state that cannot occur. The ratio is still logged with the
+	 * placement line for support purposes; what is suppressed is the "switch to an exclusive mode"
+	 * notice, which in an exclusive session would be advising the mode already in use.
+	 */
+	if (g_syncMode == StatsSyncMode::ExclusiveVrr || g_syncMode == StatsSyncMode::ExclusiveFixedRate)
+		return false;
+
 	double ratio = 0.0;
 	return ClassifyCadence(ratio) == Cadence::Uneven;
 }

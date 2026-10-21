@@ -47,10 +47,10 @@ CVulkan3D::CVulkan3D(const Util::Config::Node& config, const std::string& gameNa
 	m_wide = config["WideScreen"].ValueAs<bool>();
 	m_noWhiteFlash = config["NoWhiteFlash"].ValueAs<bool>();
 
-	// Hardware MSAA level: 1 (or 0) disables it, 2 and 4 select that many samples. Only powers of two
-	// between 1 and 4 are accepted; anything else falls back to no multisampling.
+	// Hardware MSAA level: 1 (or 0) disables it, 2, 4 and 8 select that many samples. Only powers
+	// of two between 1 and 8 are accepted; anything else falls back to no multisampling.
 	const int msaa = config["MSAA"].ValueAsDefault<int>(0);
-	if (msaa > 1 && msaa <= 4 && (msaa & (msaa - 1)) == 0)
+	if (msaa > 1 && msaa <= 8 && (msaa & (msaa - 1)) == 0)
 	{
 		// Ask the driver whether it really supports this sample count for both attachment formats
 		// before committing to it. Nothing checked this before, so an unsupported combination would
@@ -1390,6 +1390,9 @@ void CVulkan3D::RenderFrame(void)
 		return;
 	VkCommandBuffer cmd = m_context.Cmd();
 	m_scene.BeginFrame();
+	// Re-read every frame so the in-game overlay can toggle it live. It only changes the horizontal
+	// frustum, which CalcViewport derives per frame from this flag.
+	m_wide = m_config["WideScreen"].ValueAs<bool>();
 	m_scene.SetViewport(m_xOff, m_yOff, m_xRes, m_yRes, m_totalX, m_totalY, m_wide);
 	if (!(m_blockCulling && !m_noWhiteFlash))
 		m_scene.Build();

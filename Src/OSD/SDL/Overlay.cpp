@@ -41,8 +41,12 @@
 #include <windows.h>
 #endif
 
+#include <chrono>
+#include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace
@@ -104,7 +108,30 @@ bool g_frameRendered = false;
 // element of the frame.
 OverlayCrosshairState g_crosshair;
 
+// Save-state menu callbacks, registered by the game loop for the duration of a session.
+OverlaySaveHandlers g_saveHandlers;
+
+/*
+ * Mouse wheel accumulated by the SDL event watch.
+ *
+ * The rest of the input here is polled as state (GetAsyncKeyState, GetCursorPos) because the game's
+ * input systems can consume or fail to update SDL's state. The wheel has no state to poll - it is an
+ * event - so it arrives through SDL_AddEventWatch, which observes events on their way into the queue
+ * without removing them. The game still sees the wheel; the panel just accumulates it and hands it
+ * to ImGui on the next frame.
+ */
+float g_wheelY = 0.0f;
+bool g_wheelWatchAdded = false;
+
+static int SDLCALL WheelEventWatch(void*, SDL_Event* event)
+{
+	if (event->type == SDL_MOUSEWHEEL)
+		g_wheelY += (float)event->wheel.y;
+	return 0;   // keep it in the queue for the game
+}
+
 const char* const kOverlayKeys[] = {
+	"WideScreen",
 	"PostFXAA",
 	"PostCRT",
 	"PostScanlines",
@@ -197,6 +224,13 @@ void FeedInput()
 	// No HiDPI framebuffer scaling: the swapchain is the window's pixel size in this renderer.
 	io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
 
+	// Consume the accumulated wheel delta. Discarded while the panel is closed: scrolling a hidden
+	// window would bank a delta that fires the moment it is opened.
+	const float wheel = g_wheelY;
+	g_wheelY = 0.0f;
+	if (g_visible && wheel != 0.0f)
+		io.AddMouseWheelEvent(0.0f, wheel);
+
 #ifdef _WIN32
 	HWND hwnd = nullptr;
 	if (g_window != nullptr)
@@ -275,6 +309,16 @@ void RestoreSnapshot(Util::Config::Node& config)
 
 } // anonymous namespace
 
+void OverlaySetSaveHandlers(OverlaySaveHandlers handlers)
+{
+	g_saveHandlers = std::move(handlers);
+}
+
+void OverlayClearSaveHandlers()
+{
+	g_saveHandlers = OverlaySaveHandlers();
+}
+
 /*
  * Creates the ImGui context the panel lives in, if it does not exist yet, and makes it current.
  *
@@ -307,6 +351,14 @@ static bool EnsureContext(float uiScale)
 	LoadUiFont(io, uiScale);
 	if (uiScale > 1.05f)
 		ImGui::GetStyle().ScaleAllSizes(uiScale);
+
+	// One watch per process. SDL calls it for every event pushed, including wheel events pumped by
+	// whichever input system is active, so it does not depend on SDL being the game's input backend.
+	if (!g_wheelWatchAdded)
+	{
+		SDL_AddEventWatch(WheelEventWatch, nullptr);
+		g_wheelWatchAdded = true;
+	}
 	return true;
 }
 
@@ -436,6 +488,12 @@ void OverlayShutdown()
 	g_visible = false;
 	g_haveSnapshot = false;
 	g_crosshair = OverlayCrosshairState();
+	g_wheelY = 0.0f;
+	if (g_wheelWatchAdded)
+	{
+		SDL_DelEventWatch(WheelEventWatch, nullptr);
+		g_wheelWatchAdded = false;
+	}
 }
 
 bool OverlayVisible()
@@ -508,6 +566,101 @@ static void DrawOverlayCrosshair(ImDrawList* draw, float cx, float cy, ImU32 col
 		ImVec2(cx + dist + height, cy + base / 2.0f), color);
 }
 
+/*
+ * Absolute local time of a save, rather than "5 min ago".
+ *
+ * The list is rebuilt every frame and carries only the age, so the wall-clock time is recovered by
+ * subtracting it from now. A second of drift between the two is invisible at minute resolution, and
+ * this avoids adding a second timestamp field to the callback structure for the same information.
+ */
+static const char* FormatSaveTime(double ageSeconds)
+{
+	static char buffer[32];
+	const auto saved = std::chrono::system_clock::now() -
+		std::chrono::duration_cast<std::chrono::system_clock::duration>(
+			std::chrono::duration<double>(ageSeconds));
+	const std::time_t time = std::chrono::system_clock::to_time_t(saved);
+	std::tm local{};
+#ifdef _WIN32
+	localtime_s(&local, &time);
+#else
+	localtime_r(&time, &local);
+#endif
+	std::strftime(buffer, sizeof(buffer), "%Y%m%d-%H:%M", &local);
+	return buffer;
+}
+
+/*
+ * Save-state rows.
+ *
+ * Kept out of DrawAdvancedSettingsPanel because that function is also the settings window's page;
+ * saves only exist while a game runs, and the handlers are what says so. The buttons act immediately
+ * - they are not part of the Apply/Cancel snapshot, which is about configuration values.
+ */
+static void DrawSaveStateSection()
+{
+	if (!g_saveHandlers.list || !g_saveHandlers.apply)
+		return;
+
+	if (!ImGui::CollapsingHeader(Tr("即时存档##OverlaySaveStates"), ImGuiTreeNodeFlags_DefaultOpen))
+		return;
+
+	const std::vector<OverlaySaveSlot> slots = g_saveHandlers.list();
+	if (ImGui::BeginTable("OverlaySaveSlots", 3,
+			ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp))
+	{
+		/*
+		 * Column widths are measured from the translated labels rather than written as constants, so
+		 * they follow both the interface language and the UI scale.
+		 *
+		 * Slot holds a number and at most a " *" marker; it needs far less than the 70 pixels it used to
+		 * take, and the width it gives up goes to Status. Status now shows a full date and time rather
+		 * than "5 min ago", which is the column that needs the room. Actions holds Save and Load only:
+		 * pressing either also makes that slot current, so the separate "Use for F5/F7" button was
+		 * redundant and has been removed.
+		 */
+		const ImGuiStyle& style = ImGui::GetStyle();
+		const float slotWidth = ImGui::CalcTextSize(Tr("槽位")).x + style.CellPadding.x * 2.0f + 4.0f;
+		ImGui::TableSetupColumn(Tr("槽位"), ImGuiTableColumnFlags_WidthFixed, slotWidth);
+		ImGui::TableSetupColumn(Tr("状态"), ImGuiTableColumnFlags_WidthStretch);
+		const float actionWidth =
+			ImGui::CalcTextSize(Tr("保存")).x + ImGui::CalcTextSize(Tr("读取")).x +
+			style.FramePadding.x * 4.0f + style.ItemSpacing.x + style.CellPadding.x * 2.0f + 4.0f;
+		ImGui::TableSetupColumn(Tr("操作"), ImGuiTableColumnFlags_WidthFixed, actionWidth);
+		ImGui::TableHeadersRow();
+
+		for (const auto& slot : slots)
+		{
+			ImGui::TableNextRow();
+			ImGui::PushID((int)slot.slot);
+
+			ImGui::TableSetColumnIndex(0);
+			if (slot.active)
+				ImGui::Text("%u *", slot.slot);
+			else
+				ImGui::Text("%u", slot.slot);
+
+			ImGui::TableSetColumnIndex(1);
+			if (slot.exists)
+				ImGui::TextUnformatted(FormatSaveTime(slot.ageSeconds));
+			else
+				ImGui::TextDisabled("%s", Tr("空"));
+
+			ImGui::TableSetColumnIndex(2);
+			if (ImGui::SmallButton(Tr("保存")))
+				g_saveHandlers.apply(slot.slot, true);
+			ImGui::SameLine();
+			ImGui::BeginDisabled(!slot.exists);
+			if (ImGui::SmallButton(Tr("读取")))
+				g_saveHandlers.apply(slot.slot, false);
+			ImGui::EndDisabled();
+
+			ImGui::PopID();
+		}
+		ImGui::EndTable();
+	}
+}
+
 bool OverlayNewFrame(Util::Config::Node& config)
 {
 	/*
@@ -550,7 +703,16 @@ bool OverlayNewFrame(Util::Config::Node& config)
 	// Left-hand side, so the game's own view of the track stays visible while the values are changed.
 	const ImGuiViewport* viewport = ImGui::GetMainViewport();
 	ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + 16.0f, viewport->WorkPos.y + 16.0f), ImGuiCond_FirstUseEver);
-	ImGui::SetNextWindowSize(ImVec2(430.0f * g_uiScale, viewport->WorkSize.y - 32.0f), ImGuiCond_FirstUseEver);
+	/*
+	 * A capped default height rather than the full work area.
+	 *
+	 * Three quarters of the screen: the paragraphs of help under the controls are gone, so full
+	 * height leaves mostly empty space, but the CRT section still wants room to be read without
+	 * scrolling. The body scrolls when it does not fit and the window remains resizable.
+	 */
+	const float fullHeight = viewport->WorkSize.y - 32.0f;
+	const float defaultHeight = fullHeight * 0.75f;
+	ImGui::SetNextWindowSize(ImVec2(430.0f * g_uiScale, defaultHeight), ImGuiCond_FirstUseEver);
 	ImGui::SetNextWindowSizeConstraints(ImVec2(340.0f, 240.0f), ImVec2(FLT_MAX, FLT_MAX));
 
 	// No collapse toggle and no scrollbar-drag surprises: this is a panel to be dragged around and
@@ -566,15 +728,17 @@ bool OverlayNewFrame(Util::Config::Node& config)
 		 * scrolled off the bottom, which makes Apply and Cancel reachable only by scrolling a panel
 		 * whose scrollbar is easy to miss.
 		 *
-		 * The reserved height covers the button row plus the hint line under it. StartChild with a
-		 * negative height means "everything except that much", so the body scrolls and the footer
-		 * does not.
+		 * The reserved height covers the button row only: the hint line that used to sit under it has
+		 * been removed, and leaving its height reserved would reintroduce an empty strip above the
+		 * bottom of the window. StartChild with a negative height means "everything except that much",
+		 * so the body scrolls and the footer does not.
 		 */
-		const float footer = ImGui::GetFrameHeightWithSpacing() + ImGui::GetTextLineHeightWithSpacing()
-			+ ImGui::GetStyle().ItemSpacing.y;
+		const float footer = ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y;
 
 		ImGui::BeginChild("OverlayBody", ImVec2(0, -footer), ImGuiChildFlags_None);
 		DrawAdvancedSettingsPanel(config, true);
+		ImGui::Spacing();
+		DrawSaveStateSection();
 		ImGui::EndChild();
 
 		ImGui::Separator();
@@ -596,13 +760,6 @@ bool OverlayNewFrame(Util::Config::Node& config)
 		ImGui::SameLine();
 		if (ImGui::Button(Tr("关闭##OverlayClose"), ImVec2(buttonWidth, 0)))
 			g_visible = false;
-
-		// Wrapped explicitly: this file has no access to Gui.cpp's helpers (they are file-static), and
-		// a bare TextDisabled draws one clipped line. This string is short today, but the panel body
-		// above it uses the same convention and a future edit should not have to know the difference.
-		ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x);
-		ImGui::TextDisabled("%s", Tr("Tab 开关此面板。改动立即生效，无需重启。"));
-		ImGui::PopTextWrapPos();
 	}
 	ImGui::End();
 

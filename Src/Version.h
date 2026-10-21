@@ -57,32 +57,25 @@
 #endif
 
 /*
- * This fork's own version, and the date of the build it describes.
+ * This fork's own version.
  *
- * Separate from SUPERMODEL_VERSION above, which is the upstream core's and is written into save states
- * - changing that one would invalidate every save state a user already has. These two identify the
- * fork instead, and are free to change whenever the fork does.
- *
- * The date is a plain YYYYMMDD rather than anything derived from the clock at compile time: a version
- * that changes on every rebuild cannot be referred to, and "which build are you running?" is the first
- * question asked about any bug report. Bumping it deliberately is the point.
+ * Separate from SUPERMODEL_VERSION above, which is the upstream core's and is written into save
+ * states - changing that one would invalidate every save state a user already has. This one
+ * identifies the fork instead and is bumped for every release. It is also the release tag, so
+ * reusing a version updates (and overwrites) the previous release rather than creating a new one.
  */
 #ifndef SUPERMODEL_FORK_VERSION
-#define SUPERMODEL_FORK_VERSION	"0.9.0.3a"
-#endif
-
-#ifndef SUPERMODEL_FORK_DATE
-#define SUPERMODEL_FORK_DATE	"20261017"
+#define SUPERMODEL_FORK_VERSION	"0.9.2.3a"
 #endif
 
 /*
  * What the interface calls itself, version included, wherever a user sees it.
  *
- * Assembled from the three parts above so the pieces cannot drift apart, and defined here rather than
+ * Assembled from the two parts above so the pieces cannot drift apart, and defined here rather than
  * at each use so that the title bar, the in-game window and the console banner cannot disagree about
  * which build is running. build.bat reads these same lines out of this file to label the release, so
  * this is the single place the version is written down.
  */
-#define SUPERMODEL_TITLE_FULL	SUPERMODEL_TITLE " v" SUPERMODEL_FORK_VERSION "-" SUPERMODEL_FORK_DATE
+#define SUPERMODEL_TITLE_FULL	SUPERMODEL_TITLE " v" SUPERMODEL_FORK_VERSION
 
 #endif	// INCLUDED_VERSION_H

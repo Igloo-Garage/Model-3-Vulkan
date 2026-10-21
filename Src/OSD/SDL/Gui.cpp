@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdarg>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -36,6 +37,8 @@
 #include <shlobj.h>
 #include <shobjidl.h>
 #include <SDL_syswm.h>
+#include <wincodec.h>
+#pragma comment(lib, "windowscodecs.lib")
 #include "../Src/OSD/Windows/DirectInputSystem.h"
 #endif
 
@@ -126,21 +129,40 @@ static void PopHelpWrap() { ImGui::PopTextWrapPos(); }
  */
 static void DrawWrappedTooltip(const char* text)
 {
-	const float wrapAt = ImGui::GetFontSize() * 30.0f;
-	// Cap against the window too, so a narrow window does not get a tooltip wider than itself.
-	const float windowWidth = ImGui::GetWindowWidth();
-	if (windowWidth > 0.0f && wrapAt > windowWidth)
-	{
-		ImGui::BeginTooltip();
-		ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + windowWidth - ImGui::GetStyle().WindowPadding.x * 2.0f);
-		ImGui::TextUnformatted(text);
-		ImGui::PopTextWrapPos();
-		ImGui::EndTooltip();
-		return;
-	}
+	ImGuiStyle& style = ImGui::GetStyle();
 
+	/*
+	 * Measure the text before creating the tooltip.
+	 *
+	 * The measurement is what allows the popup to be positioned inside the settings panel rather
+	 * than letting ImGui grow it to the right until it covers the scrollbar. The wrap width is
+	 * capped by the current window's content area, which excludes that scrollbar and the window
+	 * padding - so "inside the panel" is the visible column, not the outer window rectangle.
+	 */
+	const float margin = 8.0f;
+	const float fontWrap = ImGui::GetFontSize() * 30.0f;
+	const float contentWidth = (std::max)(
+		ImGui::GetWindowContentRegionMax().x - ImGui::GetWindowContentRegionMin().x, 1.0f);
+	const float maxTextWidth = (std::max)(
+		contentWidth - margin * 2.0f - style.WindowPadding.x * 2.0f - style.WindowBorderSize * 2.0f, 64.0f);
+	const float wrapWidth = (std::min)(fontWrap, maxTextWidth);
+
+	const ImVec2 textSize = ImGui::CalcTextSize(text, nullptr, false, wrapWidth);
+	const float tooltipWidth = textSize.x + style.WindowPadding.x * 2.0f + style.WindowBorderSize * 2.0f;
+
+	const ImVec2 mouse = ImGui::GetIO().MousePos;
+	const float leftLimit = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMin().x + margin;
+	const float rightLimit = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x - margin;
+
+	ImVec2 pos(mouse.x + 16.0f * style.MouseCursorScale, mouse.y + 10.0f * style.MouseCursorScale);
+	if (pos.x + tooltipWidth > rightLimit)
+		pos.x = rightLimit - tooltipWidth;
+	if (pos.x < leftLimit)
+		pos.x = leftLimit;
+
+	ImGui::SetNextWindowPos(pos, ImGuiCond_Always);
 	ImGui::BeginTooltip();
-	ImGui::PushTextWrapPos(wrapAt);
+	ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrapWidth);
 	ImGui::TextUnformatted(text);
 	ImGui::PopTextWrapPos();
 	ImGui::EndTooltip();
@@ -304,6 +326,11 @@ static bool HasDedicatedUI(const std::string& key)
         "Vulkan3DEngine", "New3DEngine", "VkValidation", "VulkanDevice",
         "XResolution", "YResolution", "FullScreen", "Stretch", "WideScreen", "VSync", "ShowFrameRate", "ShowStatsOsd",
         "IntegerScale", "UiLanguage",
+        // Fullscreen refresh mode. The radio group on the 常用 page writes both keys together,
+        // because they are one three-way choice and not two independent switches - the generic
+        // list showed them as a bare 0.000000 float and a checkbox beside it, which invites setting
+        // them to a combination the resolver then has to silently reinterpret.
+        "ExclusiveFullscreen", "ExclusiveRefreshRate",
         // Bezel backdrop. Hand-drawn on the "画面" page, where a display option belongs.
         "BezelMode", "BezelImage", "BezelBrightness",
         // Anti-aliasing and post-processing filters. These live in "高级设置" only.
@@ -551,6 +578,10 @@ static const char* ScopeReasonKey(SettingScope scope)
     }
 }
 
+// Defined below with the display cache; declared here so the Refresh rate control can ask it
+// whether the G-SYNC path is going to lock the emulator to the arcade rate.
+static bool VrrArcadeRateSupported();
+
 static void CreateControls(Util::Config::Node& config, const std::string group)
 {
     // Read once rather than per key: the renderer cannot change while a page is being drawn, and
@@ -645,7 +676,7 @@ static void CreateControls(Util::Config::Node& config, const std::string group)
                                     sVector[i] = Tr(names[i]);
                             }
                             if (key == "RefreshRate" && sVector.size() == 2) {
-                                static const char* names[] = { "57.5 Hz（真实机台）", "60 Hz（推荐）" };
+                                static const char* names[] = { "57.5 Hz（真实机台）", "60 Hz（非 VRR / 60Hz 面板）" };
                                 for (int i = 0; i < 2; i++)
                                     sVector[i] = Tr(names[i]);
                             }
@@ -664,32 +695,41 @@ static void CreateControls(Util::Config::Node& config, const std::string group)
                                 sVectorChar.emplace_back(s.c_str());
                             }
 
-                            // A fixed arcade refresh rate overrides this setting, so show the value
+                            // A fixed arcade refresh rate, or the G-SYNC path on a display whose
+                            // timing range contains 57.5 Hz, overrides this setting. Show the value
                             // that will actually be used and make it read-only, rather than leaving a
                             // number on screen that has no effect.
                             //
                             // The stored preference is deliberately left untouched: it is still what
-                            // takes over if the fixed rate is turned off again, so silently rewriting
+                            // takes over if the override is turned off again, so silently rewriting
                             // it here would lose the user's choice.
                             const bool isRefreshRate = (key == "RefreshRate");
                             const bool fixedRateOverride = isRefreshRate &&
                                 config["ExclusiveRefreshRate"].ValueAsDefault<float>(0.0f) > 0.0f;
+                            const bool vrrAutoRate = isRefreshRate &&
+                                config["ExclusiveRefreshRate"].ValueAsDefault<float>(0.0f) <= 0.0f &&
+                                config["ExclusiveFullscreen"].ValueAsDefault<bool>(false) &&
+                                VrrArcadeRateSupported();
+                            const bool rateOverridden = fixedRateOverride || vrrAutoRate;
 
-                            if (fixedRateOverride) {
+                            if (rateOverridden) {
                                 selectedIndex = 0;      // 57.5 Hz, the arcade rate
                                 ImGui::BeginDisabled();
                             }
                             ImGui::Combo(uiLabel, &selectedIndex, sVectorChar.data(), (int)sVectorChar.size());
-                            if (fixedRateOverride) {
+                            if (rateOverridden) {
                                 ImGui::EndDisabled();
-                                UiTextDim("（由「独占全屏 · 固定街机刷新率」决定）");
+                                if (fixedRateOverride)
+                                    UiTextDim("（由「独占全屏 · 固定街机刷新率」决定）");
+                                else
+                                    UiTextDim("（G-SYNC 自动使用街机 57.5Hz）");
                             }
                             else {
                                 vRange->tempValue = list[selectedIndex];
-                                // Under G-SYNC this setting still applies - it is the rate the
-                                // emulator presents at and the panel follows it - which is easy to
-                                // misread as "exclusive mode overrides it". Worth saying plainly,
-                                // since the fixed-rate mode above does override it.
+                                // The G-SYNC path applies this setting only when the display's range
+                                // does not confirm 57.5 Hz; otherwise the override above is showing the
+                                // arcade rate instead. Worth saying plainly, since the two cases look
+                                // the same at a glance.
                                 if (isRefreshRate && config["ExclusiveFullscreen"].ValueAsDefault<bool>(false)) {
                                     UiTextDim("（G-SYNC 下为呈现节奏，显示器跟随）");
                                 }
@@ -1024,6 +1064,11 @@ struct RomEntry
 static std::string g_romFolderCached;
 static std::vector<RomEntry> g_roms;
 
+// Fraction of the left column taken by the game preview. Written when the splitter is dragged and
+// read back on the next launch (from the Global section, like GuiWindowWidth/Height). -1 means the
+// stored value has not been read yet.
+static float g_previewSplit = -1.0f;
+
 // Controller detection for the settings window. DetectController() enumerates SDL devices, which is
 // not something to do every frame, so the result is cached. The cache is invalidated whenever a pad
 // is plugged in or removed and by the 重新检测 button, so plugging a controller in while the window
@@ -1082,6 +1127,47 @@ static HWND WindowHandle(SDL_Window* window)
     if (!SDL_GetWindowWMInfo(window, &info))
         return nullptr;
     return info.info.win.window;
+}
+
+/*
+ * Brings the settings window to the foreground after startup or a game session.
+ *
+ * On a first run Windows SmartScreen owns the foreground while the process starts. The window is
+ * created normally but is not activated: it appears on the taskbar, behind whatever had focus, and
+ * the user has to click it before the interface shows. SDL_ShowWindow/SDL_RaiseWindow do not
+ * override the foreground lock.
+ *
+ * AttachThreadInput is the documented way to take the foreground while another thread owns it. It
+ * is attached only around the call and detached immediately; this runs at startup and when
+ * returning from a game, not per frame.
+ */
+static void RaiseSettingsWindow(SDL_Window* window)
+{
+    if (window == nullptr)
+        return;
+
+#ifdef _WIN32
+    HWND hwnd = WindowHandle(window);
+    if (hwnd == nullptr)
+        return;
+
+    // Restore first: a process launched through SmartScreen can arrive minimized, in which case
+    // setting the foreground alone would leave it on the taskbar.
+    ShowWindow(hwnd, SW_RESTORE);
+    SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+
+    const HWND foreground = GetForegroundWindow();
+    const DWORD foregroundThread = foreground ? GetWindowThreadProcessId(foreground, nullptr) : 0;
+    const DWORD currentThread = GetCurrentThreadId();
+    const bool attached = foregroundThread != 0 && foregroundThread != currentThread &&
+        AttachThreadInput(foregroundThread, currentThread, TRUE) != 0;
+    SetForegroundWindow(hwnd);
+    if (attached)
+        AttachThreadInput(foregroundThread, currentThread, FALSE);
+#else
+    SDL_ShowWindow(window);
+    SDL_RaiseWindow(window);
+#endif
 }
 
 static bool BrowseFolder(SDL_Window* window, std::string& path)
@@ -1566,6 +1652,334 @@ static void RefreshRoms(const std::string& folder, const std::map<std::string, G
     g_roms = ScanRomFolder(folder, games);
 }
 
+/*
+ * Cover art for the game list.
+ *
+ * Every ROM set in Assets/Boxarts/ is named after the set and stored as WebP, which cuts the
+ * archive to roughly a quarter of the size of the original PNGs. One texture per set is uploaded
+ * on first use and kept for the lifetime of the window; failures are cached as well, so a set
+ * without artwork costs a single directory lookup rather than one per frame.
+ */
+struct BoxartTexture
+{
+    unsigned texture = 0;
+    int width = 0;
+    int height = 0;
+};
+
+static std::map<std::string, BoxartTexture> g_boxartTextures;
+
+#ifdef _WIN32
+/*
+ * Decodes WebP boxart with WIC.
+ *
+ * Windows 10 1809 and later ship a WIC codec for WebP, so no third-party decoder is needed. The
+ * image is scaled while still on the CPU: the files are around 512x700, but the preview only ever
+ * draws them about 200 pixels tall and there are dozens of them.
+ */
+static bool DecodeBoxart(const std::filesystem::path& path, int maxWidth, std::vector<uint8_t>& pixels, int& width, int& height)
+{
+    // WIC is COM-based. The settings window has not necessarily initialised COM on this thread,
+    // and repeated calls must not fail: S_FALSE means "already initialised" and
+    // RPC_E_CHANGED_MODE means "initialised with the other threading model". Both are fine here.
+    static IWICImagingFactory* factory = []() -> IWICImagingFactory* {
+        const HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        if (FAILED(init) && init != RPC_E_CHANGED_MODE)
+            return nullptr;
+        IWICImagingFactory* created = nullptr;
+        if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                                    IID_PPV_ARGS(&created))))
+            return nullptr;
+        return created;
+    }();
+    if (factory == nullptr)
+        return false;
+
+    IWICBitmapDecoder* decoder = nullptr;
+    if (FAILED(factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ,
+                                                  WICDecodeMetadataCacheOnLoad, &decoder)))
+        return false;
+
+    IWICBitmapFrameDecode* frame = nullptr;
+    if (FAILED(decoder->GetFrame(0, &frame)))
+    {
+        decoder->Release();
+        return false;
+    }
+
+    UINT sourceWidth = 0;
+    UINT sourceHeight = 0;
+    frame->GetSize(&sourceWidth, &sourceHeight);
+
+    IWICBitmapSource* source = frame;
+    IWICBitmapScaler* scaler = nullptr;
+    if (maxWidth > 0 && sourceWidth > (UINT)maxWidth && sourceHeight > 0)
+    {
+        const UINT scaledWidth = (UINT)maxWidth;
+        const long rounded = std::lround(sourceHeight * (double)scaledWidth / (double)sourceWidth);
+        const UINT scaledHeight = (UINT)(std::max)(1L, rounded);
+        if (SUCCEEDED(factory->CreateBitmapScaler(&scaler)) &&
+            SUCCEEDED(scaler->Initialize(frame, scaledWidth, scaledHeight, WICBitmapInterpolationModeHighQualityCubic)))
+        {
+            source = scaler;
+        }
+        else if (scaler != nullptr)
+        {
+            scaler->Release();
+            scaler = nullptr;
+        }
+    }
+
+    bool ok = false;
+    IWICFormatConverter* converter = nullptr;
+    if (SUCCEEDED(factory->CreateFormatConverter(&converter)) &&
+        SUCCEEDED(converter->Initialize(source, GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone,
+                                        nullptr, 0.0, WICBitmapPaletteTypeMedianCut)))
+    {
+        UINT outWidth = 0;
+        UINT outHeight = 0;
+        if (SUCCEEDED(converter->GetSize(&outWidth, &outHeight)) && outWidth > 0 && outHeight > 0)
+        {
+            const UINT stride = outWidth * 4;
+            pixels.resize((size_t)stride * outHeight);
+            if (SUCCEEDED(converter->CopyPixels(nullptr, stride, (UINT)pixels.size(), pixels.data())))
+            {
+                width = (int)outWidth;
+                height = (int)outHeight;
+                ok = true;
+            }
+        }
+    }
+
+    if (converter != nullptr)
+        converter->Release();
+    if (scaler != nullptr)
+        scaler->Release();
+    frame->Release();
+    decoder->Release();
+    return ok;
+}
+#endif
+
+/*
+ * Returns the cover texture for a set, creating it on first use.
+ *
+ * Called only from GUI(), which runs with the settings window's OpenGL context current, so the
+ * texture can be uploaded directly. The result (including "no artwork") is cached in
+ * g_boxartTextures and lives until GuiDestroy().
+ */
+static BoxartTexture LoadBoxart(const std::string& setName)
+{
+    auto cached = g_boxartTextures.find(setName);
+    if (cached != g_boxartTextures.end())
+        return cached->second;
+
+    BoxartTexture result;
+    g_boxartTextures.emplace(setName, result);
+
+    const std::filesystem::path path = PathFromUtf8(FileSystemPath::GetPath(FileSystemPath::Assets)) /
+        "Boxarts" / (setName + ".webp");
+    std::error_code error;
+    if (!std::filesystem::is_regular_file(path, error))
+        return result;
+
+#ifdef _WIN32
+    std::vector<uint8_t> pixels;
+    int width = 0;
+    int height = 0;
+    if (!DecodeBoxart(path, 384, pixels, width, height) || pixels.empty())
+        return result;
+
+    GLuint texture = 0;
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    result.texture = texture;
+    result.width = width;
+    result.height = height;
+    g_boxartTextures[setName] = result;
+#endif
+
+    return result;
+}
+
+static void ReleaseBoxartTextures()
+{
+    for (auto& item : g_boxartTextures)
+    {
+        if (item.second.texture != 0)
+            glDeleteTextures(1, &item.second.texture);
+    }
+    g_boxartTextures.clear();
+}
+
+/*
+ * Short English descriptions for the preview panel.
+ *
+ * The interface language does not affect these: they are deliberately English-only, so there is
+ * one table keyed by ROM set prefix rather than a field in Games.xml that would have to be
+ * translated for every regional revision. A prefix covers the variants of one game (all the
+ * Virtua Striker 2 revisions share an entry) and the missing entries fall back to a plain note.
+ */
+static const char* GameBlurb(const std::string& setName)
+{
+    struct Blurb
+    {
+        const char* prefix;
+        const char* text;
+    };
+    static const Blurb kBlurbs[] = {
+        { "bassdx",
+          "Arcade bass fishing with a rod controller. Cast, pick a lure and fight each fish to the boat before time runs out; the Deluxe version adds more lakes and lures." },
+        { "getbass",
+          "Arcade bass fishing with a rod controller. Cast, pick a lure and fight each fish to the boat before time runs out; the Deluxe version adds more lakes and lures." },
+        { "daytona2",
+          "Sega's stock-car racing sequel. Battle on the Edge adds four cars, three courses and rival racers; Power Edition retunes the handling and adds the Challenge course." },
+        { "dayto2pe",
+          "Sega's stock-car racing sequel. Battle on the Edge adds four cars, three courses and rival racers; Power Edition retunes the handling and adds the Challenge course." },
+        { "dirtdvls",
+          "Off-road racing with buggies and trucks. Courses are built around jumps, water and shortcuts, and linked cabinets support four-player races." },
+        { "eca",
+          "A driving game with a difference: race an ambulance through traffic, pick up patients and get them to hospital before the timer expires." },
+        { "fvipers2",
+          "The sequel to Fighting Vipers, a 3D fighter with an armour system that lets fighters lose damaged parts mid-match, plus a roster of new challengers." },
+        { "harley",
+          "Motorcycle racing through a free-roaming Los Angeles. Choose a Harley-Davidson, pass checkpoints and earn extra time by weaving through traffic." },
+        { "lamachin",
+          "A light-gun shooter in which one or two players fight through a machine-overrun Los Angeles with mounted machine guns and a dodge pedal." },
+        { "lemans24",
+          "Endurance racing on the Le Mans circuit. Drive sports prototypes through day, night and changing weather in a condensed 24-hour race." },
+        { "lostwsg",
+          "A light-gun shooter based on The Lost World: Jurassic Park. Two players cross Isla Sorna, fighting dinosaurs with a shotgun and a lock-on weapon." },
+        { "magtruck",
+          "A two-player co-operative action game. One player steers the magical truck and the other pedals as the pair cross a series of fantasy stages." },
+        { "mgtrkbad",
+          "A two-player co-operative action game. One player steers the magical truck and the other pedals as the pair cross a series of fantasy stages." },
+        { "oceanhun",
+          "An underwater light-gun shooter. Dive through sunken ruins and caverns, fighting giant sea creatures with harpoons and special weapons." },
+        { "scud",
+          "A GT racing game known outside Japan as Sega Super GT. Four cars compete across three courses, with linked cabinets for multiplayer." },
+        { "skichamp",
+          "A winter sports racer. Race down a snow-covered mountain, pulling tricks and dodging obstacles on the way to the finish." },
+        { "spikeout",
+          "A 3D beat 'em up for up to four players, built around combos and guarding. Final Edition revises the moves and adds stages and characters." },
+        { "spikeofe",
+          "A 3D beat 'em up for up to four players, built around combos and guarding. Final Edition revises the moves and adds stages and characters." },
+        { "srally2",
+          "The sequel to Sega Rally Championship, with more cars, courses and surface types. Linked cabinets support multiplayer rally racing." },
+        { "swtrilgy",
+          "A rail shooter covering the original Star Wars trilogy. Fly an X-wing, a speeder bike and the Millennium Falcon through the key battles." },
+        { "vf3",
+          "The third Virtua Fighter game and the first on Model 3. It introduced sidestep evades and uneven ground; Team Battle adds tag matches." },
+        { "von2",
+          "A fast 3D mecha fighter. Pilot Virtuaroids with twin-stick controls, boosting, dashing and firing around enclosed arenas." },
+        { "vs2",
+          "Sega's arcade football series, played fast and exaggerated. National teams pass, shoot and tackle through short matches; later revisions update the teams." },
+    };
+
+    for (const Blurb& blurb : kBlurbs)
+    {
+        if (setName.rfind(blurb.prefix, 0) == 0)
+            return blurb.text;
+    }
+    return nullptr;
+}
+
+/*
+ * The upper half of the left column: cover, title and a short description for one set.
+ *
+ * A null entry means nothing is selected yet. The cover is drawn at the panel's full height but
+ * capped at half its width, which keeps a portrait boxart from crowding out the text.
+ */
+static void DrawGamePreview(const RomEntry* entry, float width, float height)
+{
+    ImGui::BeginChild("GamePreview", ImVec2(width, height), ImGuiChildFlags_Borders,
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    if (entry == nullptr)
+    {
+        UiTextDim("把鼠标移到游戏上，或单击选中，这里会显示封面和英文简介。");
+        ImGui::EndChild();
+        return;
+    }
+
+    const BoxartTexture art = LoadBoxart(entry->setName);
+    const bool hasImage = art.texture != 0;
+    const ImVec2 available = ImGui::GetContentRegionAvail();
+
+    float imageHeight = available.y;
+    float imageWidth = hasImage ? imageHeight * (float)art.width / (float)art.height : available.x * 0.32f;
+    const float maxImageWidth = available.x * 0.48f;
+    if (imageWidth > maxImageWidth)
+    {
+        imageWidth = maxImageWidth;
+        if (hasImage)
+            imageHeight = imageWidth * (float)art.height / (float)art.width;
+    }
+    if (imageHeight > available.y)
+        imageHeight = available.y;
+
+    if (hasImage)
+    {
+        ImGui::Image(ImTextureRef((ImTextureID)(intptr_t)art.texture), ImVec2(imageWidth, imageHeight));
+    }
+    else
+    {
+        // A framed blank keeps the text in the same place whether or not a cover exists.
+        const ImVec2 origin = ImGui::GetCursorScreenPos();
+        ImGui::Dummy(ImVec2(imageWidth, imageHeight));
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        draw->AddRect(origin, ImVec2(origin.x + imageWidth, origin.y + imageHeight),
+                      ImGui::GetColorU32(ImGuiCol_Border));
+        const char* note = Tr("无封面");
+        const ImVec2 size = ImGui::CalcTextSize(note);
+        draw->AddText(ImVec2(origin.x + (imageWidth - size.x) * 0.5f, origin.y + (imageHeight - size.y) * 0.5f),
+                      ImGui::GetColorU32(ImGuiCol_TextDisabled), note);
+    }
+    ImGui::SameLine();
+
+    ImGui::BeginGroup();
+    const std::string title = TrGameTitle(entry->title.c_str());
+    ImGui::TextWrapped("%s", title.c_str());
+    const std::string version = TrGameVersion(entry->version);
+    if (!version.empty() && entry->year > 0)
+        ImGui::TextDisabled("%s  -  %d", version.c_str(), entry->year);
+    else if (!version.empty())
+        ImGui::TextDisabled("%s", version.c_str());
+    else if (entry->year > 0)
+        ImGui::TextDisabled("%d", entry->year);
+
+    // An unrecognised set is named after its .zip and may share a prefix with a real title, so the
+    // blurb table is only consulted for sets Games.xml actually defines.
+    const char* blurb = entry->supported ? GameBlurb(entry->setName) : nullptr;
+    if (blurb != nullptr)
+    {
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        PushHelpWrap();
+        ImGui::TextUnformatted(blurb);
+        PopHelpWrap();
+    }
+    else if (!entry->supported)
+    {
+        UiTextDim("这个 ROM 集在 Games.xml 里没有定义。");
+    }
+    else
+    {
+        UiTextDim("这个游戏还没有简介。");
+    }
+    ImGui::EndGroup();
+
+    ImGui::EndChild();
+}
+
 static std::string SelectedRomPath(int index)
 {
     if (index < 0 || index >= (int)g_roms.size())
@@ -1802,27 +2216,24 @@ static void DrawTriggerPairingHint(Util::Config::Node& config)
     if (!usesRz && !usesSharedZ)
         return;
 
-    // Explain what the selected system expects, always - the naming is not obvious.
+    // Explain what the selected system expects in the tooltip next to the warning, not in a line of
+    // prose: the control it belongs to is the "Fix trigger binding" button below.
     const char* want = perTrigger ? "JOY1_RZAXIS" : "JOY1_ZAXIS_POS";
-    ImGui::SameLine();
-    UiTextDim("(?)");
-    if (ImGui::IsItemHovered())
-        UiTooltip(
-            "不同输入系统下这个轴的名字不同，\n"
-            "切换后原来的绑定会失效。\n"
-            "当前 %s 需要 %s。",
-            system.c_str(), want);
 
     if (perTrigger == usesRz)
         return;     // consistent: RZAXIS with a per-trigger system, ZAXIS_POS with a shared one
 
     UiTextColored(kAttentionColour,
         "刹车绑定的扳机形式与当前输入系统不符，刹车会没反应。");
-    UiTextDim("    当前是 %s，需要 %s（现为 %s）", system.c_str(), want, brake.c_str());
     if (UiButton("修复扳机绑定##FixTrigger"))
         config.Set("InputBrake", perTrigger ? "KEY_DOWN,JOY1_RZAXIS" : "KEY_DOWN,JOY1_ZAXIS_POS");
     ImGui::SameLine();
-    UiTextDim("或点「应用推荐键位」按当前系统重新配对。");
+    UiTextDim("(?)");
+    if (ImGui::IsItemHovered())
+        UiTooltip(
+            "当前是 %s，需要 %s（现为 %s）\n"
+            "或点「应用推荐键位」按当前系统重新配对。",
+            system.c_str(), want, brake.c_str());
 }
 
 /*
@@ -1835,13 +2246,15 @@ static void DrawTriggerPairingHint(Util::Config::Node& config)
  * than as a stale cache. Enumerating display modes is cheap, so this costs nothing at twice a second.
  *
  * The EDID range is different: it goes through WMI, which costs tens of milliseconds and would be
- * visible as a hitch if it ran on a timer. It is fetched once, on the first frame that needs it, and
- * kept - a display's EDID does not change while it is attached, and the line it feeds only appears when
- * the mode check has already failed.
+ * visible as a hitch if it ran on a timer. It is fetched once per output, on the first frame that
+ * needs it and again when the output changes - a display's EDID does not change while it is
+ * attached. It feeds both the range note (when the fixed-rate mode is unavailable) and the G-SYNC
+ * auto-rate decision.
  */
 struct ArcadeDisplayInfo
 {
     bool modeAvailable = false;
+    bool vrrArcadeRate = false;     // G-SYNC path: the display's range contains 57.5 Hz
     std::vector<DisplayTimingInfo> displays;
     bool fetched = false;
 };
@@ -1866,22 +2279,149 @@ static const ArcadeDisplayInfo& GetArcadeDisplayInfo()
     if (framesUntilCheck-- <= 0 || displayIndex != checkedDisplay)
     {
         framesUntilCheck = 120;
+        const bool displayChanged = (displayIndex != checkedDisplay);
         checkedDisplay = displayIndex;
         info.modeAvailable = HasArcadeDisplayMode(57.5242f);
 
-        // Only worth asking for while it is going to be shown, which is the unavailable case.
-        if (!info.modeAvailable && !info.fetched)
+        // The EDID range is fetched once per output: WMI is slow enough to be visible as a hitch if
+        // it ran on the timer, and a display's EDID does not change while it is attached. The
+        // G-SYNC rate decision is made from that same cached data.
+        if (displayChanged || !info.fetched)
         {
             info.displays = GetDisplayTimingInfo();
             info.fetched = true;
         }
+        info.vrrArcadeRate =
+            RateSupportForTiming(info.displays, 57.5242f) == DisplayRateSupport::Supported;
     }
     return info;
+}
+
+static bool VrrArcadeRateSupported()
+{
+    return GetArcadeDisplayInfo().vrrArcadeRate;
 }
 
 static bool ArcadeDisplayModeAvailable()
 {
     return GetArcadeDisplayInfo().modeAvailable;
+}
+
+/*
+ * Which output the emulator drives.
+ *
+ * Shown in the Video section rather than inside the fullscreen-sync block: the setting also decides
+ * which monitor the game window is created on, so it is meaningful in windowed mode. Nesting it
+ * under the Fullscreen checkbox made the option appear to have disappeared whenever fullscreen was
+ * off. With a single output there is nothing to choose, so no control is drawn.
+ */
+static void DrawOutputDisplayCombo(Util::Config::Node& config)
+{
+    const std::vector<DisplayInfo>& outputs = GetDisplays();
+    if (outputs.size() <= 1)
+        return;
+
+    const int currentNumber = config["DisplayNumber"].ValueAsDefault<int>(0);
+
+    // How many outputs are not the main one, so that "secondary" can be used where it is
+    // unambiguous. With three or more monitors there is no single secondary, and inventing an
+    // ordinal would be worse than leaving the name to identify it.
+    int nonPrimaryCount = 0;
+    for (const DisplayInfo& display : outputs)
+    {
+        if (!display.primary)
+            nonPrimaryCount++;
+    }
+
+    std::vector<std::string> labels;
+    labels.reserve(outputs.size() + 1);
+    labels.emplace_back(Tr("自动 · 跟随系统主显示器"));
+
+    /*
+     * Labelled by role rather than by Windows' own number, which is what this list used to
+     * show ("5: Odyssey G70D"). That number is real and has to be stored - it is what the
+     * helper script takes, and the only name for a display that survives a primary-display
+     * change - but it is an implementation detail, not something a reader recognises. On the
+     * machine this was written on the primary is DISPLAY5, because the numbering is
+     * historical and gaps appear as outputs are added and removed. Leading with it made the
+     * main monitor look like the odd one out.
+     *
+     * So: role first, then the monitor's own name and mode, and the number last in the
+     * #n form. It is still visible for anyone who needs it for the script, and the tooltip
+     * says what it is for.
+     */
+    int selected = 0;
+    for (size_t i = 0; i < outputs.size(); i++)
+    {
+        const DisplayInfo& display = outputs[i];
+
+        /*
+         * The panel's own mode where Windows gives it, because that is the resolution the
+         * user recognises from Display Settings and the monitor's own menu. SDL's figure is
+         * quoted alongside only when the two differ - which happens when a monitor's scaling
+         * differs from the primary display's, since this process is only system-DPI-aware and
+         * Windows then reports that monitor's geometry in the primary's DPI space. Showing
+         * the converted number alone would name a mode the panel has never been in.
+         */
+        const int shownWidth = display.panelWidth > 0 ? display.panelWidth : display.width;
+        const int shownHeight = display.panelHeight > 0 ? display.panelHeight : display.height;
+
+        std::string label;
+        if (display.primary)
+            label = Util::Format() << Tr("主显示器") << " · ";
+        else if (nonPrimaryCount == 1)
+            label = Util::Format() << Tr("副显示器") << " · ";
+
+        label += display.name;
+        if (shownWidth > 0)
+            label += Util::Format() << "  " << shownWidth << "x" << shownHeight
+                                    << " @" << display.desktopHz << "Hz";
+        if (display.hasArcadeMode)
+            label += Util::Format() << "  " << Tr("57/58Hz 可用");
+        label += Util::Format() << "  · #" << display.number;
+        labels.emplace_back(label);
+
+        if (display.number == currentNumber)
+            selected = static_cast<int>(i) + 1;
+    }
+
+    /*
+     * With the setting left at its default the selection is the main display - which is what
+     * the default means. Without this the combo would point at its first entry, which is only
+     * the primary display by coincidence of ordering.
+     */
+    if (selected == 0)
+    {
+        for (size_t i = 0; i < outputs.size(); i++)
+        {
+            if (outputs[i].primary)
+            {
+                selected = static_cast<int>(i) + 1;
+                break;
+            }
+        }
+    }
+
+    std::vector<const char*> items;
+    items.reserve(labels.size());
+    for (const std::string& text : labels)
+        items.push_back(text.c_str());
+
+    ImGui::SetNextItemWidth(520.0f);
+    if (ImGui::Combo(Tr("输出显示器##DisplayNumber"), &selected, items.data(), static_cast<int>(items.size())))
+        config.Set("DisplayNumber", selected == 0 ? 0 : outputs[selected - 1].number);
+
+    ImGui::SameLine();
+    UiTextDim("(?)");
+    if (ImGui::IsItemHovered())
+        UiTooltip(
+            "游戏窗口与两种独占全屏都出现在所选显示器上，下次启动游戏时生效。\n"
+            "选「自动」则始终跟随系统主显示器。\n"
+            "\n"
+            "每项末尾的 #n 是 Windows 给该显示器的编号（即「显示设置 → 标识」里的数字）。\n"
+            "这个编号也是 Scripts\\ArcadeDisplay.ps1 的 -Monitor 参数 —— 两边必须填同一个，\n"
+            "否则脚本在某一台上切换了 57.524Hz 模式，而游戏在另一台上全屏，结果是\n"
+            "静默退回桌面刷新率（不报错）。");
 }
 
 static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInputs>& inputs)
@@ -2036,10 +2576,20 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
     };
     int width = config["XResolution"].ValueAs<int>();
     int height = config["YResolution"].ValueAs<int>();
-    int preset = IM_ARRAYSIZE(presets);
+    int matched = IM_ARRAYSIZE(presets);
     for (int i = 0; i < IM_ARRAYSIZE(presets); i++)
         if (presets[i].w == width && presets[i].h == height)
-            preset = i;
+            matched = i;
+
+    /*
+     * Selecting "custom" changes neither XResolution nor YResolution, so the choice cannot be
+     * recovered from them the way a preset can: on the next frame the values still match the preset
+     * the user started on, the combo snaps back to it, and the width/height fields disappear as soon
+     * as they appear. Remember the choice instead. The values still decide the display until the
+     * user explicitly asks for custom, so a resolution set elsewhere is shown as the preset it is.
+     */
+    static bool customSelected = false;
+    int preset = customSelected ? IM_ARRAYSIZE(presets) : matched;
 
     const char* presetLabels[IM_ARRAYSIZE(presets) + 1];
     for (int i = 0; i < IM_ARRAYSIZE(presets); i++)
@@ -2051,6 +2601,11 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
         {
             width = presets[preset].w;
             height = presets[preset].h;
+            customSelected = false;
+        }
+        else
+        {
+            customSelected = true;
         }
     }
 
@@ -2067,6 +2622,8 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
     if (height > 4320) height = 4320;
     config.Set("XResolution", width);
     config.Set("YResolution", height);
+
+    DrawOutputDisplayCombo(config);
 
     BoolSetting(config, "全屏##FullScreen", "FullScreen");
     ImGui::SameLine();
@@ -2153,124 +2710,6 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
             config.Set("ExclusiveRefreshRate", picked == 2 ? 57.5242f : 0.0f);
         };
 
-        /*
-         * Which output the emulator drives, asked before how it drives it.
-         *
-         * Set here rather than left to the window manager, because both exclusive modes are
-         * properties of one monitor's mode list: a custom 57.524 Hz timing belongs to the output it
-         * was created for, and G-SYNC follows the panel the window is actually on. The emulator
-         * always took the primary display, so a second monitor could not be used at all - and on
-         * this kind of setup the second monitor is often the arcade-capable one, with the primary a
-         * 60 Hz work panel that has no 57/58 Hz mode and never will.
-         *
-         * Only shown when there is a choice to make: with a single output the combo would list one
-         * entry and imply a decision that does not exist.
-         */
-        const std::vector<DisplayInfo>& outputs = GetDisplays();
-        if (outputs.size() > 1)
-        {
-            const int currentNumber = config["DisplayNumber"].ValueAsDefault<int>(0);
-
-            // How many outputs are not the main one, so that "secondary" can be used where it is
-            // unambiguous. With three or more monitors there is no single secondary, and inventing an
-            // ordinal would be worse than leaving the name to identify it.
-            int nonPrimaryCount = 0;
-            for (const DisplayInfo& display : outputs)
-            {
-                if (!display.primary)
-                    nonPrimaryCount++;
-            }
-
-            std::vector<std::string> labels;
-            labels.reserve(outputs.size() + 1);
-            labels.emplace_back(Tr("自动 · 跟随系统主显示器"));
-
-            /*
-             * Labelled by role rather than by Windows' own number, which is what this list used to
-             * show ("5: Odyssey G70D"). That number is real and has to be stored - it is what the
-             * helper script takes, and the only name for a display that survives a primary-display
-             * change - but it is an implementation detail, not something a reader recognises. On the
-             * machine this was written on the primary is DISPLAY5, because the numbering is
-             * historical and gaps appear as outputs are added and removed. Leading with it made the
-             * main monitor look like the odd one out.
-             *
-             * So: role first, then the monitor's own name and mode, and the number last in the
-             * #n form. It is still visible for anyone who needs it for the script, and the tooltip
-             * says what it is for.
-             */
-            int selected = 0;
-            for (size_t i = 0; i < outputs.size(); i++)
-            {
-                const DisplayInfo& display = outputs[i];
-
-                /*
-                 * The panel's own mode where Windows gives it, because that is the resolution the
-                 * user recognises from Display Settings and the monitor's own menu. SDL's figure is
-                 * quoted alongside only when the two differ - which happens when a monitor's scaling
-                 * differs from the primary display's, since this process is only system-DPI-aware and
-                 * Windows then reports that monitor's geometry in the primary's DPI space. Showing
-                 * the converted number alone would name a mode the panel has never been in.
-                 */
-                const int shownWidth = display.panelWidth > 0 ? display.panelWidth : display.width;
-                const int shownHeight = display.panelHeight > 0 ? display.panelHeight : display.height;
-
-                std::string label;
-                if (display.primary)
-                    label = Util::Format() << Tr("主显示器") << " · ";
-                else if (nonPrimaryCount == 1)
-                    label = Util::Format() << Tr("副显示器") << " · ";
-
-                label += display.name;
-                if (shownWidth > 0)
-                    label += Util::Format() << "  " << shownWidth << "x" << shownHeight
-                                            << " @" << display.desktopHz << "Hz";
-                if (display.hasArcadeMode)
-                    label += Util::Format() << "  " << Tr("57/58Hz 可用");
-                label += Util::Format() << "  · #" << display.number;
-                labels.emplace_back(label);
-
-                if (display.number == currentNumber)
-                    selected = static_cast<int>(i) + 1;
-            }
-
-            /*
-             * With the setting left at its default the selection is the main display - which is what
-             * the default means. Without this the combo would point at its first entry, which is only
-             * the primary display by coincidence of ordering.
-             */
-            if (selected == 0)
-            {
-                for (size_t i = 0; i < outputs.size(); i++)
-                {
-                    if (outputs[i].primary)
-                    {
-                        selected = static_cast<int>(i) + 1;
-                        break;
-                    }
-                }
-            }
-
-            std::vector<const char*> items;
-            items.reserve(labels.size());
-            for (const std::string& text : labels)
-                items.push_back(text.c_str());
-
-            ImGui::SetNextItemWidth(520.0f);
-            if (ImGui::Combo(Tr("输出显示器##DisplayNumber"), &selected, items.data(), static_cast<int>(items.size())))
-                config.Set("DisplayNumber", selected == 0 ? 0 : outputs[selected - 1].number);
-
-            ImGui::SameLine();
-            UiTextDim("(?)");
-            if (ImGui::IsItemHovered())
-                UiTooltip(
-                    "游戏窗口与两种独占全屏都出现在所选显示器上，下次启动游戏时生效。\n"
-                    "选「自动」则始终跟随系统主显示器。\n"
-                    "\n"
-                    "每项末尾的 #n 是 Windows 给该显示器的编号（即「显示设置 → 标识」里的数字）。\n"
-                    "这个编号也是 Scripts\\ArcadeDisplay.ps1 的 -Monitor 参数 —— 两边必须填同一个，\n"
-                    "否则脚本在某一台上切换了 57.524Hz 模式，而游戏在另一台上全屏，结果是\n"
-                    "静默退回桌面刷新率（不报错）。");
-        }
 
         /*
          * One `(?)` beside the heading carries the "which one do I want" answer, rather than a line of
@@ -2336,11 +2775,14 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
         UiTextDim("(?)");
         if (ImGui::IsItemHovered())
             UiTooltip(
-                "不锁定刷新率，让显示器的 G-SYNC/FreeSync 跟着模拟器的帧率走，画面不撕裂。\n"
+                "让显示器的 G-SYNC/FreeSync 跟着模拟器的帧率走，画面不撕裂。\n"
                 "需要 VRR 显示器，驱动里也要开启；不需要自定义分辨率。\n"
                 "\n"
                 "【必须满足】显示器支持 VRR，且其刷新率范围包含 57.5Hz。\n"
-                "这两项本程序无法自动检测，可以在这些地方确认\n"
+                "本程序会读取 EDID 的时序范围：\n"
+                "若包含 57.5Hz，就直接按街机 57.5Hz 呈现（「画面」页的「刷新率」显示 57.5 并置灰）；\n"
+                "若读不到 EDID 或不包含，则仍按「画面」页的「刷新率」呈现。\n"
+                "EDID 没写 VRR 范围时，可以在这些地方确认\n"
                 "（都看「范围」而不是「是否支持」）：\n"
                 "  · Windows 11：设置 → 系统 → 显示 → 高级显示器设置\n"
                 "  · NVIDIA 控制面板 → 设置 G-SYNC（会列出该显示器的刷新率范围）\n"
@@ -2352,27 +2794,38 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
                 "这类机器上本项与「无边框全屏」等价 —— 面板仍按自身刷新率，\n"
                 "既不会更差也不会更好，可以留在第 1 项。");
 
+        if (mode == 1)
+        {
+            ImGui::Indent();
+            if (VrrArcadeRateSupported())
+                UiTextDim("已按街机 57.5Hz 自动呈现（显示器时序范围包含 57.5Hz）。");
+            else
+                UiTextDim("未确认显示器时序范围包含 57.5Hz，按「画面」页的刷新率呈现。");
+            ImGui::Unindent();
+        }
+
         /*
          * Why the requirements above are a tooltip and not a paragraph.
          *
-         * They cannot be turned into a check - no portable API reports a display's variable refresh
-         * range, and disabling the option on a missing EDID declaration would take it away from
-         * displays that have the capability without announcing it. So they have to be said. But
+         * The declared timing range now decides the pacing rate, not just the wording: this tooltip
+         * is where the reader learns why the rate did or did not switch to the arcade one. But
          * "said" does not have to mean "occupies five lines of the page": the sentence is there when
          * someone is deciding, and out of the way when they are not. The same reasoning applies to
          * the fixed-rate notes below.
          */
 
         /*
-         * Said here rather than only in the README, because this is the one requirement of the two
-         * exclusive modes that cannot be checked - and the usual reason someone believes G-SYNC is on
-         * while the picture is still uneven.
+         * Said here rather than only in the README, because the declared range is what decides the
+         * pacing rate - and the usual reason someone believes G-SYNC is on while the picture is
+         * still uneven.
          *
          * "The display supports G-SYNC" and "the display will sync at 57.5 Hz" are different claims.
          * Variable refresh only works between the display's own minimum and maximum rates, and the
          * minimum is often 48 Hz but can be 60 - in which case 57.5 Hz is outside the range entirely
-         * and the driver either repeats frames to reach the minimum or stops varying altogether. No
-         * portable API reports that range, so this cannot be a check; it has to be a sentence.
+         * and the driver either repeats frames to reach the minimum or stops varying altogether.
+         * ResolveFullScreenMode() reads the declared range and only switches to the arcade rate when
+         * 57.5 Hz is inside it; otherwise the configured rate is kept. The sentence stays because a
+         * display that declares nothing still gets the configured rate, and it is worth knowing why.
          *
          * Deliberately not used to disable the option, and the reason is not that detection is
          * impossible - a display's declared range IS read, and shown above when it states one. The
@@ -2557,11 +3010,17 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
         config.Set("InputSystem", std::string(choices[inputIndex].id));
         inputs.reset();
     }
+    ImGui::SameLine();
+    UiTextDim("(?)");
+    if (ImGui::IsItemHovered())
+        UiTooltip(
+            "%s\n%s\n%s\n\n%s",
+            Tr("按键在「按键」页里改。Xbox 手柄选 XInput，左右扳机才能分开。"),
+            Tr("手柄按键按「位置」对应，不看你手柄上印的字："),
+            Tr("    Back / Select / Share 位置 = 投币      Start / Options / Menu 位置 = 启动 / 确认"),
+            Tr("不同输入系统下扳机轴的名字不同，切换后原来的绑定会失效：XInput / SDL 手柄用 JOY1_RZAXIS，DirectInput / Raw Input / SDL 用 JOY1_ZAXIS_POS。"));
     BoolSetting(config, "力反馈##ForceFeedback", "ForceFeedback");
     DrawTriggerPairingHint(config);
-    UiTextDim("按键在「按键」页里改。Xbox 手柄选 XInput，左右扳机才能分开。");
-    UiTextDim("手柄按键按「位置」对应，不看你手柄上印的字：");
-    UiTextDim("    Back / Select / Share 位置 = 投币      Start / Options / Menu 位置 = 启动 / 确认");
 
     // Controller preset: one standardised layout, with the detected pad shown so it is
     // obvious which device the preset will suit. Detection is cached; see RefreshDetectedController.
@@ -2638,6 +3097,14 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
         presetFamily = families[familyIndex].id;
         config.Set("ControllerFamily", presetFamily);
     }
+    /*
+     * The 8BitDo trigger note belongs to the controller model, so its marker sits on the combo. It
+     * used to follow the "Detected: ..." line, and on a long pad name that line filled the column:
+     * SameLine() then left the marker with a few pixels, so its three characters wrapped one per
+     * line. The combo always has room, and the note is about the pad model either way.
+     */
+    if (detected.family == "8bitdo")
+        HelpMarker("L2/R2 是按钮式扳机：绑定为刹车或油门可用，但是有/无两档，不是线性。");
 
     if (detected.name.empty())
         UiTextHighlight("未检测到手柄。请确认已插好，然后点下面的「重新检测」。");
@@ -2649,26 +3116,14 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
             detected.name.c_str(), detected.inputSystem.c_str());
 
         /*
-         * Two facts about 8BitDo pads that the detected name alone does not convey, and that both
-         * look like faults when they are not:
-         *
-         *   - L2/R2 are *buttons*, not axes. SDL's built-in entry maps them as b8/b9 and synthesises
-         *     a full-scale axis value while pressed, so a brake bound to them works but is on/off.
-         *     Nothing is broken; a real analogue brake needs the pad in a mode that exposes them as
-         *     axes, which is the pad's own business, not this emulator's.
-         *
-         *   - In Bluetooth modes the pad presents itself as something else (an SN30 Pro+ in Switch
-         *     mode reports as a "Pro Controller", in XInput mode as an Xbox pad). The readout says
-         *     which it looks like because that is what decides whether XInput can see it at all.
+         * The pad's Bluetooth mode changes what it presents itself as: an SN30 Pro+ in Switch mode
+         * reports as a "Pro Controller", in XInput mode as an Xbox pad. The readout names what it
+         * looks like because that decides whether XInput can see it at all. The L2/R2 button-note
+         * lives on the controller-model combo above, where the marker has room for its three
+         * characters even when the detected name is long.
          */
-        if (detected.family == "8bitdo")
-        {
-            ImGui::Indent();
-            UiTextDim("L2/R2 是按钮式扳机：绑定为刹车或油门可用，但是有/无两档，不是线性。");
-            if (!detected.sdlKnowsDevice)
-                UiTextWarn("SDL 未识别这块手柄，按钮编号无法保证与预设一致。请改用 SDL 手柄以外的输入系统，或用「输入设置」逐个重新绑定。");
-            ImGui::Unindent();
-        }
+        if (detected.family == "8bitdo" && !detected.sdlKnowsDevice)
+            UiTextWarn("SDL 未识别这块手柄，按钮编号无法保证与预设一致。请改用 SDL 手柄以外的输入系统，或用「输入设置」逐个重新绑定。");
     }
 
     /*
@@ -2698,9 +3153,7 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
 
     if (UiButton("应用推荐键位"))
         ImGui::OpenPopup("ApplyPreset");
-
-    ImGui::SameLine();
-    UiTextDim("会覆盖「按键」页里已有的绑定。");
+    HelpMarker("会覆盖「按键」页里已有的绑定。");
 
     // View cycling. Sits here rather than on the keys page because it changes how the view buttons
     // behave rather than what they are bound to.
@@ -2998,7 +3451,8 @@ static void DrawBezelSettings(Util::Config::Node& config, SDL_Window* window)
 
 		// The reason it does nothing under OpenGL is stated once, outside this block, so that it shows
 		// whether or not a backdrop has been selected - a greyed-out control explains itself either way.
-		UiTextDim("背景图只画在黑边上，不会盖住游戏画面。改完重新开一局生效。");
+		UiTextDim("背景图只画在黑边上，不会盖住游戏画面。\n"
+			"更改背景图或亮度需要重新开一局；在游戏内取消「宽屏」会立即显示。");
 	}
 
 	if (greyOut)
@@ -3047,7 +3501,9 @@ void DrawAdvancedSettingsPanel(Util::Config::Node& config, bool overlayMode)
      *
      * The overlay cannot offer these because it runs inside a session that is already under way.
      */
-    UiTextDim("这些选项需要重新开一局才会生效（不用退出程序：按 Esc 回到本窗口再启动即可）。");
+    UiTextDim(overlayMode
+        ? "滤镜和宽屏开关即时生效；抗锯齿等选项仍需要重新开一局。"
+        : "这些选项需要重新开一局才会生效（不用退出程序：按 Esc 回到本窗口再启动即可）。");
     if (!vulkan)
     {
         ImGui::Spacing();
@@ -3085,22 +3541,22 @@ void DrawAdvancedSettingsPanel(Util::Config::Node& config, bool overlayMode)
     if (!overlayMode)
     {
     // Values must stay in step with the MSAA config allow-list.
-    static const char* msaaItems[] = { "关闭", "2x MSAA", "4x MSAA" };
-    static const int msaaValues[] = { 0, 2, 4 };
+    static const char* msaaItems[] = { "关闭", "2x MSAA", "4x MSAA", "8x MSAA" };
+    static const int msaaValues[] = { 0, 2, 4, 8 };
     int msaa = config["MSAA"].ValueAsDefault<int>(0);
     int msaaIndex = 0;
-    for (int i = 0; i < 3; ++i)
+    for (int i = 0; i < 4; ++i)
         if (msaaValues[i] == msaa)
             msaaIndex = i;
     ImGui::SetNextItemWidth(220.0f);
     // The translated list lives in a static array: ImGui holds on to the item pointers for as long
     // as the popup is open, so it has to survive the frame.
-    static const char* msaaTr[3];
-    if (ImGui::Combo(Tr("硬件 MSAA##MSAA"), &msaaIndex, UiItems(msaaItems, 3, msaaTr), 3))
+    static const char* msaaTr[4];
+    if (ImGui::Combo(Tr("硬件 MSAA##MSAA"), &msaaIndex, UiItems(msaaItems, 4, msaaTr), 4))
         config.Set("MSAA", msaaValues[msaaIndex]);
     HelpMarker(
         "显卡对多边形边缘做抗锯齿，贴图本身保持锐利。\n"
-        "效果最好，有独显优先用它。");
+        "效果最好，有独显优先用它。8x 需要驱动支持，4K 下开销很大。");
     }   // end of the sections omitted from the overlay
 
     /*
@@ -3161,12 +3617,48 @@ void DrawAdvancedSettingsPanel(Util::Config::Node& config, bool overlayMode)
     }
     }   // end of the sections omitted from the overlay
 
+    /*
+     * Widescreen is the one display option the overlay exposes. It is live: Vulkan3D re-reads the
+     * key every frame for the 3D frustum and Vulkan2D re-reads it for the compositor rectangle, so
+     * an A/B comparison can be made in the same scene without starting a new game. OpenGL is
+     * deliberately not offered because its viewport and scissor are computed on resize.
+     */
+    if (overlayMode && vulkan)
+    {
+        UiSep("宽屏");
+        BoolSetting(config, "宽屏##WideScreen", "WideScreen");
+        HelpMarker(
+            "只加宽水平视锥，不拉伸画面。\n"
+            "适合在同一场景里对比宽屏开关的效果。\n"
+            "部分游戏的 2D 背景不会延伸到加宽区域，四角可能露黑。");
+        UiTextDim("此开关即时生效，无需重新开局。");
+        /*
+         * The blue border that is not a bug.
+         *
+         * WideBackground stretches the bottom 2D layer across the whole window and is independent of
+         * WideScreen. With the latter off, the 3D picture returns to 4:3 while that stretched layer
+         * still fills the sides and the letterbox, so what looks like a coloured bar is game
+         * background, not a clear colour - there is no setting here that can turn it black except
+         * switching WideBackground off, which lives on the settings window's Video page.
+         */
+        if (!config["WideScreen"].ValueAsDefault<bool>(false) &&
+            config["WideBackground"].ValueAsDefault<bool>(false))
+        {
+            UiTextWarn("「宽屏背景」已开启：2D 背景仍会拉伸铺满窗口，所以取消宽屏后四周不是黑边。要黑边请关掉「宽屏背景」。");
+        }
+    }
+
     // Back into the disabled block: the CRT and glow sections below are Vulkan-only like the rest.
     if (!vulkan)
         ImGui::BeginDisabled();
 
-    UiSep("CRT 滤镜");
-
+    /*
+     * Collapsible because this section is long enough to push the save-state menu below the fold in
+     * the in-game panel. Open by default so the filter is still the first thing found there; the
+     * open/closed state is kept by ImGui for the session.
+     */
+    if (ImGui::CollapsingHeader(Tr("CRT 滤镜##PostCRTSection"), ImGuiTreeNodeFlags_DefaultOpen))
+    {
     // CRT mode. 0 off, 1 scanlines, 2 scanlines + shadow mask.
     static const char* crtItems[] = { "关闭", "扫描线", "扫描线 + 荫罩" };
     int crt = config["PostCRT"].ValueAsDefault<int>(0);
@@ -3322,6 +3814,7 @@ void DrawAdvancedSettingsPanel(Util::Config::Node& config, bool overlayMode)
                 "觉得太暗就往上调。");
         }
     }
+    }   // end of the CRT section
 
     UiSep("玻璃辉光");
 
@@ -3443,6 +3936,9 @@ static bool LoadSettingsFromFile(Util::Config::Node& config, const std::string& 
     }
 
     config = merged;
+    // The preview/list split is stored with the UI preferences, so a loaded file may carry a
+    // different one. Drop the cached value and let GUI() read it from the new config.
+    g_previewSplit = -1.0f;
     if (!useFileRom)
         config.Set("ROMPath", currentRom);
 
@@ -3521,6 +4017,11 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
  * height. Previously both panels started below a full-width ROM row, which cost the settings tabs a
  * whole row for a path field that rarely needs more than a third of the window.
  *
+ * The left column is itself split vertically: the ROM row, then a preview of the hovered/selected
+ * game (cover art and an English description), then the scrolling list. The list is drawn before
+ * the preview even though it appears below it, so the preview can use this frame's hover result
+ * instead of showing the previous frame's.
+ *
  * Y coordinates are reasoned about explicitly because the two columns start at different offsets and
  * ImGui's cursor advances in one direction: the right column is positioned back up at the top after
  * the left one has been laid out. Everything is measured from topY, which is where the content area
@@ -3575,7 +4076,35 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
     ImGui::EndGroup();
     const float romRowHeight = ImGui::GetItemRectSize().y;
 
-    const float listHeight = panelHeight - romRowHeight - gap;
+    // Split the left column into a cover/description panel and the scrolling list below it.
+    // The preview reads the row under the pointer, so hovering browses the list; the selection is
+    // the fallback, which keeps a clicked game on screen after the pointer leaves it.
+    //
+    // The split is stored as a ratio rather than a pixel height: dragging the divider sets how
+    // much of the column the preview takes, and resizing the window then scales both parts
+    // proportionally. The bounds keep either side from collapsing, and follow the interface scale
+    // the same way the style does (LoadUiFont() uses 18 px as the unscaled size).
+    const float uiScale = (std::max)(1.0f, ImGui::GetFontSize() / 18.0f);
+    if (g_previewSplit < 0.0f)
+    {
+        g_previewSplit = (std::max)(0.10f, (std::min)(0.90f,
+            config["GuiPreviewSplit"].ValueAsDefault<float>(0.42f)));
+    }
+    const float splitHeight = (std::max)(1.0f, panelHeight - romRowHeight - gap * 2.0f);
+    const float minPreviewHeight = (std::min)(150.0f * uiScale, splitHeight * 0.45f);
+    const float minListHeight = (std::min)(140.0f * uiScale, splitHeight * 0.45f);
+    float previewHeight = g_previewSplit * splitHeight;
+    previewHeight = (std::max)(minPreviewHeight, (std::min)(splitHeight - minListHeight, previewHeight));
+    g_previewSplit = previewHeight / splitHeight;
+
+    const float previewY = topY + romRowHeight + gap;
+    const float listY = previewY + previewHeight + gap;
+    const float listHeight = splitHeight - previewHeight;
+
+    int hoveredRow = -1;
+    // The list is drawn before the preview even though it sits below it, because the preview shows
+    // whatever this frame's hit test found. Drawing it first avoids a one-frame lag on hover.
+    ImGui::SetCursorPos(ImVec2(topX, listY));
     ImGui::BeginChild("GameList", ImVec2(columnWidth, listHeight), ImGuiChildFlags_Borders);
     static char filter[128] = {};
     ImGui::SetNextItemWidth(-1);
@@ -3590,7 +4119,9 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
         UiText("目录里没有 .zip。");
     else
     {
-        const float tableHeight = (std::max)(80.0f, ImGui::GetContentRegionAvail().y - ImGui::GetFrameHeightWithSpacing());
+        // The whole remaining height goes to the table: the ROM count that used to reserve a line
+        // below it now lives in the footer status line.
+        const float tableHeight = (std::max)(80.0f, ImGui::GetContentRegionAvail().y);
         if (ImGui::BeginTable("Games", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp, ImVec2(0, tableHeight)))
         {
             // The name column carries the version too, so it needs the lion's share of the width.
@@ -3638,14 +4169,16 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
                 // supported case stays on one line on purpose - the point is to reveal the clipped row
                 // as a row. The unsupported case is a sentence, so it wraps like every other
                 // explanation rather than growing a popup as wide as the sentence.
-                if (ImGui::IsItemHovered())
+                const bool rowHovered = ImGui::IsItemHovered();
+                if (rowHovered)
                 {
+                    hoveredRow = row;
                     if (entry.supported)
                         ImGui::SetTooltip("%s", display.c_str());
                     else
                         DrawWrappedTooltip(Tr("Supermodel 的 Games.xml 里没有这个 ROM 集的定义，无法启动。\n同系列的其他版本可能已经在列表里了。"));
                 }
-                if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))
+                if (rowHovered && ImGui::IsMouseDoubleClicked(0))
                 {
                     selectedGameIndex = row;
                     saveSettings = true;
@@ -3660,14 +4193,74 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
             ImGui::EndTable();
         }
     }
-    UiTextDim("找到 %d 个 ROM", (int)g_roms.size());
     ImGui::EndChild();
+
+    const int previewIndex = hoveredRow >= 0 ? hoveredRow : selectedGameIndex;
+    const RomEntry* previewEntry =
+        (previewIndex >= 0 && previewIndex < (int)g_roms.size()) ? &g_roms[previewIndex] : nullptr;
+    ImGui::SetCursorPos(ImVec2(topX, previewY));
+    DrawGamePreview(previewEntry, columnWidth, previewHeight);
+
+    /*
+     * Divider between the preview and the list.
+     *
+     * It fills the gap the two children already leave between them, so it adds no rows to the
+     * layout. InvisibleButton takes mouse capture while held, which is what lets the drag continue
+     * after the pointer leaves the thin strip. The jump is applied to the ratio for the next frame;
+     * the children themselves use the height computed above, so the resize is one frame behind the
+     * pointer at worst.
+     */
+    const float handleHeight = (std::max)(gap, 10.0f * uiScale);
+    ImGui::SetCursorPos(ImVec2(topX, previewY + previewHeight + (gap - handleHeight) * 0.5f));
+    ImGui::InvisibleButton("##PreviewSplitter", ImVec2(columnWidth, handleHeight));
+    const bool splitterHovered = ImGui::IsItemHovered();
+    const bool splitterActive = ImGui::IsItemActive();
+    if (splitterHovered || splitterActive)
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+    if (splitterActive)
+    {
+        const float next = previewHeight + io.MouseDelta.y;
+        g_previewSplit = (std::max)(minPreviewHeight,
+            (std::min)(splitHeight - minListHeight, next)) / splitHeight;
+    }
+    {
+        // A short centred bar makes the otherwise invisible strip discoverable, and brightens
+        // while the pointer is over it or the drag is in progress.
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        const ImVec2 rectMin = ImGui::GetItemRectMin();
+        const ImVec2 rectMax = ImGui::GetItemRectMax();
+        const float centreX = (rectMin.x + rectMax.x) * 0.5f;
+        const float centreY = (rectMin.y + rectMax.y) * 0.5f;
+        const float gripWidth = (std::min)(columnWidth * 0.12f, 48.0f * uiScale);
+        const ImU32 colour = ImGui::GetColorU32(splitterActive ? ImGuiCol_SeparatorActive
+            : (splitterHovered ? ImGuiCol_SeparatorHovered : ImGuiCol_Separator));
+        draw->AddLine(ImVec2(centreX - gripWidth, centreY), ImVec2(centreX + gripWidth, centreY),
+            colour, (std::max)(2.0f, 2.0f * uiScale));
+    }
 
     // Right column: back up to the top of the content area, which is what moves the tab bar up past
     // the ROM row. The width is left as "the rest" so the two columns always meet the right edge.
     ImGui::SetCursorPos(ImVec2(topX + columnWidth + gap, topY));
-    ImGui::BeginChild("Settings", ImVec2(0, panelHeight), ImGuiChildFlags_Borders);
-    if (ImGui::BeginTabBar("SettingsTabs", ImGuiTabBarFlags_FittingPolicyScroll))
+    /*
+     * Always reserve the vertical scrollbar.
+     *
+     * The scrollbar is part of this child's width, so letting it appear and disappear with the
+     * selected tab moved everything at the right edge - including the tab bar's scroll arrows,
+     * which then jumped sideways between tabs and made the same spot stop being the same control.
+     * Being permanently present keeps the content width, the tabs and their arrows fixed across
+     * tab switches. An unused scrollbar is a small price for a stable target.
+     */
+    ImGui::BeginChild("Settings", ImVec2(0, panelHeight), ImGuiChildFlags_Borders,
+        ImGuiWindowFlags_AlwaysVerticalScrollbar);
+    /*
+     * Shrink the tabs to fit rather than scrolling them.
+     *
+     * With the scroll policy, selecting one of the last tabs scrolled the bar and left the first
+     * tab half cut off at the leading edge - a blank rounded block, which reads as a rendering
+     * fault. Seven tabs fit here once narrowed to TabMinWidthShrink; Mixed only falls back to
+     * scrolling if the window is made narrower than that.
+     */
+    if (ImGui::BeginTabBar("SettingsTabs", ImGuiTabBarFlags_FittingPolicyMixed))
     {
         if (UiTabItem("常用"))
         {
@@ -3687,7 +4280,6 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
             DrawAdvancedSettingsPanel(config, false);
 
             ImGui::EndTabItem();
-            inputs = nullptr;
         }
         if (UiTabItem("画面"))
         {
@@ -3701,7 +4293,6 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
             DrawBezelSettings(config, window);
 
             ImGui::EndTabItem();
-            inputs = nullptr;
         }
         if (UiTabItem("声音"))
         {
@@ -3709,7 +4300,38 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
             CreateControls(config, "Sound");
             UpdateTempValues(config, "Sound", false);
             ImGui::EndTabItem();
-            inputs = nullptr;
+        }
+        if (UiTabItem("按键"))
+        {
+            /*
+             * The input system is cached across tab switches.
+             *
+             * Constructing one enumerates every DirectInput/SDL device and their haptic axes, which
+             * is long enough to be visible as a hitch when the tab is selected. It used to be
+             * released at the end of every other tab, so coming back to Controls rebuilt it each
+             * time. It is still invalidated whenever the configuration makes it stale (input system
+             * changed, preset applied, file loaded, defaults restored) and before a game starts,
+             * where the session opens its own set of devices.
+             */
+            if (inputs == nullptr)
+                inputs = GetInputSystem(config, window);
+
+            if (!inputs)
+            {
+                UiText("这个输入系统没有初始化成功，换一个再打开这一页。");
+            }
+            else if (ImGui::BeginTable("KeyTable", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY, ImVec2(0, ImGui::GetContentRegionAvail().y - ImGui::GetFrameHeightWithSpacing())))
+            {
+                UiColumn("分组");
+                UiColumn("动作");
+                UiColumn("按键");
+                ImGui::TableHeadersRow();
+                AddKeys(config, kb, inputs->GetGameInputs(GameForSelection(games, selectedGameIndex)));
+                ImGui::EndTable();
+            }
+            UiTextDim("双击一行来修改。选中左边的游戏后，这里只显示那款游戏用到的按键。");
+            UiTextDim("手柄编号：1=A/× 2=B/○ 3=X/□ 4=Y/△ 5=LB 6=RB 7=Back/Select 8=Start");
+            ImGui::EndTabItem();
         }
         if (UiTabItem("网络"))
         {
@@ -3732,7 +4354,6 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
             CreateControls(config, "Network");
             UpdateTempValues(config, "Network", false);
             ImGui::EndTabItem();
-            inputs = nullptr;
         }
         // Force feedback and sensitivity share one page. Both are short lists of sliders for the same
         // subject - how the controls feel - and together they were a dozen rows in a panel that holds
@@ -3762,29 +4383,6 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
                     inputs->StoreToConfig(&config);
                 }
             }
-            ImGui::EndTabItem();
-            inputs = nullptr;
-        }
-        if (UiTabItem("按键"))
-        {
-            if (inputs == nullptr)
-                inputs = GetInputSystem(config, window);
-
-            if (!inputs)
-            {
-                UiText("这个输入系统没有初始化成功，换一个再打开这一页。");
-            }
-            else if (ImGui::BeginTable("KeyTable", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY, ImVec2(0, ImGui::GetContentRegionAvail().y - ImGui::GetFrameHeightWithSpacing())))
-            {
-                UiColumn("分组");
-                UiColumn("动作");
-                UiColumn("按键");
-                ImGui::TableHeadersRow();
-                AddKeys(config, kb, inputs->GetGameInputs(GameForSelection(games, selectedGameIndex)));
-                ImGui::EndTable();
-            }
-            UiTextDim("双击一行来修改。选中左边的游戏后，这里只显示那款游戏用到的按键。");
-            UiTextDim("手柄编号：1=A/× 2=B/○ 3=X/□ 4=Y/△ 5=LB 6=RB 7=Back/Select 8=Start");
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
@@ -3850,11 +4448,14 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
         if (UiButton(footerLabels[4], buttonSize))
             ImGui::OpenPopup("ConfirmExit");
 
-        // Drawn on its own reserved line below the buttons. It used to be positioned a few pixels
-        // above the bottom edge, which put most of the line outside the content area and clipped it.
+        // The ROM count lives on the reserved line below the buttons rather than inside the list,
+        // where it cost the table a row. A transient save/load note shares the same line, to its
+        // right. The line is reserved whether or not the note is showing, so nothing moves.
+        ImGui::SetCursorPos(ImVec2(topX, statusY));
+        UiTextDim("找到 %d 个 ROM", (int)g_roms.size());
         if (ImGui::GetTime() - g_statusAt < 3.0 && !g_statusNote.empty())
         {
-            ImGui::SetCursorPos(ImVec2(topX, statusY));
+            ImGui::SameLine(0.0f, ImGui::GetStyle().ItemSpacing.x * 2.0f);
             UiTextDim("%s", g_statusNote.c_str());
         }
     }
@@ -3874,6 +4475,7 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
             std::string keepRom = config["ROMPath"].ValueAs<std::string>();
             config = DefaultConfig();
             config.Set("ROMPath", keepRom);
+            g_previewSplit = -1.0f;     // back to the default 42/58 split
             inputs.reset();
             // Write immediately rather than waiting for "保存设置": this button exists precisely as
             // a way out of a broken configuration, so it must not be possible to lose the reset by
@@ -3986,7 +4588,18 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
     if (ImGui::BeginPopupModal("ConfirmExit", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
     {
         UiText("退出前保存设置？");
-        if (UiButton("保存并退出", ImVec2(140, 0)))
+
+        // Fixed pixel widths were sized for the Chinese labels. In English the translated
+        // text ("Save and Quit", "Don't Save") is wider and gets clipped inside the button,
+        // especially at higher DPI. Size the whole row from the translated labels instead,
+        // keeping the old 120 px as a floor so short labels do not make tiny buttons.
+        const char* confirmLabels[] = { "保存并退出", "不保存", "取消" };
+        float confirmButtonWidth = 120.0f;
+        for (const char* label : confirmLabels)
+            confirmButtonWidth = (std::max)(confirmButtonWidth,
+                ImGui::CalcTextSize(Tr(label)).x + ImGui::GetStyle().FramePadding.x * 2.0f + 16.0f);
+
+        if (UiButton("保存并退出", ImVec2(confirmButtonWidth, 0)))
         {
             selectedGameIndex = -1;
             saveSettings = true;
@@ -3994,7 +4607,7 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
-        if (UiButton("不保存", ImVec2(120, 0)))
+        if (UiButton("不保存", ImVec2(confirmButtonWidth, 0)))
         {
             selectedGameIndex = -1;
             saveSettings = false;
@@ -4002,7 +4615,7 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
-        if (UiButton("取消", ImVec2(120, 0)))
+        if (UiButton("取消", ImVec2(confirmButtonWidth, 0)))
             ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
@@ -4429,6 +5042,7 @@ GuiState* GuiCreate(const std::string& configPath, const Util::Config::Node& fil
 
     SDL_GL_MakeCurrent(state->window, state->glContext);
     SDL_GL_SetSwapInterval(1);
+    RaiseSettingsWindow(state->window);
     glewExperimental = GL_TRUE;
     glewInit();
 
@@ -4496,8 +5110,7 @@ std::vector<std::string> GuiRunOnce(GuiState* state)
     // The game session leaves its own GL context current (or none at all), so re-establish ours
     // before touching any ImGui/GL state.
     SDL_GL_MakeCurrent(state->window, state->glContext);
-    SDL_ShowWindow(state->window);
-    SDL_RaiseWindow(state->window);
+    RaiseSettingsWindow(state->window);
     // Make sure the pointer is usable when the window comes back. ImGui's gamepad support used to
     // hide it, and that is disabled now.
     //
@@ -4558,6 +5171,20 @@ std::vector<std::string> GuiRunOnce(GuiState* state)
     if (!closed && !SelectedRomPath(state->selectedGame).empty())
         romFiles.emplace_back(SelectedRomPath(state->selectedGame));
 
+    /*
+     * Hand the input devices back before the game opens its own.
+     *
+     * The settings window caches an input system while its tabs are open - see the note on the
+     * Controls tab - and the game session constructs a separate one. Releasing here keeps the two
+     * from holding the same DirectInput/SDL devices at the same time. The binding editor's
+     * references go with it: kb.input holds a shared_ptr into the same system.
+     */
+    if (!closed && !romFiles.empty())
+    {
+        state->kb.Reset();
+        state->inputs.reset();
+    }
+
     // Remember the window geometry. This is read back in GuiCreate() so the window reopens at the
     // size the user last left it. Note this is the client area, which is what SDL_CreateWindow()
     // takes, so the value round-trips exactly.
@@ -4570,6 +5197,8 @@ std::vector<std::string> GuiRunOnce(GuiState* state)
             state->config.Set("GuiWindowWidth", windowWidth);
             state->config.Set("GuiWindowHeight", windowHeight);
         }
+        if (g_previewSplit > 0.0f)
+            state->config.Set("GuiPreviewSplit", g_previewSplit);
         Util::Config::CopyINISection(&state->fullConfig, state->config);
         // "Save as" redirects just this one write. The destination is cleared afterwards so a later
         // plain save goes back to the standard file instead of silently continuing to overwrite the
@@ -4580,11 +5209,13 @@ std::vector<std::string> GuiRunOnce(GuiState* state)
     }
     else if (windowWidth > 0 && windowHeight > 0) {
         // Settings are not being written this time (the user declined, or the window was simply
-        // closed), but the window size is a harmless UI preference worth keeping. Write it into the
-        // file's global section directly rather than copying the edited runtime config, so nothing
-        // the user chose not to save leaks into the file.
+        // closed), but the window size and the preview/list split are harmless UI preferences worth
+        // keeping. Write them into the file's global section directly rather than copying the
+        // edited runtime config, so nothing the user chose not to save leaks into the file.
         state->fullConfig.Set("GuiWindowWidth", windowWidth);
         state->fullConfig.Set("GuiWindowHeight", windowHeight);
+        if (g_previewSplit > 0.0f)
+            state->fullConfig.Set("GuiPreviewSplit", g_previewSplit);
         Util::Config::WriteINIFile(state->configPath, state->fullConfig, TimestampedConfigFileComment("Updated window size."));
     }
 
@@ -4607,6 +5238,7 @@ void GuiDestroy(GuiState* state)
     if (state->window)
     {
         SDL_GL_MakeCurrent(state->window, state->glContext);
+        ReleaseBoxartTextures();
         ImGui_ImplOpenGL3_Shutdown();
         ImGui_ImplSDL2_Shutdown();
         ImGui::DestroyContext();
