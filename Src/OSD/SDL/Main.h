@@ -84,6 +84,27 @@ struct DisplayTimingInfo
 std::vector<DisplayTimingInfo> GetDisplayTimingInfo();
 
 /*
+ * Whether the configured output can scan at a given rate.
+ *
+ * This is the VRR question, not the fixed-mode question: VRR needs no discrete mode, only a
+ * timing range that contains the rate. RateSupportForTiming works on information the caller
+ * already has (the settings window caches it); ConfiguredDisplayRateSupport fetches it for
+ * callers that do not.
+ *
+ * Unknown is a distinct answer from Unsupported: a display whose EDID could not be read, or that
+ * could not be matched to the configured output, must not be treated as "cannot do 57.5 Hz".
+ */
+enum class DisplayRateSupport
+{
+    Unknown,
+    Supported,
+    Unsupported,
+};
+
+DisplayRateSupport RateSupportForTiming(const std::vector<DisplayTimingInfo>& timing, float hz);
+DisplayRateSupport ConfiguredDisplayRateSupport(float hz);
+
+/*
  * The outputs SDL can drive, each with the number Windows knows it by.
  *
  * Needed because the two halves of display selection speak different languages. SDL addresses

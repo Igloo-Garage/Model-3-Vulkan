@@ -1,0 +1,72 @@
+Boxarts downloaded from libretro/libretro-thumbnails,
+MAME/Named_Boxarts. Files are named after Supermodel-VK ROM sets.
+All files are WebP (converted from the original PNG/JPEG).
+
+bassdx.png = Sega Bass Fishing.png
+getbassdx.png = Sega Bass Fishing Deluxe (Japan).png
+getbassur.png = Get Bass.png
+getbass.png = Get Bass.png
+daytona2.png = Daytona USA 2 (Revision A).png
+dayto2pe.png = Daytona USA 2 Power Edition.png
+dirtdvls.png = Dirt Devils (Export, Revision A).png
+dirtdvlsu.png = Dirt Devils (Revision A).png
+dirtdvlsau.png = Dirt Devils (Australia, Revision A).png
+dirtdvlsj.png = Dirt Devils (Revision A).png
+dirtdvlsg.png = Dirt Devils (Export, Revision A).png
+eca.png = Emergency Call Ambulance (Export).png
+ecap.png = Emergency Call Ambulance (USA).png
+ecau.png = Emergency Call Ambulance (USA).png
+ecaj.png = Emergency Call Ambulance.png
+harley.png = Harley-Davidson and L.A. Riders (Revision B).png
+harleya.png = Harley-Davidson and L.A. Riders (Revision A).png
+lemans24.png = Le Mans 24 (Revision B).png
+lostwsga.png = The Lost World (Japan, Revision A).png
+lostwsgp.png = The Lost World.png
+magtruck.png = Magical Truck Adventure (Japan).png
+mgtrkbad.png = Magical Truck Adventure.png
+oceanhun.png = The Ocean Hunter.png
+oceanhuna.png = The Ocean Hunter.png
+scud.png = Scud Race (Export).png
+scudau.png = Scud Race (Australia).png
+scuddx.png = Scud Race (Export).png
+scuddxo.png = Scud Race (Export).png
+scudplus.png = Scud Race Plus (Revision A).png
+scudplusa.png = Scud Race Plus (Revision A).png
+spikeofe.png = Spikeout Final Edition.png
+spikeout.png = Spikeout (Revision C).png
+srally2.png = Sega Rally 2.png
+srally2p.png = Sega Rally 2.png
+srally2pa.png = Sega Rally 2.png
+srally2dx.png = Sega Rally 2 DX.png
+swtrilgy.png = Star Wars Trilogy (Revision A).png
+swtrilgya.png = Star Wars Trilogy.png
+swtrilgyp.png = Star Wars Trilogy.png
+vf3.png = Virtua Fighter 3 (Revision C).png
+vf3a.png = Virtua Fighter 3 (Revision C).png
+vf3c.png = Virtua Fighter 3 (Revision C).png
+vf3tb.png = Virtua Fighter 3 Team Battle.png
+vs2.png = Virtua Striker 2 (Step 2.0).png
+vs215.png = Virtua Striker 2 (Step 1.5).png
+vs215o.png = Virtua Striker 2 (Step 1.5).png
+vs298.png = Virtua Striker 2 '98 (Step 2.0).png
+vs29815.png = Virtua Striker 2 '98 (Step 1.5).png
+vs2v991.png = Virtua Striker 2 '99.1 (Revision B).png
+vs299a.png = Virtua Striker 2 '99.png
+vs299.png = Virtua Striker 2 '99.png
+vs299j.png = Virtua Striker 2 '99.1 (Revision B).png
+vs29915.png = Virtua Striker 2 '99.1 (Revision B).png
+vs29915a.png = Virtua Striker 2 '99.png
+vs29915j.png = Virtua Striker 2 '99.1 (Revision B).png
+
+Not in that collection, fetched from other sources
+(see Scripts/install_missing_boxarts.py):
+
+von2.webp = video-games-museum.com, US Dreamcast boxart
+             (Cyber Troopers Virtual-On Oratorio Tangram)
+von2a.webp = same as von2.webp
+von254g.webp = same as von2.webp
+von2o.webp = same as von2.webp
+fvipers2.webp = segaretro.org, FV2_DC_JP_Box_Front.jpg
+fvipers2o.webp = same as fvipers2.webp
+lamachin.webp = flyers.arcade-museum.com, flyer 00544-01
+skichamp.webp = segaretro.org, Ski_champ.jpg (arcade cabinet photo)
