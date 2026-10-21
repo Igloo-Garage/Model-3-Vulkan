@@ -1398,6 +1398,14 @@ static bool BrowseSaveFile(SDL_Window* window, std::string& path)
     return ok;
 }
 #else
+static void RaiseSettingsWindow(SDL_Window* window)
+{
+    if (window == nullptr)
+        return;
+    SDL_ShowWindow(window);
+    SDL_RaiseWindow(window);
+}
+
 static std::filesystem::path PathFromUtf8(const std::string& text)
 {
     return std::filesystem::path(text);
@@ -1719,7 +1727,7 @@ static bool DecodeBoxart(const std::filesystem::path& path, int maxWidth, std::v
         const long rounded = std::lround(sourceHeight * (double)scaledWidth / (double)sourceWidth);
         const UINT scaledHeight = (UINT)(std::max)(1L, rounded);
         if (SUCCEEDED(factory->CreateBitmapScaler(&scaler)) &&
-            SUCCEEDED(scaler->Initialize(frame, scaledWidth, scaledHeight, WICBitmapInterpolationModeHighQualityCubic)))
+            SUCCEEDED(scaler->Initialize(frame, scaledWidth, scaledHeight, WICBitmapInterpolationModeCubic)))
         {
             source = scaler;
         }
