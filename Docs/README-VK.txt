@@ -76,9 +76,10 @@ RENDERING - a new Vulkan backend
     needed, and the message says that too.
 
 DISPLAY
-  * Hardware MSAA at 2x or 4x. It applies to polygon coverage only, so
-    textures and decals stay sharp rather than being blurred, which is
-    the main advantage over a post-process anti-aliasing method.
+  * Hardware MSAA at 2x, 4x or 8x (8x needs driver support). It applies
+    to polygon coverage only, so textures and decals stay sharp rather
+    than being blurred, which is the main advantage over a post-process
+    anti-aliasing method.
   * FXAA post-process anti-aliasing, as a low-cost option for
     integrated graphics.
   * Integer scaling (point-perfect). The 2D layer is a fixed 496x384
@@ -241,13 +242,17 @@ QUICK START
         Alt+P        pause
         Alt+R        reset
         F5           save a state
-        F6           change the save slot
+        F6           change the save slot (1-8)
         F7           load a state
         Alt+S        take a screenshot
         Alt+F11/F12  decrease / increase sound volume
         Alt+F9/F10   decrease / increase music volume
         Tab          open the in-game settings overlay
         ` (above Tab)  show/hide the statistics readout
+
+     The bottom of the Tab panel has a Save States section listing all
+     eight slots, each with its own Save and Load button - so a slot can
+     be chosen directly instead of cycling with F6.
         Alt+Return   toggle fullscreen
 
      The full list, including every game control, is in
@@ -383,7 +388,15 @@ Exclusive fullscreen with G-SYNC / VRR
   Exclusive fullscreen + G-SYNC: the display scans at the emulator's rate, one to one, removing judder and tearing.
   Needs a G-SYNC/FreeSync display and V-Sync turned on. No custom resolution required.
 
-  The Refresh Rate on the Video tab still applies here - it is the rate the emulator presents at and the display follows it.
+  PACING IS AUTOMATIC. When the display's declared timing range includes 57.5 Hz,
+  the emulator switches to the arcade rate by itself, so the game runs at its
+  original speed rather than 4.3% fast. The Refresh Rate on the Video tab is then
+  shown as 57.5 Hz and greyed out, with a line saying so. The stored preference is
+  left untouched, so switching back to borderless restores it.
+
+  When the range cannot be read, or does not include 57.5 Hz, the Refresh Rate
+  setting keeps applying - it is the cadence the emulator presents at, and the
+  display follows it.
   If your display does not support VRR, use the fixed arcade rate below instead.
 
   THE RANGE MATTERS, NOT JUST THE FEATURE.
@@ -392,8 +405,10 @@ Exclusive fullscreen with G-SYNC / VRR
   minimum and maximum rates, and the minimum is often 48 Hz but can be higher -
   a panel whose range starts at 60 Hz cannot sync to 57.5 Hz at all.
 
-  When the rate asked for falls below that minimum, one of two things happens,
-  and neither is visible from the emulator's side:
+  When the rate asked for falls below that minimum, one of two things happens.
+  When the display declares its range in the EDID, the emulator avoids the case
+  by not switching to the arcade rate automatically; what follows is for a display
+  that declares nothing, or for picking 57.5 Hz by hand:
 
     * the driver repeats frames until the display's minimum is reached (low
       frame rate compensation). Motion stays smooth, but the panel is no longer
@@ -415,15 +430,17 @@ Exclusive fullscreen with G-SYNC / VRR
                  runs means it is syncing; a reading pinned at the range minimum
                  means it is not.
 
-  None of these can be read by the emulator, and the emulator does not try to.
-  A display that declares its variable refresh range usually does so in an
-  EDID vendor block (AMD/VESA Adaptive-Sync, OUI 00-00-1A), and the settings
-  window does read that - but only as supporting information for the fixed-rate
-  option, never as a verdict on VRR. The reason is that a declaration proves
-  support while its absence proves nothing: a display can support VRR without
-  saying so in its EDID, and the older AMD HDMI implementations are exactly
-  that case. Positive is reliable, negative is not, so nothing here claims a
-  display cannot do VRR.
+  What the emulator does read is the EDID. The timing range (0xFD) and, when
+  present, the declared adaptive-sync range are both read, and the pacing
+  decision above is made from them. The declaration is also shown in the
+  settings window as supporting information for the fixed-rate option.
+
+  The distinction that matters: a declared range is used to *switch on* the
+  arcade rate, never to claim that a display cannot do VRR. A declaration proves
+  support while its absence proves nothing - a display can support VRR without
+  saying so in its EDID, and the older AMD HDMI implementations are exactly that
+  case. Positive is reliable, negative is not, so nothing here claims a display
+  cannot do VRR.
 
   The statistics readout (below) reports "exclusive VRR (preconditions met)"
   in this mode, and that wording is deliberate: the emulator can confirm
@@ -633,6 +650,8 @@ Hardware MSAA
       the way a post-process antialiaser softens them.
   
   Model 3 polygon edges are very hard, so this gives the most benefit; prefer it on a discrete GPU.
+  8x is offered when the driver reports support for both the colour and depth formats; at 4K it is
+  expensive in memory and bandwidth for a small gain over 4x.
 
 FXAA
 ----

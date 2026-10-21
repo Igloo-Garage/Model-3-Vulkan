@@ -24,6 +24,9 @@
 
 #include "Graphics/Vulkan3D/VulkanCommon.h"
 
+#include <functional>
+#include <vector>
+
 struct SDL_Window;
 
 namespace Util
@@ -137,6 +140,30 @@ void OverlayToggle(Util::Config::Node& config);
  * file. The caller owns that because it owns the file and the sections around the global one.
  */
 bool OverlayNewFrame(Util::Config::Node& config);
+
+/*
+ * In-game save-state menu.
+ *
+ * The emulator owns the save files and the thread-pause protocol, so the overlay only draws the list
+ * and calls back. The game loop registers the handlers for the duration of a session and clears them
+ * on the way out; when they are not set (the settings window), the section is not drawn at all.
+ */
+struct OverlaySaveSlot
+{
+  unsigned slot = 0;
+  bool exists = false;
+  bool active = false;        // the slot F5/F7 currently use
+  double ageSeconds = 0.0;    // age of the file; 0 when it does not exist
+};
+
+struct OverlaySaveHandlers
+{
+  std::function<std::vector<OverlaySaveSlot>()> list;
+  std::function<void(unsigned slot, bool save)> apply;   // save = true, load = false
+};
+
+void OverlaySetSaveHandlers(OverlaySaveHandlers handlers);
+void OverlayClearSaveHandlers();
 
 /*
  * Records the panel into the frame.
