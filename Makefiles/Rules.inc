@@ -267,7 +267,7 @@ release:: all
 #
 # Github release flow (not yet used).
 #
-PKG_FILES += $(BIN_DIR)/$(SUPERMODEL_BINARY) Docs/README.txt Docs/README-VK.txt Docs/LICENSE.txt Config Assets
+PKG_FILES += $(BIN_DIR)/$(SUPERMODEL_BINARY) Docs/README.txt Docs/README-VK.txt Docs/安装说明.txt Docs/LICENSE.txt Config Assets Supermodel3Bezel.png
 
 pkg: pkg/$(PKG_TYPE)
 	$(info Cleaning up            : $(PKG_STAGE_PATH))
@@ -293,7 +293,8 @@ pkg/stage:: pkg/path
 	  echo "Save states go here." > Saves/DIR.txt && \
 	  echo "Recommended (but not mandatory) location for ROM sets." > ROMs/DIR.txt && \
 	  mv $(BIN_DIR)/$(SUPERMODEL_BINARY) . && rmdir $(BIN_DIR) && \
-	  mv Docs//* . && rmdir Docs
+	  mv Docs//* . && rmdir Docs && \
+	  if [ -f Supermodel3Bezel.png ]; then mv Supermodel3Bezel.png Assets/; fi
 	$(info Generating             : $(PKG_STAGE_PATH)/CHANGES.txt)
 	$(SILENT)./Scripts/changelog.sh $(PKG_STAGE_PATH)/CHANGES.txt
 

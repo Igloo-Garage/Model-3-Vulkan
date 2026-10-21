@@ -11,7 +11,7 @@ rem          <player notes>.txt    <- any other .txt from Docs\, at the top leve
 rem                                   user will actually see it (e.g. the setup notice)
 rem          Data\
 rem              Config\           Games.xml, Music.xml
-rem              Assets\           crosshair bitmaps, the bezel picture
+rem              Assets\           crosshair bitmaps, boxarts, the bezel picture
 rem              NVRAM\  Saves\  Screenshots\  Analysis\
 rem
 rem  The executable is self-contained: SDL2 and SDL_net are linked in statically,
@@ -255,6 +255,20 @@ for %%F in (Games.xml Music.xml) do (
 
 rem Crosshair bitmaps for the light-gun games.
 if exist "%ROOT%\Assets\*.bmp" copy /y "%ROOT%\Assets\*.bmp" "%DIST%\Data\Assets\" >nul
+
+rem ---- Boxarts -----------------------------------------------------------------
+rem One WebP per ROM set, named after the set. Kept in a subfolder rather than copied flat
+rem into Assets\, which already holds the crosshairs and the cabinet picture. build.bat
+rem ships them so a release has the artwork the game list can use without a second step.
+rem WebP is roughly a quarter the size of the original PNGs and is decoded through the WIC
+rem codec built into Windows 10 1809 and later.
+if exist "%ROOT%\Assets\Boxarts\*.webp" (
+    mkdir "%DIST%\Data\Assets\Boxarts" 2>nul
+    copy /y "%ROOT%\Assets\Boxarts\*.webp" "%DIST%\Data\Assets\Boxarts\" >nul
+    echo Boxarts  : copied from Assets\Boxarts
+) else (
+    echo Boxarts  : not found ^(game list will have no artwork^)
+)
 
 rem ---- Bezel backdrop ----------------------------------------------------------
 rem The cabinet picture the picture-settings page can put behind the black bars.

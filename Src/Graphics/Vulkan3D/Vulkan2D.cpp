@@ -166,6 +166,21 @@ void CVulkan2D::RefreshPostSettings()
 {
 	ReadPostSettingsFromConfig();
 
+	/*
+	 * Widescreen and the wide background are not post-processing, but they are re-read on the same
+	 * live path so the in-game overlay can toggle them without starting a new game. The compositor
+	 * uses them for the picture rectangle (and therefore the bars and the backdrop geometry), so a
+	 * stale value here would leave the 2D layer clipping a widened 3D scene back to 4:3.
+	 */
+	const bool wasWide = m_wide;
+	m_wide = m_config["WideScreen"].ValueAs<bool>();
+	m_wideBg = m_config["WideBackground"].ValueAs<bool>();
+
+	// A backdrop is not loaded at all while widescreen is on (no bars to fill), so turning the option
+	// off mid-session has to bring it back. UploadBezel() copies it in on the next frame.
+	if (wasWide && !m_wide && m_bezel.image == VK_NULL_HANDLE)
+		LoadBezelImage(true);
+
 	if (m_postReady && m_postPipeline == VK_NULL_HANDLE)
 	{
 		if (!CreatePostPipeline())
@@ -1091,7 +1106,7 @@ void CVulkan2D::DrawPostPass(VkCommandBuffer cmd)
  * start. Every failure path therefore logs and returns false, and the caller turns the feature off
  * rather than propagating an error.
  */
-bool CVulkan2D::LoadBezelImage()
+bool CVulkan2D::LoadBezelImage(bool updateDescriptor)
 {
 	const int mode = m_config["BezelMode"].ValueAsDefault<int>(0);
 	if (mode == 0)
@@ -1145,6 +1160,23 @@ bool CVulkan2D::LoadBezelImage()
 		return false;
 	}
 	m_bezel.view = m_context.CreateView(m_bezel.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1);
+
+	if (updateDescriptor)
+	{
+		/*
+		 * The set was written at startup with the bottom tile layer in slot 3, because no backdrop
+		 * existed then - widescreen was on and the image was deliberately not loaded. Naming the new
+		 * view here is what actually makes the backdrop appear: without it the bars keep sampling that
+		 * tile layer, so they turn into a stretched copy of the game's background rather than showing
+		 * the cabinet picture.
+		 *
+		 * The set may still be read by a submitted frame, so wait before changing it. This runs at most
+		 * once per session - when widescreen is turned off with the panel open - which makes the stall
+		 * preferable to a second descriptor set and its per-frame bookkeeping.
+		 */
+		vkDeviceWaitIdle(m_context.Device());
+		UpdateBezelDescriptor();
+	}
 
 	InfoLog("Bezel: '%s' loaded (%ux%u, brightness %d%%).", path.c_str(), m_bezelWidth, m_bezelHeight, brightness);
 	m_bezelVisible = true;
@@ -1204,6 +1236,37 @@ bool CVulkan2D::UploadBezel(VkCommandBuffer cmd)
 }
 
 /*
+ * Points composite slot 3 at the current backdrop image.
+ *
+ * Slot 3 is where the shader reads the backdrop, and it is a single descriptor in the set every
+ * composite draw binds. Init() writes the whole set when the image exists at startup; this is the
+ * path for an image created later, because LoadBezelImage() declines to run while widescreen is on
+ * and the overlay can turn that option off mid-session.
+ *
+ * Writing one array element rather than all four leaves the scene and tile slots untouched, which
+ * matters: those views change independently (SetSceneColor).
+ */
+void CVulkan2D::UpdateBezelDescriptor()
+{
+	if (m_set == VK_NULL_HANDLE || m_bezel.view == VK_NULL_HANDLE)
+		return;
+
+	VkDescriptorImageInfo info = {};
+	info.imageView = m_bezel.view;
+	info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+	VkWriteDescriptorSet write = {};
+	write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	write.dstSet = m_set;
+	write.dstBinding = 1;
+	write.dstArrayElement = 3;
+	write.descriptorCount = 1;
+	write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+	write.pImageInfo = &info;
+	vkUpdateDescriptorSets(m_context.Device(), 1, &write, 0, nullptr);
+}
+
+/*
  * BezelGameRect():
  *
  * The area of the swapchain the emulated picture actually occupies, in Vulkan coordinates (y down
@@ -1251,6 +1314,17 @@ void CVulkan2D::PictureRect(int& x, int& y, int& w, int& h) const
  */
 void CVulkan2D::DrawBezelPass(VkCommandBuffer cmd)
 {
+	/*
+	 * Widescreen draws no backdrop at all.
+	 *
+	 * The picture spans the full width, so there are no side bars for a cabinet picture to fill. The
+	 * wide picture rectangle is still inset by `correction` at the top and bottom for the 2D layer's
+	 * known offset, and treating those thin strips as bars meant the backdrop was sampled into them -
+	 * which is the bright line that appeared along the top edge once widescreen was switched on. The
+	 * letterbox above and below stays black, which is what this option is supposed to show.
+	 */
+	if (m_wide)
+		return;
 	/*
 	 * Diagnostic, logged once and again whenever the answer changes.
 	 *

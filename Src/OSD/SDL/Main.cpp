@@ -66,6 +66,8 @@
 
 #include <new>
 #include <cmath>
+#include <cstdlib>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <cstdarg>
@@ -75,6 +77,8 @@
 #include <vector>
 #include <algorithm>
 #include <filesystem>
+#include <system_error>
+#include <utility>
 #include <GL/glew.h>
 
 #ifdef SUPERMODEL_WIN32
@@ -1535,6 +1539,83 @@ std::vector<DisplayTimingInfo> GetDisplayTimingInfo()
 #endif  // _WIN32
 }
 
+DisplayRateSupport RateSupportForTiming(const std::vector<DisplayTimingInfo>& timing, float hz)
+{
+    if (timing.empty())
+        return DisplayRateSupport::Unknown;
+
+    /*
+     * Match the EDID entry to the output the emulator is configured to drive. On a single-display
+     * machine there is nothing to match, but on a multi-monitor desk the timing range of the wrong
+     * monitor would answer the wrong question - and silently enable the arcade rate on a panel that
+     * cannot scan at it.
+     *
+     * The EDID path reports one entry per monitor without an SDL index, so the friendly name is the
+     * join key. The names come from different APIs (SDL's monitor name and EDID 0xFC), which is why
+     * the comparison is trimmed and case-insensitive. If they cannot be matched, Unknown is the
+     * honest answer; it is not treated as Unsupported.
+     */
+    const DisplayTimingInfo* match = nullptr;
+    const std::vector<DisplayInfo>& outputs = GetDisplays();
+    if (timing.size() == 1 && outputs.size() == 1)
+        match = &timing[0];
+    else
+    {
+        auto normalize = [](std::string value)
+        {
+            while (!value.empty() && (value.back() == ' ' || value.back() == '\t'))
+                value.pop_back();
+            while (!value.empty() && (value.front() == ' ' || value.front() == '\t'))
+                value.erase(value.begin());
+            for (char& c : value)
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            return value;
+        };
+
+        const int displayIndex = GetConfiguredDisplaySdlIndex();
+        std::string wanted;
+        for (const DisplayInfo& display : outputs)
+        {
+            if (display.sdlIndex == displayIndex)
+            {
+                wanted = normalize(display.name);
+                break;
+            }
+        }
+
+        if (!wanted.empty())
+        {
+            for (const DisplayTimingInfo& info : timing)
+            {
+                if (normalize(info.name) == wanted)
+                {
+                    match = &info;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (match == nullptr)
+        return DisplayRateSupport::Unknown;
+
+    const bool hasRange = match->minHz > 0 && match->maxHz > 0;
+    const bool hasVrr = match->declaresVrr && match->vrrMinHz > 0 && match->vrrMaxHz > 0;
+    if (!hasRange && !hasVrr)
+        return DisplayRateSupport::Unknown;
+
+    if (hasRange && hz >= (float)match->minHz && hz <= (float)match->maxHz)
+        return DisplayRateSupport::Supported;
+    if (hasVrr && hz >= (float)match->vrrMinHz && hz <= (float)match->vrrMaxHz)
+        return DisplayRateSupport::Supported;
+    return DisplayRateSupport::Unsupported;
+}
+
+DisplayRateSupport ConfiguredDisplayRateSupport(float hz)
+{
+    return RateSupportForTiming(GetDisplayTimingInfo(), hz);
+}
+
 /*
  * CreateGLScreen():
  *
@@ -1793,20 +1874,34 @@ static FullScreenMode ResolveFullScreenMode()
     // Emulate at the arcade rate when a fixed arcade timing was asked for, so the game runs at the
     // speed the panel will scan at and the two are 1:1.
     //
-    // Deliberately not applied to the G-SYNC/VRR path, even though that path also ends up in exclusive
-    // fullscreen. There the panel follows whatever rate is presented, so pacing at 57.524 Hz would work
-    // too - but the Refresh Rate setting on the Video page is what says which rate the user wants, and
-    // it offers 57.5 Hz and 60 Hz with 60 marked as recommended. Overriding it here would silently
-    // discard that choice and leave the setting looking broken.
+    // The G-SYNC/VRR path also ends up in exclusive fullscreen, and there the panel follows whatever
+    // rate is presented. Pacing at 57.524 Hz is the arcade-accurate choice and needs no custom mode,
+    // so it is applied automatically when the configured display's timing range contains the rate.
+    // The stored RefreshRate preference is left untouched: switching back to borderless restores it.
+    // A display whose range excludes the rate, or cannot be read, keeps the configured rate and the
+    // log says which case it was.
     //
     // Note what is deliberately *not* derived from this setting: the emulated CPU's per-frame cycle
-    // budget is fixed at the arcade's 57.524160 Hz (see CModel3::RunMainBoardFrame). So the two are
-    // independent, and choosing 60 Hz here makes the game run 4.3% fast rather than running at the
-    // right speed with a different frame cadence. That is why the statistics readout prints the target
-    // rate beside the arcade's and works out the difference - the number is the honest description of
-    // a choice, and it should be a visible one.
+    // budget is fixed at the arcade's 57.524160 Hz (see CModel3::RunMainBoardFrame). Pacing at 60 Hz
+    // therefore makes the game run 4.3% fast, which is why the statistics readout prints the target
+    // rate beside the arcade's and works out the difference.
     if (refreshRateHz > 0.0f)
         s_runtime_config.Get("RefreshRate").SetValue(refreshRateHz);
+    else
+    {
+        const DisplayRateSupport support = ConfiguredDisplayRateSupport(57.5242f);
+        if (support == DisplayRateSupport::Supported)
+        {
+            s_runtime_config.Get("RefreshRate").SetValue(57.5242f);
+            InfoLog("Exclusive fullscreen: G-SYNC/VRR path; the display timing range includes 57.524 Hz, pacing at the arcade rate.");
+        }
+        else if (support == DisplayRateSupport::Unsupported)
+            InfoLog("Exclusive fullscreen: G-SYNC/VRR path; the display timing range excludes 57.524 Hz, keeping RefreshRate %.4f Hz.",
+                s_runtime_config["RefreshRate"].ValueAs<float>());
+        else
+            InfoLog("Exclusive fullscreen: G-SYNC/VRR path; the display timing range is unknown, keeping RefreshRate %.4f Hz.",
+                s_runtime_config["RefreshRate"].ValueAs<float>());
+    }
 
     if (!s_runtime_config["VSync"].ValueAsDefault<bool>(true))
         InfoLog("Exclusive fullscreen: VSync is off; G-SYNC/VRR will not hold frames. Enable VSync for a locked refresh rate.");
@@ -2346,7 +2441,7 @@ static void TestPolygonHeaderBits(IEmulator *Emu)
 
 static const int STATE_FILE_VERSION = 6;  // save state file version
 static const int NVRAM_FILE_VERSION = 0;  // NVRAM file version
-static unsigned s_saveSlot = 0;           // save state slot #
+static unsigned s_saveSlot = 1;           // save state slot # (1-8)
 
 static void SaveState(IEmulator *Model3)
 {
@@ -2640,6 +2735,7 @@ static void SaveOverlaySettings()
   // Only the keys the panel offers are taken from the runtime configuration, so an Apply cannot
   // quietly persist an unrelated change that something else made at run time.
   static const char* const keys[] = {
+    "WideScreen",
     "PostFXAA", "PostCRT", "PostScanlines", "PostScanlineIntensity",
     "PostMaskType", "PostMaskScale", "PostMaskIntensity",
     "PostGlow", "PostGlowLevels", "PostGlowThreshold", "PostGain",
@@ -2930,6 +3026,79 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
   // Keep the game running while the window is dragged; see ModalLoopMessageHook.
   SetModalLoopHook(Model3);
 
+  /*
+   * Save-state menu handlers for the in-game overlay.
+   *
+   * Registered here, where both the emulator and the paused flag are in scope, and cleared after the
+   * loop so a callback cannot outlive the session. The list is built from the same files the F5/F7
+   * hotkeys use, so the menu and the hotkeys always agree on the slot count and numbering.
+   */
+  {
+    OverlaySaveHandlers saveHandlers;
+    saveHandlers.list = [Model3]() {
+      std::vector<OverlaySaveSlot> slots;
+      const std::string base = Util::Format() << FileSystemPath::GetPath(FileSystemPath::Saves)
+        << Model3->GetGame().name << ".st";
+      for (unsigned slot = 1; slot <= 8; ++slot)
+      {
+        OverlaySaveSlot info;
+        info.slot = slot;
+        info.active = (slot == s_saveSlot);
+        const std::string path = base + std::to_string(slot);
+        std::error_code ec;
+        info.exists = std::filesystem::exists(path, ec);
+        if (info.exists && !ec)
+        {
+          const auto written = std::filesystem::last_write_time(path, ec);
+          if (!ec)
+          {
+            const auto age = std::filesystem::file_time_type::clock::now() - written;
+            info.ageSeconds = std::chrono::duration<double>(age).count();
+            if (info.ageSeconds < 0.0)
+              info.ageSeconds = 0.0;
+          }
+        }
+        slots.push_back(info);
+      }
+      return slots;
+    };
+    saveHandlers.apply = [Model3, &paused](unsigned slot, bool save) {
+      // The same pause protocol the F5/F7 hotkeys use. When the emulator is already paused there is
+      // nothing to do: the threads are stopped and the state is stable.
+      if (!paused)
+      {
+        Model3->PauseThreads();
+        SetAudioEnabled(false);
+      }
+
+      s_saveSlot = slot;
+      if (save)
+      {
+        SaveState(Model3);
+      }
+      else
+      {
+        LoadState(Model3);
+#ifdef SUPERMODEL_DEBUGGER
+        if (Debugger != NULL)
+          Debugger->Reset();
+#endif // SUPERMODEL_DEBUGGER
+      }
+
+      if (!paused)
+      {
+        Model3->ResumeThreads();
+        SetAudioEnabled(true);
+      }
+    };
+    OverlaySetSaveHandlers(std::move(saveHandlers));
+  }
+
+  // Temporary test hook: open the settings overlay at startup so the panel can be inspected
+  // without synthetic keyboard input, which the input system ignores.
+  if (std::getenv("SM3D_OVERLAY_OPEN") != nullptr)
+    OverlaySetVisible(s_runtime_config, true);
+
   while (!quit)
   {
     // Marks the boundary of one emulated frame, so the statistics readout measures the emulator's real
@@ -3190,9 +3359,9 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
     else if (Inputs->uiChangeSlot->Pressed())
     {
       // Change save slot
-      ++s_saveSlot;
-      s_saveSlot %= 10; // clamp to [0,9]
-      printf("Save slot: %d\n", s_saveSlot);
+      if (++s_saveSlot > 8)
+        s_saveSlot = 1;
+      printf("Save slot: %u\n", s_saveSlot);
     }
     else if (Inputs->uiLoadState->Pressed())
     {
@@ -3366,6 +3535,8 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
     }
   }
 
+  OverlayClearSaveHandlers();
+
   // Make sure all threads are paused before shutting down
   Model3->PauseThreads();
 
@@ -3452,6 +3623,81 @@ QuitError:
 static void MigrateLegacyDataLayout()
 {
 #ifdef SUPERMODEL_WIN32
+    // The old code resolved paths against the working directory, and the executable directory is
+    // where most people launched from, so both are worth trying.
+    const std::string base = FileSystemPath::GetBasePath();
+
+    /*
+     * Assets/ is migrated separately, before (and independently of) the settings file check below.
+     *
+     * Two reasons it cannot go in the loop: it is the only legacy folder with a subdirectory
+     * (Boxarts/), which the flat copy would skip, and an installation made by an earlier build
+     * already has Data/Config/Supermodel.ini, so it would return early and never copy the artwork.
+     * Without this, every archive downloaded from the releases page shows empty cover slots: the
+     * package puts Assets/ beside the executable, while this build reads Data/Assets/.
+     *
+     * Only when Data/Assets/ is still empty. After the first run it holds the crosshairs and the
+     * covers, and re-copying on every start would resurrect artwork the user deleted on purpose.
+     */
+    {
+        const std::string from = base + "Assets/";
+        const std::string to = FileSystemPath::GetPath(FileSystemPath::Assets);
+        std::error_code error;
+        bool populated = false;
+        if (std::filesystem::is_directory(to, error) && !error)
+        {
+            // Any entry counts, not just files: Data/Assets/ may legitimately hold only the Boxarts/
+            // subdirectory, and treating that as empty would re-copy deleted artwork on every start.
+            std::filesystem::directory_iterator first(to, error);
+            if (!error && first != std::filesystem::directory_iterator())
+                populated = true;
+        }
+
+        if (!populated && from != to)
+        {
+            std::error_code sourceError;
+            if (std::filesystem::is_directory(from, sourceError) && !sourceError)
+            {
+                int copied = 0;
+                std::error_code walkError;
+                for (auto it = std::filesystem::recursive_directory_iterator(from,
+                         std::filesystem::directory_options::skip_permission_denied, walkError);
+                     it != std::filesystem::recursive_directory_iterator();
+                     it.increment(walkError))
+                {
+                    if (walkError)
+                        break;
+
+                    std::error_code entryError;
+                    if (!it->is_regular_file(entryError) || entryError)
+                        continue;
+
+                    const std::filesystem::path relative =
+                        std::filesystem::relative(it->path(), from, entryError);
+                    if (entryError)
+                        continue;
+
+                    const std::filesystem::path target = std::filesystem::path(to) / relative;
+                    std::error_code existsError;
+                    if (std::filesystem::exists(target, existsError) && !existsError)
+                        continue;
+
+                    std::error_code copyError;
+                    std::filesystem::create_directories(target.parent_path(), copyError);
+                    if (std::filesystem::copy_file(it->path(), target,
+                            std::filesystem::copy_options::skip_existing, copyError))
+                        ++copied;
+                }
+
+                if (copied > 0)
+                {
+                    // printf for the same reason as the copies below: the logger does not exist yet.
+                    printf("Moved %d file(s) from '%s' into '%s'.\n", copied, from.c_str(), to.c_str());
+                }
+            }
+        }
+    }
+
     // Nothing to do if the current layout already has a settings file.
     FILE* existing = fopen(s_configFilePath.c_str(), "r");
     if (existing != nullptr)
@@ -3460,9 +3706,6 @@ static void MigrateLegacyDataLayout()
         return;
     }
 
-    // The old code resolved paths against the working directory, and the executable directory is
-    // where most people launched from, so both are worth trying.
-    const std::string base = FileSystemPath::GetBasePath();
     const char* const legacyDirs[] = { "Config/", "NVRAM/", "Saves/" };
 
     for (const char* dir : legacyDirs)
@@ -3716,15 +3959,17 @@ Util::Config::Node DefaultConfig()
   /*
    * Bezel backdrop.
    *
-   * Fills the black bars with a picture so the picture does not sit in a void on a widescreen
-   * display. 0 = off, 1 = the image shipped with the build, 2 = a PNG of the user's choosing. This
-   * is a display preference rather than a game setting, hence the Video group.
-   *
-   * The image is drawn behind the emulated picture, never over it - the bars are the only part of
-   * the screen it touches (see CVulkan2D::DrawBezelPass). Only the Vulkan backend implements it;
-   * the OpenGL one ignores the setting.
-   */
-  config.Set("BezelMode", 0, "Video", 0, 2, { 0, 1, 2 });
+  	 * Fills the black bars with a picture so the picture does not sit in a void on a widescreen
+  	 * display. 0 = off, 1 = the image shipped with the build, 2 = a PNG of the user's choosing. This
+  	 * is a display preference rather than a game setting, hence the Video group. On by default: the
+  	 * built-in cabinet is what a new install should show when the picture is narrower than the
+  	 * window, and it can be switched off on the same page.
+  	 *
+  	 * The image is drawn behind the emulated picture, never over it - the bars are the only part of
+  	 * the screen it touches (see CVulkan2D::DrawBezelPass). Only the Vulkan backend implements it;
+  	 * the OpenGL one ignores the setting.
+  	 */
+  	config.Set("BezelMode", 1, "Video", 0, 2, { 0, 1, 2 });
   // Path used by BezelMode 2. Empty behaves like the built-in image rather than failing silently.
   config.Set<std::string>("BezelImage", "", "Video", "", "");
   // Percentage multiplier on the backdrop's rgb. The default is deliberately unattenuated: an
@@ -3739,9 +3984,11 @@ Util::Config::Node DefaultConfig()
   config.Set("FullScreen", false, "Video");
   config.Set("BorderlessWindow", false, "Video");
   config.Set("Supersampling", 1, "Video", 1, 8);
-  // Hardware MSAA for the Vulkan backend. 0 disables it; 2 and 4 select that many samples. Smooths
-  // polygon edges at rasterisation time, leaving texture detail untouched.
-  config.Set("MSAA", 0, "Video", 0, 0, { 0,2,4 });
+  // Hardware MSAA for the Vulkan backend. 0 disables it; 2, 4 and 8 select that many samples.
+  // Smooths polygon edges at rasterisation time, leaving texture detail untouched. The list has to
+  // match the settings window's combo - an option offered there but missing here is a setting the
+  // generic writer treats as out of range.
+  config.Set("MSAA", 0, "Video", 0, 0, { 0,2,4,8 });
   // View cycling for the games with four VR camera buttons. With this on, one button steps through
   // the views instead of needing one button each; VRDefaultView is the view the cycle starts on
   // (2 is the default third-person view in Daytona 2).
