@@ -65,7 +65,7 @@
  * reusing a version updates (and overwrites) the previous release rather than creating a new one.
  */
 #ifndef SUPERMODEL_FORK_VERSION
-#define SUPERMODEL_FORK_VERSION	"0.9.2.3a"
+#define SUPERMODEL_FORK_VERSION	"0.9.2.4a"
 #endif
 
 /*
