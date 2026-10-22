@@ -1069,6 +1069,11 @@ static std::vector<RomEntry> g_roms;
 // stored value has not been read yet.
 static float g_previewSplit = -1.0f;
 
+// Largest share of the left column the preview may occupy. The game list sits below it, and that
+// list is the part the user scrolls and clicks, so the preview stops at half the column even if the
+// divider is dragged all the way down.
+static constexpr float kMaxPreviewShare = 0.5f;
+
 // Controller detection for the settings window. DetectController() enumerates SDL devices, which is
 // not something to do every frame, so the result is cached. The cache is invalidated whenever a pad
 // is plugged in or removed and by the 重新检测 button, so plugging a controller in while the window
@@ -1767,6 +1772,141 @@ static bool DecodeBoxart(const std::filesystem::path& path, int maxWidth, std::v
     decoder->Release();
     return ok;
 }
+#elif defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>
+#include <CoreGraphics/CoreGraphics.h>
+#include <ImageIO/ImageIO.h>
+
+/*
+ * macOS: ImageIO reads WebP natively from Big Sur (11.0), which is the deployment target this
+ * build already uses. CoreGraphics does the downscale, so there is no third-party decoder and no
+ * extra library to ship.
+ */
+static bool DecodeBoxart(const std::filesystem::path& path, int maxWidth,
+                         std::vector<uint8_t>& pixels, int& width, int& height)
+{
+    CFStringRef pathString = CFStringCreateWithCString(nullptr, path.c_str(), kCFStringEncodingUTF8);
+    if (pathString == nullptr)
+        return false;
+    CFURLRef url = CFURLCreateWithFileSystemPath(nullptr, pathString, kCFURLPOSIXPathStyle, false);
+    CFRelease(pathString);
+    if (url == nullptr)
+        return false;
+
+    CGImageSourceRef source = CGImageSourceCreateWithURL(url, nullptr);
+    CFRelease(url);
+    if (source == nullptr)
+        return false;
+
+    CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, nullptr);
+    CFRelease(source);
+    if (image == nullptr)
+        return false;
+
+    const size_t sourceWidth = CGImageGetWidth(image);
+    const size_t sourceHeight = CGImageGetHeight(image);
+    if (sourceWidth == 0 || sourceHeight == 0)
+    {
+        CGImageRelease(image);
+        return false;
+    }
+
+    int outWidth = (int)sourceWidth;
+    int outHeight = (int)sourceHeight;
+    if (maxWidth > 0 && sourceWidth > (size_t)maxWidth)
+    {
+        outWidth = maxWidth;
+        outHeight = (int)(std::max)(1L,
+            std::lround(sourceHeight * (double)maxWidth / (double)sourceWidth));
+    }
+
+    std::vector<uint8_t> rgba((size_t)outWidth * outHeight * 4);
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+    CGContextRef context = CGBitmapContextCreate(rgba.data(), outWidth, outHeight, 8,
+        (size_t)outWidth * 4, colorSpace,
+        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+    CGColorSpaceRelease(colorSpace);
+    if (context == nullptr)
+    {
+        CGImageRelease(image);
+        return false;
+    }
+
+    CGContextSetInterpolationQuality(context, kCGInterpolationHigh);
+    CGContextDrawImage(context, CGRectMake(0, 0, outWidth, outHeight), image);
+    CGContextRelease(context);
+    CGImageRelease(image);
+
+    pixels = std::move(rgba);
+    width = outWidth;
+    height = outHeight;
+    return true;
+}
+
+#elif defined(__linux__)
+#include <webp/decode.h>
+
+/*
+ * Linux has no system WebP decoder shared by every distribution, so this uses libwebp. The
+ * decoder scales while decoding, which keeps the cached textures at the same size as the Windows
+ * and macOS paths instead of decoding the full 512x700 images and shrinking them afterwards.
+ */
+static bool DecodeBoxart(const std::filesystem::path& path, int maxWidth,
+                         std::vector<uint8_t>& pixels, int& width, int& height)
+{
+    std::FILE* file = std::fopen(path.c_str(), "rb");
+    if (file == nullptr)
+        return false;
+
+    std::fseek(file, 0, SEEK_END);
+    const long length = std::ftell(file);
+    std::fseek(file, 0, SEEK_SET);
+    if (length <= 0)
+    {
+        std::fclose(file);
+        return false;
+    }
+
+    std::vector<uint8_t> encoded((size_t)length);
+    const size_t read = std::fread(encoded.data(), 1, encoded.size(), file);
+    std::fclose(file);
+    if (read != encoded.size())
+        return false;
+
+    WebPDecoderConfig config;
+    if (!WebPInitDecoderConfig(&config))
+        return false;
+    if (WebPGetFeatures(encoded.data(), encoded.size(), &config.input) != VP8_STATUS_OK)
+        return false;
+
+    config.output.colorspace = MODE_RGBA;
+    if (maxWidth > 0 && config.input.width > maxWidth)
+    {
+        config.options.use_scaling = 1;
+        config.options.scaled_width = maxWidth;
+        config.options.scaled_height = (int)(std::max)(1L,
+            std::lround(config.input.height * (double)maxWidth / (double)config.input.width));
+    }
+
+    if (WebPDecode(encoded.data(), encoded.size(), &config) != VP8_STATUS_OK)
+    {
+        WebPFreeDecBuffer(&config.output);
+        return false;
+    }
+
+    width = config.output.width;
+    height = config.output.height;
+    const size_t stride = config.output.u.RGBA.stride;
+    pixels.resize((size_t)width * height * 4);
+    for (int y = 0; y < height; ++y)
+        std::memcpy(pixels.data() + (size_t)y * width * 4,
+                    config.output.u.RGBA.rgba + (size_t)y * stride,
+                    (size_t)width * 4);
+
+    WebPFreeDecBuffer(&config.output);
+    return true;
+}
+
 #endif
 
 /*
@@ -1791,7 +1931,7 @@ static BoxartTexture LoadBoxart(const std::string& setName)
     if (!std::filesystem::is_regular_file(path, error))
         return result;
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__) || defined(__linux__)
     std::vector<uint8_t> pixels;
     int width = 0;
     int height = 0;
@@ -4043,11 +4183,44 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
     const float buttonHeight = ImGui::GetFrameHeight();
     const float statusHeight = ImGui::GetTextLineHeight();
     const float gap = ImGui::GetStyle().ItemSpacing.x;
-    const float footer = buttonHeight + statusHeight + gap * 2.0f;
+
+    const float contentWidth = ImGui::GetContentRegionAvail().x;
+
+    // Interface scale, from the font size LoadUiFont() selected for the display DPI. Everything
+    // below sizes itself from this rather than from raw pixels, so the same layout works at 100%
+    // and at 200% Windows scaling.
+    const float uiScale = (std::max)(1.0f, ImGui::GetFontSize() / 18.0f);
+
+    /*
+     * Compact mode.
+     *
+     * Below roughly 1100 logical pixels the two columns no longer leave the settings panel enough
+     * width for its controls: the tab bar truncates labels and the right-hand column is clipped.
+     * In that case the game list is narrowed to a smaller share of the width, the footer uses two
+     * rows and the tab bar scrolls, which hands the rest of the width to the settings.
+     *
+     * The preview is not part of that trade. It is the only place the cover art and the description
+     * appear, so hiding it removes information instead of adapting the layout - at the minimum size
+     * the left column was left with an empty band above the list. It stays visible at every window
+     * size, and the divider lets the user shrink it when the height is tight.
+     *
+     * The threshold and every size below it are in logical pixels, so a 150% display switches at
+     * 1650 physical pixels and everything stays proportional.
+     */
+    const bool compact = contentWidth < 1100.0f * uiScale;
+
+    // Compact mode also needs a second footer row: five buttons do not fit across a narrow window
+    // once the labels are measured, and clipping "Restore Defaults" is worse than using two rows.
+    const float footer = compact
+        ? buttonHeight * 2.0f + statusHeight + gap * 3.0f
+        : buttonHeight + statusHeight + gap * 2.0f;
+
     const float topY = ImGui::GetCursorPosY();
     const float topX = ImGui::GetCursorPosX();
     const float available = ImGui::GetContentRegionAvail().y;
-    const float columnWidth = ImGui::GetContentRegionAvail().x * 0.52f - gap * 0.5f;
+    const float columnWidth = compact
+        ? (std::max)(360.0f * uiScale, contentWidth * 0.40f)
+        : contentWidth * 0.52f - gap * 0.5f;
     const float panelHeight = available - footer;
 
     static char romBuffer[1024] = {};
@@ -4090,19 +4263,21 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
     //
     // The split is stored as a ratio rather than a pixel height: dragging the divider sets how
     // much of the column the preview takes, and resizing the window then scales both parts
-    // proportionally. The bounds keep either side from collapsing, and follow the interface scale
-    // the same way the style does (LoadUiFont() uses 18 px as the unscaled size).
-    const float uiScale = (std::max)(1.0f, ImGui::GetFontSize() / 18.0f);
+    // proportionally. The minimum height follows the interface scale the same way the style does
+    // (LoadUiFont() uses 18 px as the unscaled size); the maximum is the half-column cap below, so
+    // the list always keeps at least half of the space.
     if (g_previewSplit < 0.0f)
     {
-        g_previewSplit = (std::max)(0.10f, (std::min)(0.90f,
+        g_previewSplit = (std::max)(0.10f, (std::min)(kMaxPreviewShare,
             config["GuiPreviewSplit"].ValueAsDefault<float>(0.42f)));
     }
     const float splitHeight = (std::max)(1.0f, panelHeight - romRowHeight - gap * 2.0f);
     const float minPreviewHeight = (std::min)(150.0f * uiScale, splitHeight * 0.45f);
-    const float minListHeight = (std::min)(140.0f * uiScale, splitHeight * 0.45f);
+    // The upper bound is the same half-column cap the divider uses below, so a value loaded from
+    // the config cannot open taller than a dragged one either.
+    const float maxPreviewHeight = splitHeight * kMaxPreviewShare;
     float previewHeight = g_previewSplit * splitHeight;
-    previewHeight = (std::max)(minPreviewHeight, (std::min)(splitHeight - minListHeight, previewHeight));
+    previewHeight = (std::max)(minPreviewHeight, (std::min)(maxPreviewHeight, previewHeight));
     g_previewSplit = previewHeight / splitHeight;
 
     const float previewY = topY + romRowHeight + gap;
@@ -4130,12 +4305,24 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
         // The whole remaining height goes to the table: the ROM count that used to reserve a line
         // below it now lives in the footer status line.
         const float tableHeight = (std::max)(80.0f, ImGui::GetContentRegionAvail().y);
+
+        /*
+         * Measure the ROM column instead of guessing a width. The set names are all lower-case
+         * ASCII and about ten characters, so the column only needs the widest of them plus the
+         * cell padding; everything left over goes to the game name. Measuring also keeps the
+         * column exact at 100%, 150% and 200% scaling, where a fixed pixel value would either
+         * waste space or clip the longest name.
+         */
+        float romColumnWidth = ImGui::CalcTextSize(Tr("ROM")).x;
+        for (const RomEntry& entry : g_roms)
+            romColumnWidth = (std::max)(romColumnWidth, ImGui::CalcTextSize(entry.setName.c_str()).x);
+        romColumnWidth += ImGui::GetStyle().CellPadding.x * 2.0f + 6.0f;
+
         if (ImGui::BeginTable("Games", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp, ImVec2(0, tableHeight)))
         {
-            // The name column carries the version too, so it needs the lion's share of the width.
             UiColumn("游戏", 0, 3.0f);
-            UiColumn("ROM", 0, 1.6f);
-            UiColumn("年份", ImGuiTableColumnFlags_WidthFixed, 56.0f);
+            UiColumn("ROM", ImGuiTableColumnFlags_WidthFixed, romColumnWidth);
+            UiColumn("年份", ImGuiTableColumnFlags_WidthFixed, 56.0f * uiScale);
             ImGui::TableSetupScrollFreeze(0, 1);
             ImGui::TableHeadersRow();
 
@@ -4203,6 +4390,7 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
     }
     ImGui::EndChild();
 
+    // The preview and its divider are drawn at every window size.
     const int previewIndex = hoveredRow >= 0 ? hoveredRow : selectedGameIndex;
     const RomEntry* previewEntry =
         (previewIndex >= 0 && previewIndex < (int)g_roms.size()) ? &g_roms[previewIndex] : nullptr;
@@ -4229,7 +4417,7 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
     {
         const float next = previewHeight + io.MouseDelta.y;
         g_previewSplit = (std::max)(minPreviewHeight,
-            (std::min)(splitHeight - minListHeight, next)) / splitHeight;
+            (std::min)(maxPreviewHeight, next)) / splitHeight;
     }
     {
         // A short centred bar makes the otherwise invisible strip discoverable, and brightens
@@ -4268,7 +4456,12 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
      * fault. Seven tabs fit here once narrowed to TabMinWidthShrink; Mixed only falls back to
      * scrolling if the window is made narrower than that.
      */
-    if (ImGui::BeginTabBar("SettingsTabs", ImGuiTabBarFlags_FittingPolicyMixed))
+    // Compact mode keeps the full tab labels and scrolls instead of truncating them: at this width
+    // the settings panel is wide enough for the page, but not for seven tabs at their natural size.
+    const ImGuiTabBarFlags tabFlags = compact
+        ? ImGuiTabBarFlags_FittingPolicyScroll
+        : ImGuiTabBarFlags_FittingPolicyMixed;
+    if (ImGui::BeginTabBar("SettingsTabs", tabFlags))
     {
         if (UiTabItem("常用"))
         {
@@ -4412,7 +4605,11 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
 
         const float padding = ImGui::GetStyle().FramePadding.x * 2.0f + 24.0f;
         const float minWidth = widest + padding;
-        const float evenShare = (ImGui::GetContentRegionAvail().x - gap * (footerCount - 1)) / (float)footerCount;
+
+        // Compact mode puts three buttons on the first row and two on the second, so the share is
+        // computed per row rather than across all five.
+        const int perRow = compact ? 3 : footerCount;
+        const float evenShare = (ImGui::GetContentRegionAvail().x - gap * (perRow - 1)) / (float)perRow;
 
         // Text completeness comes first, so the labels set the floor. Above that the buttons grow to
         // share the row evenly, which is what the window has room for; the cap keeps them from
@@ -4427,6 +4624,7 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
         // footer height, and letting the cursor follow the child windows would place the row
         // wherever they happened to end.
         const float buttonsY = topY + available - footer + gap * 0.5f;
+        const float secondRowY = buttonsY + buttonHeight + gap;
         const float statusY = topY + available - statusHeight - gap * 0.5f;
         ImGui::SetCursorPos(ImVec2(topX, buttonsY));
 
@@ -4449,7 +4647,10 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
         ImGui::SameLine();
         if (UiButton(footerLabels[2], buttonSize))
             ImGui::OpenPopup("LoadSettings");
-        ImGui::SameLine();
+        if (compact)
+            ImGui::SetCursorPos(ImVec2(topX, secondRowY));
+        else
+            ImGui::SameLine();
         if (UiButton(footerLabels[3], buttonSize))
             ImGui::OpenPopup("ConfirmDefaults");
         ImGui::SameLine();
@@ -4639,11 +4840,22 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
 
 static float GetDPIScale(SDL_Window* window)
 {
+#if defined(__APPLE__)
+    /*
+     * macOS windows are measured in points, and SDL reports the Retina difference separately as
+     * the drawable/window ratio that ImGui's framebuffer scale already uses. Applying the display
+     * DPI here as well scaled every control a second time (about 1.5x on a Retina panel), which
+     * made the interface too large for its layout and clipped the right-hand column.
+     */
+    (void)window;
+    return 1.0f;
+#else
     int displayIndex = SDL_GetWindowDisplayIndex(window);
     float ddpi = 96.0f;
     if (SDL_GetDisplayDPI(displayIndex, &ddpi, nullptr, nullptr) != 0 || ddpi < 1.0f)
         ddpi = 96.0f;
     return ddpi / 96.0f;
+#endif
 }
 
 void ApplyUiTheme()
@@ -4985,6 +5197,12 @@ GuiState* GuiCreate(const std::string& configPath, const Util::Config::Node& fil
         if (SDL_GetDisplayDPI(displayIndex, &ddpi, nullptr, nullptr) == 0 && ddpi >= 1.0f)
             ddpiScale = ddpi / 96.0f;
 
+#if defined(__APPLE__)
+        // SDL sizes macOS windows in points; the Retina factor applies to the drawable, not to the
+        // window. Scaling the request by the display DPI would ask for a window 1.5x too large.
+        ddpiScale = 1.0f;
+#endif
+
         // Reuse the size from the previous run if there is one, so a window the user has sized to
         // taste stays that way. Read through a const reference so that looking up a key the config
         // does not have yet (the size is only added once the GUI first saves) cannot create an
@@ -5012,8 +5230,8 @@ GuiState* GuiCreate(const std::string& configPath, const Util::Config::Node& fil
 
         // Clamp to something usable: never smaller than a sane minimum, never larger than the
         // desktop work area (the saved size may come from a since-disconnected display).
-        const int minWidth = 640;
-        const int minHeight = 480;
+        const int minWidth = (int)(1280.0f * ddpiScale);
+        const int minHeight = (int)(720.0f * ddpiScale);
         if (windowWidth < minWidth) windowWidth = minWidth;
         if (windowHeight < minHeight) windowHeight = minHeight;
 
@@ -5039,6 +5257,34 @@ GuiState* GuiCreate(const std::string& configPath, const Util::Config::Node& fil
     }
     // Has to come after creation: SDL installs its own default icon while creating the window.
     SetWindowIcon(state->window);
+
+    /*
+     * Minimum window size.
+     *
+     * The interface is two columns of fixed minimum content: the game list (with the cover-art
+     * preview above it) and the settings panel. Below 1280x720 logical pixels the settings column
+     * clips its controls and the list runs out of room for a readable game name, so SDL enforces
+     * that floor from here on and the window cannot be dragged into a state the layout cannot
+     * render. 1280x720 is also the smallest resolution the emulator is expected to run at.
+     *
+     * The floor is capped to the desktop work area. On a small screen at high scaling - a
+     * 1366x768 laptop at 150%, for example - 1280x720 logical is larger than the screen, and a
+     * minimum that cannot be satisfied would leave part of the window off-screen. In that case the
+     * window may be as small as the work area, and compact mode narrows the columns to fit.
+     */
+    {
+        const float minScale = (std::max)(1.0f, GetDPIScale(state->window));
+        int minWidth = (int)(1280.0f * minScale);
+        int minHeight = (int)(720.0f * minScale);
+        SDL_Rect usable{};
+        if (SDL_GetDisplayUsableBounds(SDL_GetWindowDisplayIndex(state->window), &usable) == 0)
+        {
+            minWidth = (std::min)(minWidth, (int)usable.w);
+            minHeight = (std::min)(minHeight, (int)usable.h);
+        }
+        SDL_SetWindowMinimumSize(state->window, minWidth, minHeight);
+        InfoLog("GUI minimum window size: %dx%d (scale %.2f).", minWidth, minHeight, minScale);
+    }
 
     state->glContext = SDL_GL_CreateContext(state->window);
     if (!state->glContext) {

@@ -72,7 +72,7 @@ SDL_LIBS = -framework SDL2 -framework SDL2_net -framework OpenGL -framework GLUT
 #
 
 PLATFORM_CXXFLAGS = -F./Frameworks -IFrameworks/SDL2.framework/Headers $(SDL_CFLAGS) -DSUPERMODEL_OSX
-PLATFORM_LDFLAGS = $(ARCH) -F./Frameworks $(SDL_LIBS) -lz -lm -lstdc++ -Wl,-rpath,@executable_path/../Frameworks -Wl,-rpath,@executable_path/Frameworks
+PLATFORM_LDFLAGS = $(ARCH) -F./Frameworks $(SDL_LIBS) -lz -lm -lstdc++ -framework ImageIO -framework CoreGraphics -framework CoreFoundation -Wl,-rpath,@executable_path/../Frameworks -Wl,-rpath,@executable_path/Frameworks
 PLATFORM_DIRS = Frameworks/SDL2_net.framework Frameworks/SDL2.framework Frameworks/libMoltenVK.dylib
 PLATFORM_BINARY_EXTENSION =
 

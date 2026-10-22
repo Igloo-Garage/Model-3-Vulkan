@@ -450,7 +450,7 @@ namespace
 		                                     "Games.xml has no definition for this ROM set, so it cannot be started.\nAnother version of the same game may already be listed." },
 
 		// ---- Controls tab -----------------------------------------------------------------------
-		{ "力反馈 / 灵敏度",                 "Force feedback / Sensitivity" },
+		{ "力反馈 / 灵敏度",                 "FFB" },
 		{ "校准摇杆",                        "Calibrate Sticks" },
 		{ "这个输入系统没有初始化成功，换一个再打开这一页。",
 		                                     "This input system failed to initialise; choose another one and reopen this page." },
