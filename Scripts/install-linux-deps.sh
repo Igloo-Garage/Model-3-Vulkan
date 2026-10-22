@@ -5,7 +5,7 @@ set -u
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq build-essential pkg-config \
-    libsdl2-dev libsdl2-net-dev libglu1-mesa-dev zlib1g-dev unzip curl
+    libsdl2-dev libsdl2-net-dev libglu1-mesa-dev zlib1g-dev libwebp-dev unzip curl
 echo "--- versions ---"
 g++ --version | head -1
 sdl2-config --version

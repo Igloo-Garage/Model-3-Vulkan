@@ -221,7 +221,7 @@ mingw32-make -f Makefiles/Makefile.Win32
 ### Linux
 
 ```
-sudo apt install build-essential pkg-config libsdl2-dev libsdl2-net-dev libglu1-mesa-dev zlib1g-dev
+sudo apt install build-essential pkg-config libsdl2-dev libsdl2-net-dev libglu1-mesa-dev zlib1g-dev libwebp-dev
 sudo apt install libvulkan1 mesa-vulkan-drivers   # runtime for the Vulkan renderer
 make -f Makefiles/Makefile.UNIX
 ```

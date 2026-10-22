@@ -49,7 +49,7 @@ jobs:
         if: startsWith(matrix.os, 'ubuntu')
         run: |
           sudo apt update
-          sudo apt install -y libsdl2-dev libsdl2-net-dev libglu1-mesa-dev
+          sudo apt install -y libsdl2-dev libsdl2-net-dev libglu1-mesa-dev libwebp-dev
           
       - name: Install Windows build dependencies
         if: startsWith(matrix.os, 'windows')
