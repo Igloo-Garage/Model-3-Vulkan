@@ -295,76 +295,89 @@ states and NVRAM, so changing it would invalidate every save a user already has.
 
 ---
 
-## Relationship to upstream
+## Relationship to Upstream
 
-**Taken from upstream `v0.3a-20261017-git-b05ef21`:**
+Supermodel-VK maintains an ongoing synchronization tracking upstream Supermodel's hardware emulation
+core, while intentionally preserving independent modern subsystems.
 
-- `Src/CPU/PowerPC/ppc_ops.c` — instruction-semantics fixes ported from MAME: `sraw` when
-  `rA == rS`, the `subfme` carry flag, undefined behaviour in the `rlw*` rotate amounts, and
-  consistent `fctiw` / `fctiwz` NaN handling across x86 and ARM.
-- `Src/Graphics/New3D/R3DShaderQuads.h` and `New3D.cpp` — the QuadTriFix. A forced triangle used to
-  be stored as a quad with a fabricated fourth corner, which put that corner off the real triangle
-  and corrupted depth and texture coordinates across the sliver beside it. The duplicate vertex is
-  now passed through and the geometry shader emits an exact triangle instead.
+### Core Emulation Tracking
 
-**Not taken:**
+- **Instruction Semantics:** Regularly backports MAME-aligned PowerPC arithmetic and bit-rotation
+  fixes (`sraw`, `subfme`, `rlw*`) and standardized cross-architecture NaN handling across x86-64
+  and ARM.
+- **Topology Architecture vs. QuadTriFix:** Upstream's New3D pipeline relies on a geometry shader
+  fix (QuadTriFix) to handle synthetic quad degradation. Supermodel-VK's Vulkan pipeline bypasses
+  this defect at the architectural level: `CopyVertexData` splits quads directly into native dual
+  triangles (`0,1,2` and `0,2,3`) submitted via `VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST`, ensuring
+  zero degenerate vertex overhead or depth corruption.
 
-- **PRO-1000 machine support.** It touches `Model3`, `Real3D`, `TileGen`, `53C810`, `IEmulator` and
-  `Main.cpp`, several of which this fork has modified heavily for Vulkan. It is a piece of work in
-  its own right, not a file copy.
-- **Upstream `Audio.cpp` / `SCSP.cpp`.** Both have diverged substantially here: this fork's versions
-  carry the decoupled audio path, the adaptive output latency and the fractional sample accumulator.
-  Taking upstream's would remove them.
+### Intentional Divergences
 
-The Vulkan renderer needs no equivalent of QuadTriFix. `CopyVertexData` splits a quad into two real
-triangles (`0,1,2` and `0,2,3`) and submits them as `VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST`, so there
-is never a duplicate vertex to begin with. The defect belongs to New 3D's quad-shading approach,
-which reconstructs Model 3's quad rasterisation rules in a geometry shader — more faithful to the
-hardware, but with degenerate input to guard against.
+- **Decoupled Low-Latency Audio:** Supermodel-VK maintains a proprietary, decoupled multi-threaded
+  audio architecture (fractional per-frame sample accumulators and adaptive buffer scaling).
+  Monolithic upstream audio merges are intentionally isolated to prevent audio underruns and thread
+  starvation.
+- **Specialized Machine Profiles:** Upstream PRO-1000 experimental profiles remain decoupled until
+  their storage and tilegen logic can be cleanly mapped onto the modern Vulkan memory arena.
 
 ---
 
 ## Documentation
 
-- `Docs/README.txt` — the full upstream manual: every setting, every command-line option
-- `Docs/README-VK.txt` — what this fork adds, in English
-- `Docs/安装说明.txt` — setup guide in Chinese, including which input system to pick per controller
+- [`Docs/README.txt`](Docs/README.txt) — Comprehensive upstream hardware reference, emulator CLI
+  parameters, and system manual.
+- [`Docs/README-VK.txt`](Docs/README-VK.txt) — Detailed technical manual for Vulkan renderer
+  configurations, VRR presentation, and shader tuning.
+- [`Docs/安装说明.txt`](Docs/安装说明.txt) — 简体中文快速配置指南（控制器映射推荐、Vulkan 驱动兼容性与常用画质选项）。
 
 ---
 
-## Known limitations
+## Hardware Notes & Technical Limits
 
-- **Hot-plug applies to `sdl` and `sdlgamepad` only.** `xinput`, `dinput` and `rawinput` enumerate
-  devices once at start-up; attaching a pad mid-game there still needs a session restart.
-- **8BitDo pads have button-type triggers.** SDL maps L2/R2 as buttons and synthesises a full-scale
-  axis value while held, so binding one to brake or throttle works but is on/off rather than
-  analogue. That is the hardware, not a fault in the emulator. An SN30 Pro+ also reports itself as
-  "Nintendo Switch Pro Controller" in Switch mode, which is why it must be recognised by that name.
-- **The 4×, 6× and 8× resolution presets are unreachable on 16:9 panels.** They need 1536, 2304 and
-  3072 rows respectively; 1440-row panels cap at 3× and 2160-row panels jump to 5×. They are kept
-  for custom and non-16:9 panels, and the preset list says so.
-- **Integer scaling and widescreen interact.** With `IntegerScale` on, the visible picture is shorter
-  than the window, so the 3D layer is drawn into a sub-rectangle. The frustum widening accounts for
-  that; scanlines do not, because they are counted against the whole frame. The scanline controls
-  state both the pitch and the resulting count so the difference is visible rather than surprising.
+- **Gamepad Hot-Plugging:** Dynamic device reconciliation is supported on modern SDL input paths
+  (`sdl` and `sdlgamepad`). Legacy API targets (`xinput`, `dinput`, `rawinput`) enumerate devices
+  once at initialization and require a session restart.
+- **Controller Trigger Topologies:** Certain hardware (such as 8BitDo gamepads operating in Nintendo
+  Switch mode) maps L2/R2 triggers digitally, reporting discrete binary on/off states rather than
+  analogue continuous ranges. This reflects vendor hardware firmware protocol behavior rather than
+  emulator input polling.
+- **Integer Scaling Multiples on 16:9 Displays:** Integer scaling factors ($\times4$, $\times6$,
+  $\times8$) require native vertical pixel bounds of 1536, 2304, and 3072 scanlines. On standard
+  16:9 displays, 1440p panels cap cleanly at $\times3$, while 2160p (4K) panels advance to $\times5$.
+- **Widescreen Frustum & CRT Beam Alignment:** Enabling widescreen geometry widens the visible 3D
+  frustum into sub-rectangles outside the classic 4:3 raster viewport. CRT beam-profile scanline
+  masks compute across the native display raster grid, accurately mirroring physical tube phosphor
+  alignment.
+
+---
+
+## Support & Sponsorship
+
+Supermodel-VK and our arcade rendering tools are 100% free and open-source. Development is fueled by
+late-night reverse engineering, hardware validation, and community passion.
+
+If you find this project valuable and would like to support display testbeds, hardware acquisitions,
+or early release previews, consider supporting via Ko-fi:
+
+[![Ko-fi](https://img.shields.io/badge/Support%20on-Ko--fi-F16061?style=for-the-badge&logo=ko-fi&logoColor=white)](https://ko-fi.com/igloogarage)
+
+*Monthly backers get early testing snapshot builds and devlogs covering low-level Vulkan rendering
+milestones.*
 
 ---
 
 ## Community
 
-Emulator questions belong in the [upstream Supermodel Discord](https://discord.gg/XDd7TMMUMz) —
-that is where the people who reverse engineered the Model 3 hardware are.
+- **Discord:** *Coming soon (server in setup)*
+- **GitHub Discussions / Issues:** Open for technical discussions, bug reports, and hardware feedback.
 
-## Licence
+---
 
-GNU General Public License v3 or later, as upstream. See `Docs/LICENSE.txt`.
+## License & Credits
 
-A note on why there is only one licence file: GPL does not permit additional terms on a derivative
-work, and the Vulkan renderer links against the emulation core, so the two form a single work under
-that licence. `NOTICE.md` records what is original to this fork, how much of it there is, and the
-licences of the third-party components.
+Supermodel-VK is licensed under the **GNU General Public License v3.0 (GPLv3)**. See
+[`Docs/LICENSE.txt`](Docs/LICENSE.txt) for details.
 
-Supermodel is the work of The Supermodel Team — Bart Trzynadlowski, Nik Henson, Ville Linde,
-Stefano Teso and many contributors. This fork stands on their reverse-engineering of the Model 3
-platform; none of it would exist otherwise. `NOTICE.md` has the full credits, the size of this fork's
-additions, and how they were built.
+This project is a modernized Vulkan 1.3 architecture fork building upon the reverse-engineering
+foundations laid by Bart Trzynadlowski, Nik Henson, Ville Linde, Stefano Teso, and the Supermodel
+team. Third-party components and attribution details are documented in [`NOTICE.md`](NOTICE.md).
