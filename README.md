@@ -118,7 +118,8 @@ settings window — it shares the same emulation core and visual features.
 
 ## What this fork changes
 
-The emulation core is upstream's. The rendering and presentation layers are reworked:
+The emulation core comes from Supermodel. The rendering, presentation, audio, input and
+interface layers are reworked here:
 
 **Vulkan 1.3 backend** — `Src/Graphics/Vulkan3D/`, alongside the original OpenGL renderers. Per-frame
 vertex arenas are protected by fences, so long sessions do not leak or develop black patches.
