@@ -384,21 +384,32 @@ bool CSoundBoard::RunFrame(void)
 		M68KSetContext(&M68K);
 		SCSP_Update();
 		M68KGetContext(&M68K);
-	}
-	if (soundDebug)
-	{
-		float scspPeak = 0.0f;
-		for (int i = 0; i < numSamplesThisFrame; ++i)
+
+		if (soundDebug)
 		{
-			scspPeak = std::max(scspPeak, std::fabs(audioFL[i]));
-			scspPeak = std::max(scspPeak, std::fabs(audioFR[i]));
-			scspPeak = std::max(scspPeak, std::fabs(audioRL[i]));
-			scspPeak = std::max(scspPeak, std::fabs(audioRR[i]));
+			float scspPeak = 0.0f;
+			for (int i = 0; i < numSamplesThisFrame; ++i)
+			{
+				scspPeak = std::max(scspPeak, std::fabs(audioFL[i]));
+				scspPeak = std::max(scspPeak, std::fabs(audioFR[i]));
+				scspPeak = std::max(scspPeak, std::fabs(audioRL[i]));
+				scspPeak = std::max(scspPeak, std::fabs(audioRR[i]));
+			}
+			InfoLog("LoadDebug sound scsp done peak=%.1f", scspPeak);
 		}
-		InfoLog("LoadDebug sound scsp done peak=%.1f", scspPeak);
 	}
 	else
 	{
+		/*
+		 * Sound emulation is off: the mix is music only, so the SCSP side of the buffers must not
+		 * carry whatever a previous frame or session left there.
+		 *
+		 * This clear used to sit in the `else` of the *debug log* above instead of the `else` of
+		 * this block, which meant it ran on every ordinary session - right after SCSP_Update() had
+		 * filled all four channels. The result was music with no sound effects at all, in every
+		 * game, whether the session was a fresh boot or a loaded save. Only DSB is mixed in later,
+		 * so only DSB survived. If the effects ever go silent again, check this ordering first.
+		 */
 		memset(audioFL, 0, LENGTH_CHANNEL_BUFFER);
 		memset(audioFR, 0, LENGTH_CHANNEL_BUFFER);
 		memset(audioRL, 0, LENGTH_CHANNEL_BUFFER);

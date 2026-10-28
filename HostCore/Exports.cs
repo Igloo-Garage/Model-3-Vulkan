@@ -253,6 +253,61 @@ internal static unsafe class Exports
         }
     }
 
+    /*
+     * One raw zstd frame, for assets stored compressed outside the save
+     * container (.dds.zst in an HD texture pack).
+     *
+     * The two-pass convention matches HostCore_LoadVkState: a probe call with
+     * destination == null returns the decompressed size in *written and
+     * HOSTCORE_ERR_BUFFER_TOO_SMALL, then the caller allocates exactly that and
+     * calls again.  Nothing is written on a failure path, so a truncated or
+     * corrupt frame cannot leave a half-filled texture behind.
+     */
+    [UnmanagedCallersOnly(EntryPoint = "HostCore_DecompressZstd", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static int DecompressZstd(
+        byte* source,
+        nuint sourceSize,
+        byte* destination,
+        nuint destinationCapacity,
+        nuint* written,
+        byte* error,
+        nuint errorCapacity)
+    {
+        try
+        {
+            if (source == null || written == null || sourceSize == 0)
+                return Fail(error, errorCapacity, HostStatus.InvalidArgument, "source and written must not be empty.");
+            if (sourceSize > int.MaxValue)
+                return Fail(error, errorCapacity, HostStatus.InvalidArgument, "The compressed frame is too large.");
+
+            ReadOnlySpan<byte> frame = new ReadOnlySpan<byte>(source, (int)sourceSize);
+
+            if (destination == null || destinationCapacity == 0)
+            {
+                ulong size = ZstdCodec.GetDecompressedSize(frame);
+                if (size == 0 || size > int.MaxValue)
+                    return Fail(error, errorCapacity, HostStatus.FormatError,
+                        $"The zstd frame reports an unusable decompressed size ({size}).");
+
+                *written = (nuint)size;
+                return (int)HostStatus.BufferTooSmall;
+            }
+
+            int capacity = destinationCapacity > int.MaxValue ? int.MaxValue : (int)destinationCapacity;
+            int produced = ZstdCodec.Decompress(frame, new Span<byte>(destination, capacity));
+            *written = (nuint)produced;
+            return (int)HostStatus.Ok;
+        }
+        catch (InvalidDataException ex)
+        {
+            return Fail(error, errorCapacity, HostStatus.FormatError, ex.Message);
+        }
+        catch (Exception ex)
+        {
+            return Fail(error, errorCapacity, HostStatus.InternalError, ex.Message);
+        }
+    }
+
     private static string Utf8(byte* text)
     {
         return text == null ? string.Empty : Marshal.PtrToStringUTF8((IntPtr)text) ?? string.Empty;

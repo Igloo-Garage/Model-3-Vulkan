@@ -31,6 +31,15 @@ Re-architected from the ground up, the project transitions away from legacy Open
 
 ---
 
+## 🩹 What's New in v0.9.8.3b
+
+A maintenance release on top of the v0.9.8.3a milestone:
+
+* **Sound effects restored in every game**: a misplaced `else` cleared the SCSP buffers immediately after they had been filled, so every title played its MPEG music with no effects at all. Engine, tyre, collision and menu sounds are back; music, quad mixing and save states are unchanged.
+* **Hardware-compressed HD textures**: packs can now ship `.dds` (BC1/BC2/BC3/BC5/BC7) and zstd-compressed `.dds.zst` images. They are uploaded to VRAM in resumable chunks, with `.dds.zst` > `.dds` > `.webp` > `.png` precedence when several files share a hash.
+* **F4 toggles HD replacements / F3 rescans**: compare a pack against the original artwork without opening the in-game panel.
+* **Vulkan synchronisation fixes**: the 3D scene targets are handed to the 2D compositor on every exit path, including the white-flash frame, which removes the one-frame `VUID-vkCmdDraw-imageLayout-00344` warning.
+
 ## 🚧 What's New in Milestone v0.9.8.3a
 
 This release marks the official graduation of the project into **Model 3-Vulkan**, decoupling the modern Vulkan path from legacy OpenGL into a dedicated, high-performance architecture:
@@ -42,18 +51,10 @@ This release marks the official graduation of the project into **Model 3-Vulkan*
   * **Mode 0 (Bit-exact Two-Pass)**: Fast on-chip pass for low-bandwidth integrated GPUs.
   * **Mode 1 (Per-Pixel Sorted A-Buffer OIT)**: 4-slot A-buffer with constant-time sorting (<0.75ms at 4K).
   * **Mode 2 (Arcade Hardware Checkerboard — *World First*)**: Faithfully revives Real3D’s 1996 single-pass 50% stipple dither mask and transparent Z-write depth competition. **Permanently fixes the 20-year-old snow/fog blowout in *Sega Rally 2***, eliminates **blinding solid-white tire/exhaust smoke in *Daytona USA 2* and *Scud Race***, and cleans dirty black foliage outlines in *The Lost World*.
-
-![Transparency System](Docs/images/transparency%20mode.webp)
-
 * **Native HD Texture Pack Engine**:
   * Real3D sub-textures are cleanly dumped and loaded via 64-bit coordinate/format hashes `(page, x, y, w, h, format)`.
   * Built-in automatic hardware Mipmap generation and `textureGrad` bypass to eliminate texture seam bleeding.
-  * Native support for `.png` (lossless quality) and `.webp` (compact downloads), with hardware-direct **`.dds` (BC7 VRAM streaming)** actively in development.
-
-![HD Texture Options](Docs/images/UI003-HD%20texture%20options.webp)
-
-![Game Screenshot 1](Docs/images/Daytona2%20PE_HD001.webp)
-![Game Screenshot 1](Docs/images/Daytona2_HD001.webp)
+  * Native support for `.png` (lossless quality), `.webp` (compact downloads), and hardware-direct `.dds` (BC1/3/5/7 VRAM streaming, optionally zstd-compressed).
 
 ### 🔊 Audio Modernization & The FV2 Ear-Exploder Fix
 * **Dedicated Real-Time Audio Thread**: Motorola 68000 + SCSP/DSB sound emulation runs on its own high-priority thread. Moving or resizing windows, streaming scene assets, or sudden GPU hiccups will **never stutter, crackle, or drop out audio again**.
@@ -62,18 +63,11 @@ This release marks the official graduation of the project into **Model 3-Vulkan*
 ### 💾 Modern Save State Management (Zstd `.zst`)
 * **16 Visual Save Slots**: Right-click games in the launcher or open the in-game quick menu (`Tab`) to save and load across 16 slots with real-time screenshot thumbnails.
 * **Next-Gen Zstandard (`.zst`) Compression**: Slashes save file size to roughly **1/6th of legacy uncompressed `.st` dumps** (reducing 30–50MB+ dumps down to a few megabytes—a massive storage saver for handhelds like the **Steam Deck**).
-![Save State Management](Docs/images/manage%20saves.webp)
 
 ### 🖥️ UI & Display Pacing Enhancements
 * **Smarter Window Lifecycle & Multi-Monitor Scaling**: Window size is preserved across restarts. Moving windows between displays with different resolutions or DPI scaling rescales the interface on the fly with crisp text and zero stretching.
 * **Warm Eye-Care Themes**: Three hand-crafted themes (warm light, warm dark and the original interface), with the warm light theme set as default to eliminate blue-white glare during long gaming sessions.
-
-![Light Theme](Docs/images/UI001-light.webp)
-![Dark Theme](Docs/images/UI002-dark.webp)
-
 * **Arcade-Exact 57.524 Hz Pacing (CDisplayPacer)**: Native 57.524 Hz arcade refresh pacing + 120Hz/144Hz+ motion interpolation via SDL3 for VRR/G-Sync monitors.
-![Refresh Pacing](Docs/images/Video%20settings02.webp)
-
 * **Low-Resolution 3D Rendering**: Render the 3D scene at 496×384 (native) or 992×768 (2x native) and upscale it onto the picture rectangle, while the 2D HUD keeps its own resolution. This is the cheapest way to hold 60 Hz on integrated GPUs without softening the HUD.
 * **Dual-Binary Architecture**: Includes `Model3-Vulkan.exe` (Default modern path) and `Supermodel-LegacyOG.exe` (SDL2 + OpenGL fallback for Haswell/older iGPUs).
 
@@ -274,7 +268,7 @@ The version string is defined in exactly one location: `Src/Version.h`:
 ```c
 #define SUPERMODEL_VERSION      "0.3a-WIP"     /* Upstream core; recorded in save states */
 #define SUPERMODEL_BASE_RELEASE "0.3a-2026.09.28"
-#define SUPERMODEL_FORK_VERSION "0.9.8.3a"
+#define SUPERMODEL_FORK_VERSION "0.9.8.3b"
 ```
 
 `SUPERMODEL_TITLE_FULL` is assembled from the title and the fork version, and `build.bat` reads these definitions via `Scripts/VersionString.ps1`. `SUPERMODEL_VERSION` is deliberately preserved: it is recorded in save states and NVRAM, preventing existing saves from being invalidated.

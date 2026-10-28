@@ -634,7 +634,7 @@ static bool HasDedicatedUI(const std::string& key)
         "BezelMode", "BezelImage", "BezelBrightness",
 #if !defined(SUPERMODEL_OPENGL_ONLY)
         // HD texture pack switches. Drawn by hand on the 核心 page and in the in-game panel,
-        // where the reload button and the F4 hint belong together with them.
+        // where the reload button and the hotkey hint belong together with them.
         "LoadHDTextures", "DumpHDTextures",
 #endif
         // Paired with the backdrop by hand: it decides whether there are side bars for the backdrop
@@ -6547,10 +6547,11 @@ static void DrawLightGunBorderSettings(Util::Config::Node& config)
  *
  * Drawn on the 核心 page (below the runtime options) and in the in-game panel. The
  * switches are read by the renderer every simulation frame, so they take effect
- * without a new session; the panel's reload button and the F4 binding rescans the
- * pack. While the panel is open the emulator is paused, so a reload completes when
- * the panel is closed and the game resumes - the hint says so rather than leaving
- * the button looking unresponsive.
+ * without a new session; the panel's reload button and the F3 binding rescans the
+ * pack, while F4 itself switches the pack on and off for an A/B against the original
+ * artwork. While the panel is open the emulator is paused, so a reload completes when
+ * the panel is closed and the game resumes - the hint says so rather than leaving the
+ * button looking unresponsive.
  *
  * The settings window has no renderer running, so it offers the switches only; a
  * pack is scanned when the next session starts.
@@ -6575,11 +6576,12 @@ void DrawHDTextureSettings(Util::Config::Node& config, bool overlayMode)
     bool load = config["LoadHDTextures"].ValueAsDefault<bool>(false);
     if (UiCheckbox("加载高清纹理包##LoadHDTextures", &load))
         config.Set("LoadHDTextures", load);
-    if (!overlayMode)
+    	if (!overlayMode)
         HelpMarker(
             "读取 Data/Assets/HDTextures/<游戏>/ 里的替换贴图，按内容哈希匹配。\n"
-            "支持 PNG 和 WebP，分辨率可以是原图的 2x、4x、8x 等任意倍数，\n"
-            "并支持完整的 8 位平滑 Alpha。找不到替换的贴图仍用原版。");
+            "支持 PNG、WebP 与 DDS（BC1/BC3/BC5/BC7，可压成 .dds.zst），\n"
+            "分辨率可以是原图的 2x、4x、8x 等任意倍数，DDS 可自带 mip 链。\n"
+            "找不到替换的贴图仍用原版。");
 
     bool dump = config["DumpHDTextures"].ValueAsDefault<bool>(false);
     if (UiCheckbox("导出当前游戏纹理##DumpHDTextures", &dump))
@@ -6598,13 +6600,13 @@ void DrawHDTextureSettings(Util::Config::Node& config, bool overlayMode)
             InfoLog("HD textures: reload requested from the in-game panel.");
         }
         ImGui::SameLine();
-        UiTextDim("（也可按 F4；关闭面板后生效）");
+        UiTextDim("（F4 切换替换/原版，F3 重扫；关闭面板后生效）");
     }
     else
     {
-        UiTextDim("替换贴图：Data/Assets/HDTextures/<游戏>/（PNG 或 WebP）");
+        UiTextDim("替换贴图：Data/Assets/HDTextures/<游戏>/（PNG / WebP / DDS）");
         UiTextDim("导出贴图：Data/Assets/DumpTextures/<游戏>/（PNG）");
-        UiTextDim("游戏中按 F4 可重新扫描，无需重启。");
+        UiTextDim("游戏中按 F4 在替换贴图与原版之间切换，F3 重新扫描。");
     }
 
     if (!vulkan)

@@ -150,7 +150,7 @@ static const char s_defaultConfigFileSettings[] =
    "; HD texture packs. LoadHDTextures reads replacements from Data/Assets/HDTextures/<romset>/;\n"
    "; DumpHDTextures exports the textures a game draws as RGBA PNGs to Data/Assets/DumpTextures/<romset>/\n"
    "; so they can be upscaled and dropped into a pack. Both can also be switched and reloaded\n"
-   "; from the in-game panel (Reload = F4) without restarting. Default off.\n"
+   "; from the in-game panel (Reload = F3, toggle = F4) without restarting. Default off.\n"
    "LoadHDTextures = false\n"
    "DumpHDTextures = false\n"
    "\n"

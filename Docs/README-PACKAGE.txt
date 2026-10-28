@@ -1,5 +1,5 @@
 ========================================================================
-Model 3-Vulkan (v0.9.8.3a)
+Model 3-Vulkan (v0.9.8.3b)
 Modernized Standalone Sega Model 3 Arcade Emulator
 Igloo-Garage (formerly Supermodel-VK)
 ========================================================================

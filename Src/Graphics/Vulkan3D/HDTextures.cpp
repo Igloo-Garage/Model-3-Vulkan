@@ -20,11 +20,16 @@
  ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
  **/
 #include "HDTextures.h"
+#include "DdsLoader.h"
 #include "TextureDecode.h"
 
 #include "OSD/FileSystemPath.h"
 #include "OSD/Logger.h"
 #include "Util/PNGFile.h"
+
+#if defined(SUPERMODEL_PURE_VULKAN)
+#include "OSD/SDL3/HostCoreZstd.h"
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -47,6 +52,26 @@ std::atomic<uint32_t> s_reloadSerial(0);
 constexpr uint32_t kDumpChunkBytes = 4u * 1024u * 1024u;
 constexpr uint32_t kMaxDumpsPerSession = 50000;
 
+/*
+ * How much of a block-compressed mip chain one upload call may ask the staging ring for.
+ *
+ * The ring is 64 MB per frame slot and is shared with geometry, the RGBA replacement path
+ * and the 2D uploads, so a whole 4096x4096 BC7 chain (about 21.3 MB, 16 MB of it level 0)
+ * must not be one request. 8 MB keeps a single texture to a small fraction of the slice and
+ * still moves a typical 256x256 or 512x512 replacement in one call.
+ */
+constexpr VkDeviceSize kCompressedChunkBytes = 8ull * 1024ull * 1024ull;
+
+/*
+ * How many of those pieces one texture may upload in a single frame.
+ *
+ * One per frame would stretch a 21 MB 4K chain over fourteen frames - a quarter of a second of
+ * visible pop-in - while the ring has room for far more. Four bounds a single texture to 32 MB
+ * of a 64 MB slice, which still leaves half the frame's staging space for the rest of the pack
+ * and for geometry; running out is handled by simply resuming on the next frame.
+ */
+constexpr uint32_t kCompressedChunksPerFrame = 4;
+
 uint32_t MipCount(uint32_t width, uint32_t height)
 {
 	uint32_t mips = 1;
@@ -65,6 +90,78 @@ std::string LowerExtension(const std::filesystem::path& path)
 	std::transform(ext.begin(), ext.end(), ext.begin(),
 		[](unsigned char c) { return (char)std::tolower(c); });
 	return ext;
+}
+
+bool EndsWith(const std::string& text, const char* suffix)
+{
+	const size_t length = std::strlen(suffix);
+	return text.size() >= length && text.compare(text.size() - length, length, suffix) == 0;
+}
+
+std::string LowerFilename(const std::filesystem::path& path)
+{
+	std::string name = path.filename().string();
+	std::transform(name.begin(), name.end(), name.begin(),
+		[](unsigned char c) { return (char)std::tolower(c); });
+	return name;
+}
+
+/*
+ * Recognises a replacement file and returns the length of its suffix (0 when the file is
+ * not one), plus the kind and that kind's priority.
+ *
+ * The suffix length has to travel with the answer: a .dds.zst name ends in two extensions,
+ * so std::filesystem::path::stem() would leave ".dds" attached to the hash and no file
+ * would ever match a texture. Callers strip the reported number of characters instead.
+ */
+size_t ClassifyReplacement(const std::filesystem::path& path, HDTextureFileKind& kind)
+{
+	const std::string name = LowerFilename(path);
+	if (EndsWith(name, ".dds.zst"))
+	{
+		kind = HDTextureFileKind::DdsZst;
+		return 8;
+	}
+	if (EndsWith(name, ".dds"))
+	{
+		kind = HDTextureFileKind::Dds;
+		return 4;
+	}
+	if (EndsWith(name, ".webp"))
+	{
+		kind = HDTextureFileKind::Webp;
+		return 5;
+	}
+	if (EndsWith(name, ".png"))
+	{
+		kind = HDTextureFileKind::Png;
+		return 4;
+	}
+	return 0;
+}
+
+const char* KindLabel(HDTextureFileKind kind)
+{
+	switch (kind)
+	{
+	case HDTextureFileKind::DdsZst: return ".dds.zst";
+	case HDTextureFileKind::Dds:    return ".dds";
+	case HDTextureFileKind::Webp:   return ".webp";
+	default:                        return ".png";
+	}
+}
+
+const char* FormatLabel(VkFormat format)
+{
+	switch (format)
+	{
+	case VK_FORMAT_BC1_RGBA_UNORM_BLOCK: return "BC1";
+	case VK_FORMAT_BC2_UNORM_BLOCK:      return "BC2";
+	case VK_FORMAT_BC3_UNORM_BLOCK:      return "BC3";
+	case VK_FORMAT_BC5_UNORM_BLOCK:      return "BC5";
+	case VK_FORMAT_BC7_UNORM_BLOCK:      return "BC7";
+	default:                             return "RGBA8";
+	}
 }
 
 bool ReadFileBytes(const std::string& path, std::vector<uint8_t>& data)
@@ -127,6 +224,42 @@ bool DecodeImageFile(const std::string& path, std::vector<uint8_t>& pixels, uint
 
 	error = "unsupported image format";
 	return false;
+}
+
+/*
+ * Loads a DDS replacement, uncompressing .dds.zst first when asked.
+ *
+ * The compressed container is handled here rather than in the parser so that the parser
+ * only ever sees a plain DDS image. The zstd codec lives in Model3VulkanHostCore, the same
+ * module the .zst save containers use; on a build without it the compressed form is simply
+ * unsupported and the pack's uncompressed file is used instead.
+ */
+bool DecodeDdsFile(const std::string& path, bool zstd, DdsTextureInfo& info, std::string& error)
+{
+	std::vector<uint8_t> fileBytes;
+	if (!ReadFileBytes(path, fileBytes))
+	{
+		error = "the file could not be read";
+		return false;
+	}
+
+	std::vector<uint8_t> ddsBytes;
+	if (zstd)
+	{
+#if defined(SUPERMODEL_PURE_VULKAN)
+		if (!OSD::HostCore::DecompressZstdFrame(fileBytes, ddsBytes, error))
+			return false;
+#else
+		error = "this build cannot decompress .dds.zst files";
+		return false;
+#endif
+	}
+	else
+	{
+		ddsBytes = std::move(fileBytes);
+	}
+
+	return ParseDdsFromMemory(ddsBytes.data(), ddsBytes.size(), info, error);
 }
 
 /*
@@ -226,10 +359,30 @@ bool CHDTexturePack::Init(CVulkanContext& context, const std::string& gameName, 
 	VkPhysicalDeviceFeatures features = {};
 	vkGetPhysicalDeviceFeatures(context.PhysicalDevice(), &features);
 	m_anisotropy = features.samplerAnisotropy != 0 && m_maxAnisotropy > 1.0f;
+	m_supportsBC = context.TextureCompressionBCSupported();
+
+	/*
+	 * Only ask the cold-path module this once, at session start: Scan() runs on the first
+	 * frame the pack is enabled and should stay a pure directory walk.
+	 */
+	m_zstdAvailable = false;
+#if defined(SUPERMODEL_PURE_VULKAN)
+	m_zstdAvailable = OSD::HostCore::ZstdAvailable();
+#endif
 
 	StartLoader();
 	InfoLog("HD textures: %s filters, up to %ux%u replacement images, %u bindless slot(s).",
 		m_anisotropy ? "anisotropic" : "trilinear", m_maxImageDim, m_maxImageDim, kMaxHDTextures);
+	if (m_supportsBC)
+	{
+		InfoLog("HD textures: BC texture compression is available; .dds replacements are enabled%s.",
+			m_zstdAvailable ? ", including .dds.zst" : ". .dds.zst files need the current Model3VulkanHostCore module");
+	}
+	else
+	{
+		ErrorLog("HD textures: this device does not support BC texture compression; .dds and .dds.zst "
+			"replacements are skipped and the .png/.webp files are used instead.");
+	}
 	return true;
 }
 
@@ -349,8 +502,11 @@ void CHDTexturePack::Scan()
 	}
 
 	uint32_t files = 0;
+	uint32_t compressedFiles = 0;
 	uint32_t duplicates = 0;
 	uint32_t unnamed = 0;
+	uint32_t unsupportedBC = 0;
+	uint32_t unsupportedZstd = 0;
 
 	for (std::filesystem::recursive_directory_iterator it(m_directory,
 			std::filesystem::directory_options::skip_permission_denied, ec), end;
@@ -362,35 +518,81 @@ void CHDTexturePack::Scan()
 			continue;
 
 		const std::filesystem::path& path = it->path();
-		const std::string ext = LowerExtension(path);
-		if (ext != ".png" && ext != ".webp")
+		HDTextureFileKind kind = HDTextureFileKind::Png;
+		const size_t suffixLength = ClassifyReplacement(path, kind);
+		if (suffixLength == 0)
 			continue;
 
+		/*
+		 * A kind the device cannot draw is dropped from the index, not from the pile: the
+		 * same hash usually also exists as PNG/WebP, and the point of the fallback is that
+		 * the pack keeps working with whatever the hardware can actually sample.
+		 */
+		if ((kind == HDTextureFileKind::Dds || kind == HDTextureFileKind::DdsZst) && !m_supportsBC)
+		{
+			++unsupportedBC;
+			continue;
+		}
+		if (kind == HDTextureFileKind::DdsZst && !m_zstdAvailable)
+		{
+			++unsupportedZstd;
+			continue;
+		}
+
+		// Compare the name without its suffix, which for .dds.zst means stripping both
+		// extensions. std::filesystem::path::stem() would stop at the last dot.
+		std::string stem = path.filename().string();
+		stem.resize(stem.size() - suffixLength);
+
 		uint64_t hash = 0;
-		if (!ParseHashFromFilename(path.stem().string(), hash))
+		if (!ParseHashFromFilename(stem, hash))
 		{
 			++unnamed;
 			continue;
 		}
 
+		/*
+		 * One entry per hash, holding the highest-priority file. This is decided here, once,
+		 * rather than at load time: Resolve() runs per draw and cannot afford four stat calls
+		 * per texture, and a pack in transition (PNG today, DDS tomorrow) must not depend on
+		 * directory enumeration order.
+		 */
 		auto found = m_index.find(hash);
 		if (found == m_index.end())
 		{
-			m_index.emplace(hash, path.string());
+			m_index.emplace(hash, IndexEntry{ path.string(), kind });
 			++files;
+			if (kind == HDTextureFileKind::Dds || kind == HDTextureFileKind::DdsZst)
+				++compressedFiles;
 		}
 		else
 		{
-			// Two files for one hash: prefer the lossless one, keep the first if both are equal.
 			++duplicates;
-			const std::string existingExt = LowerExtension(found->second);
-			if (ext == ".png" && existingExt != ".png")
-				found->second = path.string();
+			const bool replaces = (uint8_t)kind > (uint8_t)found->second.kind;
+			if (replaces)
+			{
+				if (found->second.kind == HDTextureFileKind::Dds || found->second.kind == HDTextureFileKind::DdsZst)
+					--compressedFiles;
+				if (kind == HDTextureFileKind::Dds || kind == HDTextureFileKind::DdsZst)
+					++compressedFiles;
+				found->second = IndexEntry{ path.string(), kind };
+			}
 		}
 	}
 
-	InfoLog("HD textures: %u replacement(s) indexed in '%s' (duplicate hashes %u, files without a hash %u).",
-		files, m_directory.c_str(), duplicates, unnamed);
+	InfoLog("HD textures: %u replacement(s) indexed in '%s' (%u block-compressed, duplicate hashes %u, "
+		"files without a hash %u).", files, m_directory.c_str(), compressedFiles, duplicates, unnamed);
+	if (unsupportedBC > 0)
+	{
+		ErrorLog("HD textures: %u DDS file(s) were skipped because this device has no BC texture "
+			"compression support.", unsupportedBC);
+	}
+	if (unsupportedZstd > 0)
+	{
+		ErrorLog("HD textures: %u .dds.zst file(s) were skipped because zstd decompression is not "
+			"available in this build or in the host core module; their uncompressed replacements are used "
+			"instead.", unsupportedZstd);
+	}
 }
 
 bool CHDTexturePack::EnsureDirectory(const std::string& path)
@@ -466,8 +668,8 @@ int CHDTexturePack::Resolve(uint64_t hash, int wrapU, int wrapV)
 	m_lookup.emplace(key, index);
 	++m_pendingCount;
 	if (m_lookup.size() == 1)
-		InfoLog("HD textures: first match - hash %016llx -> '%s' (slot %u).",
-			(unsigned long long)hash, file->second.c_str(), index);
+		InfoLog("HD textures: first match - hash %016llx -> '%s' (%s, slot %u).",
+			(unsigned long long)hash, file->second.path.c_str(), KindLabel(file->second.kind), index);
 
 	{
 		std::lock_guard<std::mutex> guard(m_loaderMutex);
@@ -475,7 +677,8 @@ int CHDTexturePack::Resolve(uint64_t hash, int wrapU, int wrapV)
 		job.hash = hash;
 		job.wrap = wrap;
 		job.slot = index;
-		job.path = file->second;
+		job.path = file->second.path;
+		job.kind = file->second.kind;
 		job.generation = m_generation;
 		m_loadJobs.push_back(std::move(job));
 	}
@@ -567,7 +770,26 @@ void CHDTexturePack::LoaderMain()
 		result.slot = job.slot;
 		result.generation = job.generation;
 		std::string error;
-		if (!DecodeImageFile(job.path, result.pixels, result.width, result.height, error))
+
+		if (job.kind == HDTextureFileKind::Dds || job.kind == HDTextureFileKind::DdsZst)
+		{
+			DdsTextureInfo info;
+			if (DecodeDdsFile(job.path, job.kind == HDTextureFileKind::DdsZst, info, error))
+			{
+				result.compressed = true;
+				result.format = info.vkFormat;
+				result.width = info.width;
+				result.height = info.height;
+				result.mipLevels = info.mipLevels;
+				result.blockBytes = info.blockBytes;
+				result.payload = std::move(info.payloadData);
+			}
+			else
+			{
+				result.error = error;
+			}
+		}
+		else if (!DecodeImageFile(job.path, result.pixels, result.width, result.height, error))
 		{
 			result.error = error;
 			result.pixels.clear();
@@ -728,6 +950,111 @@ bool CHDTexturePack::UploadMip0(Slot& slot, VkCommandBuffer cmd, CVulkanRingBuff
 	return true;
 }
 
+bool CHDTexturePack::UploadCompressed(Slot& slot, VkCommandBuffer cmd, CVulkanRingBuffer& ring)
+{
+	if (slot.payload.empty() || slot.mipLevels == 0)
+		return true;
+
+	/*
+	 * The whole chain cannot go up in one staging request, and it must not have to: level 0 of a
+	 * 4096x4096 BC7 image is 16 MB on its own, and a pack that resolves several replacements in
+	 * the same frame would exhaust the 64 MB ring slice. Every call therefore moves at most
+	 * kCompressedChunkBytes, starting where the previous call stopped.
+	 *
+	 * The cursor is (uploadMip, uploadBlockRow): a chain is walked level by level, and a level
+	 * larger than the budget is split on 4x4 block rows, because that is the copy granularity of
+	 * a compressed image. Splitting there keeps every bufferOffset block-aligned and every copy
+	 * row-aligned, which is what the format requires; splitting on arbitrary bytes would not.
+	 *
+	 * Progress lives in the slot, so a full ring defers the rest of the upload to the next frame
+	 * instead of throwing away what was already copied. The image stays in TRANSFER_DST across
+	 * those frames and is only handed to the sampler once the last block row has been recorded.
+	 */
+	if (slot.layout == VK_IMAGE_LAYOUT_UNDEFINED)
+	{
+		// One barrier covers the whole image: every level is written by the calls below, in
+		// order, and nothing else reads it before the final transition.
+		CmdTransition(cmd, slot.image.image, VK_IMAGE_LAYOUT_UNDEFINED,
+			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT, 0, slot.mipLevels);
+		slot.layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	}
+	if (slot.layout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+		return false;
+
+	if (slot.uploadMip >= slot.mipLevels)
+		return true;
+
+	const uint32_t level = slot.uploadMip;
+	const uint32_t mipWidth = DdsMipDimension(slot.width, level);
+	const uint32_t mipHeight = DdsMipDimension(slot.height, level);
+	const uint32_t blockRows = (mipHeight + 3u) / 4u;
+	const VkDeviceSize rowBytes = (VkDeviceSize)((mipWidth + 3u) / 4u) * slot.blockBytes;
+
+	// Where this level starts in the tightly packed payload. Summed rather than stored so the
+	// slot needs no extra 64-bit bookkeeping per level; a chain has at most a dozen levels.
+	VkDeviceSize levelOffset = 0;
+	for (uint32_t previous = 0; previous < level; ++previous)
+		levelOffset += DdsMipByteSize(slot.width, slot.height, previous, slot.blockBytes);
+
+	const uint32_t remainingRows = blockRows - slot.uploadBlockRow;
+	/*
+	 * Never request more than the slice has left. Running out of ring space mid-chain is the
+	 * expected outcome of a pack that resolves several large replacements at once, so it is
+	 * handled by deferring the rest to the next frame rather than by letting Alloc() log an
+	 * "exhausted" error and having the caller retry the same oversized request forever.
+	 */
+	const VkDeviceSize remainingBytes = ring.Remaining() > 16 ? ring.Remaining() - 16 : 0;
+	if (remainingBytes < rowBytes)
+		return false;
+	const uint32_t rowsPerChunk = std::max(1u, std::min(remainingRows,
+		(uint32_t)(std::min(kCompressedChunkBytes, remainingBytes) / rowBytes)));
+	const VkDeviceSize bytes = rowBytes * rowsPerChunk;
+
+	/*
+	 * 16-byte alignment: Vulkan requires bufferOffset to be a multiple of the compressed block
+	 * size (8 for BC1, 16 for the rest), and every level and block row is a whole number of
+	 * blocks, so aligning the base keeps every subsequent request aligned too.
+	 */
+	VkDeviceSize offset = 0;
+	void* ptr = nullptr;
+	if (!ring.Alloc(bytes, 16, offset, ptr))
+		return false;
+
+	const VkDeviceSize sourceOffset = levelOffset + (VkDeviceSize)slot.uploadBlockRow * rowBytes;
+	std::memcpy(ptr, slot.payload.data() + sourceOffset, (size_t)bytes);
+
+	if (slot.uploadPass != m_uploadPass)
+	{
+		slot.uploadPass = m_uploadPass;
+		++slot.uploadFrames;
+	}
+	++slot.uploadCalls;
+
+	const uint32_t firstTexelRow = slot.uploadBlockRow * 4u;
+	const uint32_t texelRows = std::min(rowsPerChunk * 4u, mipHeight - firstTexelRow);
+
+	VkBufferImageCopy copy = {};
+	copy.bufferOffset = offset;
+	copy.bufferRowLength = 0;			// tightly packed: blocks run left to right, rows top to bottom
+	copy.bufferImageHeight = 0;
+	copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	copy.imageSubresource.mipLevel = level;
+	copy.imageSubresource.baseArrayLayer = 0;
+	copy.imageSubresource.layerCount = 1;
+	copy.imageOffset = { 0, (int32_t)firstTexelRow, 0 };
+	copy.imageExtent = { mipWidth, texelRows, 1 };
+	vkCmdCopyBufferToImage(cmd, ring.Buffer(), slot.image.image,
+		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+
+	slot.uploadBlockRow += rowsPerChunk;
+	if (slot.uploadBlockRow >= blockRows)
+	{
+		slot.uploadBlockRow = 0;
+		++slot.uploadMip;
+	}
+	return true;
+}
+
 void CHDTexturePack::FinishImage(Slot& slot, VkCommandBuffer cmd)
 {
 	const uint32_t mips = slot.mipLevels;
@@ -785,10 +1112,66 @@ void CHDTexturePack::FinishImage(Slot& slot, VkCommandBuffer cmd)
 	++m_loadedCount;
 }
 
+void CHDTexturePack::FinishCompressedImage(Slot& slot, VkCommandBuffer cmd)
+{
+	/*
+	 * No blit chain here, and that is the point of the format: vkCmdBlitImage cannot touch a
+	 * compressed image (it is not a transfer source and not a storage target), so the mip
+	 * levels have to come from the file. One barrier moves the whole image to its sampled
+	 * layout.
+	 */
+	CmdTransition(cmd, slot.image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT, 0, slot.mipLevels);
+
+	/*
+	 * A large chain is split across chunks and possibly across frames (see UploadCompressed).
+	 * Naming that here is what tells a pack author why a 4K replacement appears a frame or two
+	 * after the small ones instead of at the same time.
+	 */
+	if (slot.uploadCalls > 1)
+	{
+		InfoLog("HD textures: %ux%u %s chain (%llu KB) uploaded in %u piece(s) over %u frame(s).",
+			slot.width, slot.height, FormatLabel(slot.format),
+			(unsigned long long)(slot.payload.size() / 1024), slot.uploadCalls, slot.uploadFrames);
+	}
+
+	slot.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	slot.payload.clear();
+	slot.payload.shrink_to_fit();
+	slot.ready = true;
+	slot.loading = false;
+	m_bytes += slot.image.size;
+	++m_loadedCount;
+}
+
+/*
+ * Whether an image of this BC format can actually be created, copied into and sampled on
+ * this device.
+ *
+ * textureCompressionBC covers all of it in practice, but the check is per format and costs
+ * nothing, and it is what turns a silent validation error into a named log line on a driver
+ * that advertises the feature with a narrower set of formats than the spec requires. The
+ * linear-filter bit is included because the pack's samplers are always linear; sampling a
+ * BC image with one on a device without it is invalid.
+ */
+bool CHDTexturePack::CompressedFormatUsable(VkFormat format) const
+{
+	if (m_context == nullptr)
+		return false;
+
+	VkFormatProperties props = {};
+	vkGetPhysicalDeviceFormatProperties(m_context->PhysicalDevice(), format, &props);
+	const VkFormatFeatureFlags needed = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+		VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+	return (props.optimalTilingFeatures & needed) == needed;
+}
+
 void CHDTexturePack::RecordUploads(VkCommandBuffer cmd, CVulkanRingBuffer& ring)
 {
 	if (m_context == nullptr)
 		return;
+
+	++m_uploadPass;
 
 	std::vector<LoadResult> results;
 	{
@@ -827,7 +1210,9 @@ void CHDTexturePack::RecordUploads(VkCommandBuffer cmd, CVulkanRingBuffer& ring)
 			continue;
 		}
 
-		const uint64_t estimated = (uint64_t)result.width * result.height * 4ull;
+		const uint64_t estimated = result.compressed
+			? (uint64_t)result.payload.size()
+			: (uint64_t)result.width * result.height * 4ull;
 		if (m_bytes + estimated > kMaxHDTextureBytes)
 		{
 			slot.failed = true;
@@ -838,19 +1223,42 @@ void CHDTexturePack::RecordUploads(VkCommandBuffer cmd, CVulkanRingBuffer& ring)
 			continue;
 		}
 
-		const uint32_t mips = MipCount(result.width, result.height);
-		if (!m_context->Memory().CreateImage(result.width, result.height, mips,
-				VK_FORMAT_R8G8B8A8_UNORM,
-				VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-				slot.image))
+		const bool compressed = result.compressed;
+		const VkFormat format = compressed ? result.format : VK_FORMAT_R8G8B8A8_UNORM;
+		const uint32_t mips = compressed ? std::max(1u, result.mipLevels)
+			: MipCount(result.width, result.height);
+
+		if (compressed && !CompressedFormatUsable(format))
 		{
 			slot.failed = true;
 			slot.loading = false;
 			if (m_failedCount++ < 8)
-				ErrorLog("HD textures: a %ux%u image could not be allocated.", result.width, result.height);
+				ErrorLog("HD textures: slot %u wants %s, which this device cannot sample with a linear "
+					"filter; the original packed texture is kept.", result.slot, FormatLabel(format));
 			continue;
 		}
-		slot.image.view = m_context->CreateView(slot.image.image, VK_FORMAT_R8G8B8A8_UNORM,
+
+		/*
+		 * Usage is deliberately narrow for BC images: TRANSFER_DST to receive the file's mip
+		 * chain and SAMPLED to be read by the material shader. No TRANSFER_SRC (compressed
+		 * images cannot be blitted) and no STORAGE (they cannot be written from a shader).
+		 * The RGBA8 path still needs TRANSFER_SRC for its blit-generated mips.
+		 */
+		VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+		if (!compressed)
+			usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+
+		if (!m_context->Memory().CreateImage(result.width, result.height, mips,
+				format, usage, slot.image))
+		{
+			slot.failed = true;
+			slot.loading = false;
+			if (m_failedCount++ < 8)
+				ErrorLog("HD textures: a %ux%u %s image could not be allocated.",
+					result.width, result.height, FormatLabel(format));
+			continue;
+		}
+		slot.image.view = m_context->CreateView(slot.image.image, format,
 			VK_IMAGE_ASPECT_COLOR_BIT, 0, mips);
 		if (slot.image.view == VK_NULL_HANDLE)
 		{
@@ -874,9 +1282,15 @@ void CHDTexturePack::RecordUploads(VkCommandBuffer cmd, CVulkanRingBuffer& ring)
 		slot.width = result.width;
 		slot.height = result.height;
 		slot.mipLevels = mips;
+		slot.format = format;
+		slot.compressed = compressed;
+		slot.blockBytes = compressed ? (result.blockBytes != 0 ? result.blockBytes : 16u) : 4u;
 		slot.layout = VK_IMAGE_LAYOUT_UNDEFINED;
 		slot.uploadRow = 0;
+		slot.uploadMip = 0;
+		slot.uploadBlockRow = 0;
 		slot.pixels = std::move(result.pixels);
+		slot.payload = std::move(result.payload);
 		// The file has been decoded; the image now awaits its upload. Leaving `loading` set here made
 		// the upload loop below skip it forever, because that loop treats a loading slot as one whose
 		// pixels do not exist yet.
@@ -886,15 +1300,49 @@ void CHDTexturePack::RecordUploads(VkCommandBuffer cmd, CVulkanRingBuffer& ring)
 	for (uint32_t i = 0; i < m_slots.size(); ++i)
 	{
 		Slot& slot = m_slots[i];
-		if (slot.ready || slot.failed || slot.loading || slot.pixels.empty())
+		if (slot.ready || slot.failed || slot.loading)
 			continue;
-		if (!UploadMip0(slot, cmd, ring))
-			break;
-		FinishImage(slot, cmd);
+		if (!slot.compressed && slot.pixels.empty())
+			continue;
+		if (slot.compressed && slot.payload.empty())
+			continue;
+
+		if (slot.compressed)
+		{
+			bool complete = false;
+			bool ringFull = false;
+			for (uint32_t piece = 0; piece < kCompressedChunksPerFrame; ++piece)
+			{
+				if (!UploadCompressed(slot, cmd, ring))
+				{
+					ringFull = true;
+					break;
+				}
+				if (slot.uploadMip >= slot.mipLevels)
+				{
+					complete = true;
+					break;
+				}
+			}
+			if (ringFull)
+				break;
+			// Hit the per-frame piece budget: the rest of the chain follows on the next frame,
+			// with the slot left pending and its layout in TRANSFER_DST.
+			if (!complete)
+				continue;
+			FinishCompressedImage(slot, cmd);
+		}
+		else
+		{
+			if (!UploadMip0(slot, cmd, ring))
+				break;
+			FinishImage(slot, cmd);
+		}
+
 		WriteDescriptor(i, slot);
 		if (m_loadedCount == 1)
-			InfoLog("HD textures: first replacement is sampleable (%ux%u, %u mip(s)).",
-				slot.width, slot.height, slot.mipLevels);
+			InfoLog("HD textures: first replacement is sampleable (%ux%u, %u mip(s), %s).",
+				slot.width, slot.height, slot.mipLevels, FormatLabel(slot.format));
 	}
 }
 

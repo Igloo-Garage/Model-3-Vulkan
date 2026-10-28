@@ -35,6 +35,10 @@ public:
 	bool Alloc(VkDeviceSize size, VkDeviceSize alignment, VkDeviceSize& offset, void*& ptr);
 	VkBuffer Buffer() const { return m_buffer.buffer; }
 	VkDeviceSize SliceBytes() const { return m_slice; }
+	// Bytes left in the current frame's slice. A caller that can split its transfer - the
+	// block-compressed texture upload does - sizes the next piece from this, so that running out
+	// of ring space is a deferral to the next frame instead of a logged allocation failure.
+	VkDeviceSize Remaining() const { return m_slice > m_cursor ? m_slice - m_cursor : 0; }
 
 private:
 	AllocatedBuffer m_buffer;

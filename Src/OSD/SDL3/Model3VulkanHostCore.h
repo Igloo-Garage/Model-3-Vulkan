@@ -163,6 +163,28 @@ int32_t HostCore_ListVkStates(
     char* error,
     size_t errorCapacity);
 
+/*
+ * One raw zstd frame, decompressed into caller memory.
+ *
+ * Added after the 1.0 ABI was published, so it is optional: a module without
+ * this export still loads, and the only feature it loses is .dds.zst texture
+ * replacements (the pack falls back to its uncompressed .dds / .webp / .png
+ * files).
+ *
+ * destination may be null or too small: the decompressed size is written to
+ * *written and HOSTCORE_ERR_BUFFER_TOO_SMALL is returned, so the caller can
+ * allocate exactly once.  A frame that does not hold exactly the number of
+ * bytes the caller expects is HOSTCORE_ERR_FORMAT, not a partial write.
+ */
+int32_t HostCore_DecompressZstd(
+    const uint8_t* source,
+    size_t sourceSize,
+    uint8_t* destination,
+    size_t destinationCapacity,
+    size_t* written,
+    char* error,
+    size_t errorCapacity);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

@@ -150,6 +150,11 @@ static bool s_logLevel = false;
 static unsigned s_levelSamples = 0;
 static float s_levelPeak = 0.0f;
 static float s_levelSourcePeak = 0.0f;
+// Split the source peak by speaker side. The quad mix puts DSB music and SCSP1 on the front pair and
+// SCSP2 on the rear pair, so "front loud, rear zero" is the signature of the sound board's effects
+// going missing - which is exactly what a misplaced buffer clear once did, silently, for every game.
+static float s_levelFrontPeak = 0.0f;
+static float s_levelRearPeak = 0.0f;
 
 /*
  * Peak levels for the statistics readout.
@@ -1043,10 +1048,14 @@ bool OutputAudio(unsigned numSamples, const float* leftFrontBuffer, const float*
     {
         float peakLeft = 0.0f;
         float peakRight = 0.0f;
+        float peakFront = 0.0f;
+        float peakRear = 0.0f;
         for (unsigned i = 0; i < numSamples; ++i)
         {
             peakLeft = std::max(peakLeft, std::max(std::fabs(leftFrontBuffer[i]), std::fabs(leftRearBuffer[i])));
             peakRight = std::max(peakRight, std::max(std::fabs(rightFrontBuffer[i]), std::fabs(rightRearBuffer[i])));
+            peakFront = std::max(peakFront, std::max(std::fabs(leftFrontBuffer[i]), std::fabs(rightFrontBuffer[i])));
+            peakRear = std::max(peakRear, std::max(std::fabs(leftRearBuffer[i]), std::fabs(rightRearBuffer[i])));
         }
         RaisePeak(s_meterPeakLeft, peakLeft * (1.0f / 32768.0f));
         RaisePeak(s_meterPeakRight, peakRight * (1.0f / 32768.0f));
@@ -1058,14 +1067,19 @@ bool OutputAudio(unsigned numSamples, const float* leftFrontBuffer, const float*
                 s_levelPeak = std::max(s_levelPeak, std::fabs((float)mixBuffer[i]));
 
             s_levelSourcePeak = std::max(s_levelSourcePeak, std::max(peakLeft, peakRight));
+            s_levelFrontPeak = std::max(s_levelFrontPeak, peakFront);
+            s_levelRearPeak = std::max(s_levelRearPeak, peakRear);
 
             s_levelSamples += numSamples;
             if (s_levelSamples >= (unsigned)SAMPLE_RATE_M3)
             {
-                InfoLog("Audio: source peak %.1f, mix peak %.4f, %s, under-runs %u.",
-                    s_levelSourcePeak, s_levelPeak, enabled ? "output on" : "output MUTED", underRuns);
+                InfoLog("Audio: source peak %.1f (front %.1f, rear %.1f), mix peak %.4f, %s, under-runs %u.",
+                    s_levelSourcePeak, s_levelFrontPeak, s_levelRearPeak, s_levelPeak,
+                    enabled ? "output on" : "output MUTED", underRuns);
                 s_levelPeak = 0.0f;
                 s_levelSourcePeak = 0.0f;
+                s_levelFrontPeak = 0.0f;
+                s_levelRearPeak = 0.0f;
                 s_levelSamples = 0;
             }
         }
@@ -1244,6 +1258,8 @@ void CloseAudio()
     s_levelSamples = 0;
     s_levelPeak = 0.0f;
     s_levelSourcePeak = 0.0f;
+    s_levelFrontPeak = 0.0f;
+    s_levelRearPeak = 0.0f;
     s_meterPeakLeft.store(0.0f, std::memory_order_relaxed);
     s_meterPeakRight.store(0.0f, std::memory_order_relaxed);
 }

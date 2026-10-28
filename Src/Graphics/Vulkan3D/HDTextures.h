@@ -52,6 +52,21 @@ constexpr uint32_t kMaxHDTextures = 2048;
 constexpr uint64_t kMaxHDTextureBytes = 3ull * 1024ull * 1024ull * 1024ull;
 
 /*
+ * The four file kinds a pack may use, in the order they win when one hash has several.
+ *
+ * Compressed DDS comes first because it is the smallest on disk and the cheapest to upload -
+ * the data goes to the GPU untouched. The uncompressed DDS is next, then the old WebP/PNG pair
+ * (a lossless PNG still beating a lossy WebP, as before).
+ */
+enum class HDTextureFileKind : uint8_t
+{
+	Png = 0,
+	Webp = 1,
+	Dds = 2,
+	DdsZst = 3
+};
+
+/*
  * Hot reload request, from the interface to the renderer.
  *
  * The button in the in-game panel and the F4 binding both call RequestHDTextureReload();
@@ -87,6 +102,11 @@ uint64_t HashTextureRegion(const uint16_t* pageRam, int x, int y, int width, int
  * sampleable only once its upload has finished. Until then Resolve() reports -1
  * and the material keeps sampling the original packed page, which is why a large
  * pack never shows white or uninitialised textures while it loads.
+ *
+ * A replacement may be a PNG or WebP that is decoded to RGBA8 on the CPU, or a
+ * DDS (optionally zstd-compressed) that is passed through as block-compressed data
+ * and uploaded with its own mip chain. The two paths differ only in how the image
+ * is created and filled; once a slot is ready the shader cannot tell them apart.
  */
 class CHDTexturePack
 {
@@ -135,6 +155,18 @@ private:
 		}
 	};
 
+	/*
+	 * The pack's index and slots use HDTextureFileKind directly; the alias keeps the member
+	 * declarations below readable.
+	 */
+	using FileKind = HDTextureFileKind;
+
+	struct IndexEntry
+	{
+		std::string path;
+		FileKind kind = FileKind::Png;
+	};
+
 	struct Slot
 	{
 		uint64_t hash = 0;
@@ -142,11 +174,20 @@ private:
 		AllocatedImage image;
 		VkSampler sampler = VK_NULL_HANDLE;
 		std::vector<uint8_t> pixels;		// decoded RGBA, mip 0 only
+		std::vector<uint8_t> payload;		// block-compressed mip chain, DDS only
 		VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+		VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
 		uint32_t width = 0;
 		uint32_t height = 0;
 		uint32_t mipLevels = 1;
-		uint32_t uploadRow = 0;
+		uint32_t blockBytes = 4;			// bytes per 4x4 block when compressed, 4 otherwise
+		uint32_t uploadRow = 0;			// next row of the RGBA image to copy
+		uint32_t uploadMip = 0;			// next level of a compressed chain to copy
+		uint32_t uploadBlockRow = 0;		// next 4x4 block row within uploadMip
+		uint32_t uploadCalls = 0;			// chunks recorded so far (compressed only)
+		uint32_t uploadPass = 0;			// m_uploadPass when the slot was last touched
+		uint32_t uploadFrames = 0;			// separate upload passes (frames) used so far
+		bool compressed = false;			// image holds BC blocks and is filled from the file's mip chain
 		bool loading = false;				// slot reserved, file not decoded yet
 		bool failed = false;
 		bool ready = false;					// image is complete and its descriptor written
@@ -159,6 +200,7 @@ private:
 		uint32_t slot = 0;
 		uint32_t generation = 0;
 		std::string path;
+		FileKind kind = FileKind::Png;
 	};
 
 	struct LoadResult
@@ -167,7 +209,12 @@ private:
 		uint32_t generation = 0;
 		uint32_t width = 0;
 		uint32_t height = 0;
-		std::vector<uint8_t> pixels;
+		uint32_t mipLevels = 1;
+		uint32_t blockBytes = 16;
+		VkFormat format = VK_FORMAT_UNDEFINED;
+		bool compressed = false;
+		std::vector<uint8_t> pixels;    // RGBA for PNG/WebP
+		std::vector<uint8_t> payload;   // BC mip chain for DDS
 		std::string error;
 	};
 
@@ -194,7 +241,10 @@ private:
 
 	VkSampler CreateSampler(int wrapU, int wrapV);
 	bool UploadMip0(Slot& slot, VkCommandBuffer cmd, CVulkanRingBuffer& ring);
+	bool UploadCompressed(Slot& slot, VkCommandBuffer cmd, CVulkanRingBuffer& ring);
 	void FinishImage(Slot& slot, VkCommandBuffer cmd);
+	void FinishCompressedImage(Slot& slot, VkCommandBuffer cmd);
+	bool CompressedFormatUsable(VkFormat format) const;
 	void WriteDescriptor(uint32_t index, const Slot& slot);
 
 	static std::string SanitizedName(const std::string& name);
@@ -209,10 +259,16 @@ private:
 	bool m_dumpEnabled = false;
 	bool m_scanned = false;
 	bool m_anisotropy = false;
+	bool m_supportsBC = false;		// device can sample BC images; DDS files are skipped otherwise
+	bool m_zstdAvailable = false;	// Model3VulkanHostCore exports HostCore_DecompressZstd
 	float m_maxAnisotropy = 1.0f;
 	uint32_t m_maxImageDim = 4096;
 	uint32_t m_reloadSerial = 0;
 	uint32_t m_generation = 0;
+	// Counts calls to RecordUploads(), i.e. simulation frames that could carry texture data. A
+	// compressed chain that does not fit in one frame's ring slice records how many of these it
+	// spanned, which is the only way to tell a deliberate deferral from a stuck upload.
+	uint32_t m_uploadPass = 0;
 	uint64_t m_bytes = 0;
 	uint32_t m_loadedCount = 0;
 	uint32_t m_pendingCount = 0;
@@ -220,7 +276,7 @@ private:
 	uint32_t m_skippedBudget = 0;
 	uint32_t m_missingReported = 0;
 
-	std::unordered_map<uint64_t, std::string> m_index;			// hash -> file
+	std::unordered_map<uint64_t, IndexEntry> m_index;		// hash -> highest-priority file
 	std::unordered_set<uint64_t> m_missing;						// hashes asked for and absent
 	std::unordered_map<LoadKey, uint32_t, LoadKeyHash> m_lookup;
 	std::vector<Slot> m_slots;

@@ -134,6 +134,14 @@ public:
 	// Whether the resolve can run once per sample instead of once per pixel. Only used to keep
 	// antialiased translucent edges under MSAA; without it the mode still works at pixel rate.
 	bool SampleRateShadingSupported() const { return m_sampleRateShading; }
+	/*
+	 * Whether the device can sample BC-compressed images (textureCompressionBC).
+	 *
+	 * Only the HD texture pack needs it: DDS replacements are uploaded as BC1/BC2/BC3/BC5/BC7
+	 * and sampled directly, which is the entire point of the format. Without the feature the
+	 * pack skips those files and keeps using its PNG/WebP entries.
+	 */
+	bool TextureCompressionBCSupported() const { return m_supportsBC; }
 	bool Validation() const { return m_validation; }
 	/*
 	 * Whether the device is running the backend through Vulkan 1.3 core or through the 1.2 extensions
@@ -246,6 +254,7 @@ private:
 	bool m_samplerMirrorClamp = false;
 	bool m_fragmentStoresAndAtomics = false;
 	bool m_sampleRateShading = false;
+	bool m_supportsBC = false;
 	bool m_vulkan13 = false;
 	uint64_t m_generation = 0;
 	uint32_t m_frame = 0;

@@ -103,6 +103,17 @@ public:
 
     std::expected<std::vector<SaveEntry>, Error> ListVkStates(const std::filesystem::path& directory) const;
 
+    /*
+     * One raw zstd frame (the .dds.zst form of an HD texture replacement).
+     *
+     * The export was added after the 1.0 ABI was published, so an older module answers
+     * false here and the caller falls back to the uncompressed files.  Kept out of the
+     * "complete ABI" check in Load() for the same reason.
+     */
+    bool HasZstdDecompressor() const;
+    std::expected<std::vector<std::uint8_t>, Error> DecompressZstd(
+        const std::vector<std::uint8_t>& frame) const;
+
 private:
     struct Api;
     explicit Bridge(std::shared_ptr<Api> api) : m_api(std::move(api)) {}

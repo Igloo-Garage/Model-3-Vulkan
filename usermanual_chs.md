@@ -1,6 +1,6 @@
 # Model 3-Vulkan 用户手册（中文精简版）
 
-> 对应 **v0.9.8.3a**。完整说明见英文版 [`usermanual.md`](usermanual.md)，
+> 对应 **v0.9.8.3b**。完整说明见英文版 [`usermanual.md`](usermanual.md)，
 > 实测数据见 `sdl3_reports/`，改动记录见 `devdocs/CHANGELOG.md`。
 
 ---
@@ -17,8 +17,8 @@
 两者共用 `Data/Config`、`Data/NVRAM`、`Data/Assets`，**存档目录分开**。
 Vulkan 要求不满足时会弹窗说明，此时改用 LegacyOG；OpenGL 版可用「导入旧版 .st」把旧档转过来。
 
-标题栏也区分：Vulkan 版是 `Model 3-Vulkan v0.9.8.3a - 游戏名`，
-OpenGL 版是 `Supermodel-OpenGL v0.9.8.3a - 游戏名`。
+标题栏也区分：Vulkan 版是 `Model 3-Vulkan v0.9.8.3b - 游戏名`，
+OpenGL 版是 `Supermodel-OpenGL v0.9.8.3b - 游戏名`。
 
 ## 2. 快速开始
 
@@ -83,13 +83,17 @@ Extensions」时，自动回落到 EXE 内置的 libwebp 解码器，所以缺�
   核显跑不动时可以在同一处关掉「毛玻璃背景」，面板改用不透明底色（「超低配极速」预设会自动关）；
   原始界面本来就不透明，那一项会置灰。
 - **高清纹理包**：`核心` 页底部和游戏内 Tab 面板各有一节。
-  - **加载高清纹理包**：从 `Data/Assets/HDTextures/<set>/` 读取替换贴图，PNG 或 WebP，
-    任意倍数（2x/4x/8x…），支持完整 8 位平滑 Alpha（不再受原版 1-bit 透明限制），
-    自动生成 mip 链并开 16x 各向异性。没被替换的贴图继续用原版。
+  - **加载高清纹理包**：从 `Data/Assets/HDTextures/<set>/` 读取替换贴图，PNG、WebP 或 **DDS**
+    （BC1/BC3/BC5/BC7，可带 mip 链，也可压成 `.dds.zst`），任意倍数（2x/4x/8x…），
+    支持完整 8 位平滑 Alpha（不再受原版 1-bit 透明限制），自动生成 mip 链并开 16x 各向异性。
+    DDS 的压缩块和 mip 链原样上传，显存占用与加载时间都更低；同一哈希有多种文件时优先级是
+    `.dds.zst` > `.dds` > `.webp` > `.png`。显卡不支持 BC 压缩时 DDS 会自动跳过、继续用 PNG/WebP。
+    没被替换的贴图继续用原版。
   - **导出当前游戏纹理**：把游戏实际引用的每块子贴图解码成 RGBA8 PNG，写到
     `Data/Assets/DumpTextures/<set>/`，文件名带内容哈希；同一内容只写一次。
     超分后保持文件名放进 HDTextures 就能替换。
-  - **F4** 或面板里的「重新加载高清纹理」会重扫目录，边玩边换图不用重启；
+  - **F4** 在替换贴图与原版之间即时切换（不重扫、已加载的图保留，适合 A/B）；
+    **F3**（或 **Shift+F4**）或面板里的「重新加载高清纹理」重扫目录，边玩边换图不用重启；
     面板打开时模拟器暂停，所以按钮的重扫在关闭面板、恢复仿真后完成。
   - 注意：导出用的是 `DumpHDTextures` 键；旧的 `DumpTextures` 仍是“退出时导出原始
     16-bit 贴图页”，两者不冲突。
@@ -208,7 +212,8 @@ Extensions」时，自动回落到 EXE 内置的 libwebp 解码器，所以缺�
 | `Alt+Enter` | 全屏切换 |
 | `F5` / `F6` / `F7` | 存档 / 换槽（1–16）/ 读档（空槽时读最新） |
 | `F8` | 呈现节奏 1x ↔ 2x |
-| `F4` | 重新加载高清纹理包（重扫 `Data/Assets/HDTextures/<set>/`） |
+| `F4` | 切换高清纹理替换 / 原版贴图 |
+| `F3` / `Shift+F4` | 重新加载高清纹理包（重扫 `Data/Assets/HDTextures/<set>/`） |
 | `F9` `F10` / `F11` `F12` | 音乐 −/+ / 音效 −/+ |
 | `Alt+S` | 截图（`Data/Screenshots/`） |
 | `Alt+N` | 清除 NVRAM |
