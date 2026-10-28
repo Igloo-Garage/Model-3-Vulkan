@@ -1147,7 +1147,7 @@ void SCSP_w32(unsigned int addr,unsigned int val)
 		addr&=0x1f;
 		//DebugLog("Slot %02X Reg %02X write dword %08X\n",slot,addr,val);
 		//printf("\tSlot %02X Reg %02X write dword %08X\n",slot,addr,val);
-		rotl(val, 16);
+		ROTL32(val, 16);
 
 		*(unsigned int *) &(SCSP->Slots[slot].datab[addr]) = val;
 		SCSP_UpdateSlotReg(slot,addr&0x1f);
@@ -1155,7 +1155,7 @@ void SCSP_w32(unsigned int addr,unsigned int val)
 	}
 	else if(addr<0x600)
 	{
-		rotl(val, 16);
+		ROTL32(val, 16);
 
 		*(unsigned int *) &(SCSP->datab[addr&0xff]) = val;
 		SCSP_UpdateReg(addr&0xff);
@@ -1167,7 +1167,7 @@ void SCSP_w32(unsigned int addr,unsigned int val)
 	{
 #ifdef USEDSP
 		//DSP
-		rotl(val, 16);
+		ROTL32(val, 16);
 			if(addr<0x780)	//COEF
 			{
 				SCSP->DSP.COEF[(addr-0x700)/2] = (INT16)(val & 0xFFFF);
