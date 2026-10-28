@@ -304,7 +304,7 @@ The version string is defined in exactly one location: `Src/Version.h`:
 * **GitHub Discussions / Issues:** Open for technical discussions, bug reports, and hardware feedback.
 * **Support via Ko-fi:** Development is fueled by late-night reverse engineering, hardware validation, and community passion. If you find this project valuable, consider supporting via Ko-fi:
 
-[](https://ko-fi.com/igloogarage)
+[![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/igloogarage)
 
 ---
 
