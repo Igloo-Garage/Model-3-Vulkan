@@ -21,6 +21,8 @@
  **/
 #include "StatsOsd.h"
 
+#include <cmath>
+
 #include "OSD/Audio.h"
 #include "OSD/Logger.h"
 #include "OSD/Platform/Platform.h"
