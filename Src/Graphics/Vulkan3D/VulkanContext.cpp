@@ -844,6 +844,15 @@ bool CVulkanContext::CreateDevice()
 	m_samplerMirrorClamp = features12.samplerMirrorClampToEdge != 0;
 	m_fragmentStoresAndAtomics = features2.features.fragmentStoresAndAtomics != 0;
 	m_sampleRateShading = features2.features.sampleRateShading != 0;
+	/*
+	 * BC texture compression, for the DDS half of an HD texture pack.
+	 *
+	 * Optional: a device without it renders exactly the same picture with the pack's
+	 * PNG/WebP replacements, so this only decides whether ParseDdsFromMemory() results can
+	 * be sampled. Enabled here rather than assumed so that vkCreateImage with a BC format is
+	 * legal; a device that advertises the feature still needs it in the enabled set.
+	 */
+	m_supportsBC = features2.features.textureCompressionBC != 0;
 
 	if (!features12.descriptorIndexing || !features12.runtimeDescriptorArray ||
 		!features12.shaderSampledImageArrayNonUniformIndexing || !features12.descriptorBindingPartiallyBound ||
@@ -932,6 +941,9 @@ bool CVulkanContext::CreateDevice()
 	// not require recreating the device; a device without it resolves per pixel instead.
 	enabled.sampleRateShading = features2.features.sampleRateShading;
 	enabled.shaderInt16 = features2.features.shaderInt16;
+	// Requested only when the device has it: it is only used by the HD texture pack's DDS
+	// replacements, and turning on a feature a device lacks fails vkCreateDevice.
+	enabled.textureCompressionBC = m_supportsBC ? VK_TRUE : VK_FALSE;
 	// GPU-assisted validation instruments every shader and writes its access records through
 	// storage images, which requires vertex-stage stores as well. Requested only in that mode, so a
 	// normal session enables exactly the features it did before.
@@ -966,6 +978,9 @@ bool CVulkanContext::CreateDevice()
 	InfoLog("Vulkan: VK_KHR_present_wait %s.", m_presentWait
 		? "available - presentation is timed against the display"
 		: "unavailable - presentation is timed against the queue");
+	InfoLog("Vulkan: BC texture compression %s.", m_supportsBC
+		? "available - DDS replacements are loaded as block-compressed images"
+		: "unavailable - DDS replacements will be skipped");
 	return true;
 }
 

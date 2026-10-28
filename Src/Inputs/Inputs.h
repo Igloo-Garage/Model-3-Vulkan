@@ -129,9 +129,15 @@ public:
   // Switches presentation between the arcade rate (VRR 1x) and twice it (VRR 2x), for an A/B of
   // smoothness without leaving the game. F8 is next to the volume keys and is not bound to anything.
   std::shared_ptr<CSwitchInput> uiToggleVrr;
-  // Rescans the HD texture folder of the running game. F4: the function keys around it are already
-  // taken (F5-F7 save states, F8 VRR, F9-F12 volume), and a pack author replacing files while
-  // playing needs this without leaving the session.
+  // Switches the HD texture pack on and off while playing. F4: the function keys around it are
+  // already taken (F5-F7 save states, F8 VRR, F9-F12 volume), and comparing a replacement against
+  // the original artwork is the most common thing a pack author does. The switch is the same value
+  // as the in-game panel's checkbox, applied on the next simulation frame with no reload - the
+  // images stay resident, so flipping back and forth costs nothing.
+  std::shared_ptr<CSwitchInput> uiToggleHDTextures;
+  // Rescans the HD texture folder of the running game. F3, with Shift+F4 as an alternative for the
+  // hand that is already on the function keys: the plain F4 is a pure on/off switch, so a pack
+  // author replacing files mid-session still has a key that picks up the change.
   std::shared_ptr<CSwitchInput> uiReloadHDTextures;
 #ifdef SUPERMODEL_DEBUGGER
   std::shared_ptr<CSwitchInput> uiEnterDebugger;

@@ -1,5 +1,27 @@
 # Model 3-Vulkan Release Notes
 
+## v0.9.8.3b Maintenance Release (2026-10-28)
+
+**Model 3-Vulkan v0.9.8.3b** is a maintenance update for the v0.9.8.3a milestone. It fixes a regression that silenced sound effects in every title and completes the native DDS path for HD texture packs.
+
+### 🔧 Fixes
+
+* **Sound effects restored in every game.** A misplaced `else` in `CSoundBoard::RunFrame()` cleared the SCSP output buffers immediately after the sound board filled them, so only the MPEG music survived. Engine, tyre, collision and menu effects were silent on fresh boots and on loaded saves alike; they are back now. Music playback, the quad-to-stereo fold and existing save states are unaffected.
+
+### 🖼️ HD Texture Packs
+
+* **`.dds` / `.dds.zst` support** — BC1, BC2, BC3, BC5 and BC7 images go straight into VRAM with the mip chain from the file (no blit pass). Files are uploaded in resumable chunks, so a 4096×4096 BC7 chain no longer starves the staging ring.
+* **Pack order is `.dds.zst` > `.dds` > `.webp` > `.png`** when several files carry the same hash.
+* **F4 toggles replacements and F3 rescans the folder**, so a pack can be compared against the original artwork without opening the in-game panel.
+
+### 🛠️ Under the hood
+
+* `SM3D_AUDIO_LEVEL=1` now reports the source peak split into front and rear channels, which makes "the machine is playing but one channel is missing" visible in the log.
+* The 3D scene targets are handed to the 2D compositor on every exit path (including the white-flash frame), and new targets are transitioned before the first composite, so `VUID-vkCmdDraw-imageLayout-00344` no longer appears after a flash frame.
+* A same-layout write-after-write barrier was added for attachments cleared at the start of a scene pass, closing a cross-submit hazard visible to synchronisation validation.
+
+Compatibility: save states written by v0.9.8.3a (and by the Supermodel-VK fork) load unchanged; `SUPERMODEL_VERSION` is untouched.
+
 ## v0.9.8.3a Milestone Release (2026-10-28)
 
 **Model 3-Vulkan v0.9.8.3a** represents a historic architectural milestone in Sega Model 3 emulation. This release officially graduates the project from **Supermodel-VK** into **Model 3-Vulkan**, decoupling the modern rendering pipeline from legacy OpenGL into a dedicated, high-performance Vulkan 1.3 architecture.

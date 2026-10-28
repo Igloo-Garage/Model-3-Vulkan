@@ -2128,6 +2128,40 @@ bool CVulkan3D::EnsureTargets()
 		m_samples > VK_SAMPLE_COUNT_1_BIT ? m_trans2Resolve.view : m_trans2.view);
 
 	/*
+	 * Give the compositor's images the layout its descriptors declare before anything samples them.
+	 *
+	 * The 2D layer draws before the 3D renderer does (CModel3::RenderFrame runs TileGen first), so
+	 * the first composite of a session samples these images before any scene pass has named a
+	 * layout for them. A freshly created image is in UNDEFINED, and a descriptor that declares
+	 * SHADER_READ_ONLY over that is exactly the mismatch the validation layer reports. DrawScene
+	 * moves each image back to an attachment layout on the frames it renders into it, so this is
+	 * only the initial state - it runs when the targets are created, not every frame.
+	 */
+	{
+		VkCommandBuffer cmd = m_context.Cmd();
+		auto handOver = [&](AllocatedImage& image, VkImageLayout& layout)
+		{
+			if (image.image == VK_NULL_HANDLE || layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+				return;
+			CmdTransition(cmd, image.image, layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+				VK_IMAGE_ASPECT_COLOR_BIT);
+			layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		};
+		if (m_samples > VK_SAMPLE_COUNT_1_BIT)
+		{
+			handOver(m_colorResolve, m_resolveLayout);
+			handOver(m_trans1Resolve, m_trans1ResolveLayout);
+			handOver(m_trans2Resolve, m_trans2ResolveLayout);
+		}
+		else
+		{
+			handOver(m_color, m_colorLayout);
+			handOver(m_trans1, m_trans1Layout);
+			handOver(m_trans2, m_trans2Layout);
+		}
+	}
+
+	/*
 	 * The framebuffer and the input-attachment descriptors for the scene render pass.
 	 *
 	 * Both are per-target rather than per-session because they name the views, and the views change
@@ -3479,6 +3513,40 @@ void CVulkan3D::DrawScene(VkCommandBuffer cmd, double alpha, bool newSimulation)
 		}
 	};
 	/*
+	 * Order a pass's clear (or first write) against earlier writes to the same attachment.
+	 *
+	 * A same-layout barrier, so it is not a layout transition and changes nothing about the image:
+	 * it exists because loadOp = CLEAR writes the attachment again, and nothing else orders that
+	 * write when the previous one came from a different submission. The subpass render pass hands
+	 * attachments 1 and 2 back in COLOR_ATTACHMENT_OPTIMAL (their finalLayout), so the next frame's
+	 * dynamic pass finds the right layout and records no transition - which leaves the previous
+	 * submission's write unordered against this one. That is a WRITE_AFTER_WRITE hazard, and sync
+	 * validation reports it for exactly the two transparency targets. Synchronization scopes reach
+	 * back into earlier submissions on the same queue, so this barrier is the complete fix.
+	 */
+	auto attachmentWriteDependency = [&](VkImage image)
+	{
+		if (image == VK_NULL_HANDLE)
+			return;
+		VkImageMemoryBarrier2 barrier = {};
+		barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+		barrier.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+		barrier.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+		barrier.dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+		barrier.dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT;
+		barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.image = image;
+		barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+		VkDependencyInfo dep = {};
+		dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+		dep.imageMemoryBarrierCount = 1;
+		dep.pImageMemoryBarriers = &barrier;
+		CmdPipelineBarrier2(command, &dep);
+	};
+	/*
 	 * Opens a scene pass with all three targets bound, exactly as New3D's colour FBO holds them.
 	 *
 	 * Every scene pass binds all three; the pipeline's colour write mask decides which one a layer
@@ -3518,6 +3586,10 @@ void CVulkan3D::DrawScene(VkCommandBuffer cmd, double alpha, bool newSimulation)
 			color.clearValue.color.float32[1] = 0;
 			color.clearValue.color.float32[2] = 0;
 			color.clearValue.color.float32[3] = 0;
+			// The clear below is a write, so it must be ordered against any earlier write to the same
+			// attachment - including one made by the previous frame's command buffer.
+			if (color.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR)
+				attachmentWriteDependency(targets[i]->image);
 			// Resolve the multisampled scene into the single-sampled image the compositor samples.
 			// resolveMode AVERAGE is the standard box filter.
 			if (m_samples > VK_SAMPLE_COUNT_1_BIT && (resolveMask & (1u << i)) != 0)
@@ -3568,6 +3640,58 @@ void CVulkan3D::DrawScene(VkCommandBuffer cmd, double alpha, bool newSimulation)
 		{
 			CmdTransition(command, m_trans2Resolve.image, m_trans2ResolveLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
 			m_trans2ResolveLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		}
+	};
+	/*
+	 * Hand the images the 2D compositor samples over in the layout its descriptors declare.
+	 *
+	 * This has to run on every path out of DrawScene, not only the one that falls off the end of
+	 * the priority loop: the compositor samples the scene from the previous frame (TileGen draws
+	 * before the 3D renderer), so an image left in COLOR_ATTACHMENT by any single frame makes the
+	 * *next* frame's composite draw use a mismatched layout. The white-flash path used to return
+	 * straight after finishScene() and did exactly that, which is what produced the intermittent
+	 * VUID-vkCmdDraw-imageLayout-00344 on uLayers[4]/[5].
+	 *
+	 * Under MSAA the compositor's slots name the resolved images; without it they name the
+	 * multisampled targets themselves, which are also the scan-out-free 1x attachments.
+	 */
+	auto handOverTargets = [&]()
+	{
+		if (m_samples > VK_SAMPLE_COUNT_1_BIT)
+		{
+			if (m_resolveLayout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+			{
+				CmdTransition(command, m_colorResolve.image, m_resolveLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+				m_resolveLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			}
+			if (m_trans1ResolveLayout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+			{
+				CmdTransition(command, m_trans1Resolve.image, m_trans1ResolveLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+				m_trans1ResolveLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			}
+			if (m_trans2ResolveLayout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+			{
+				CmdTransition(command, m_trans2Resolve.image, m_trans2ResolveLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+				m_trans2ResolveLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			}
+		}
+		else
+		{
+			if (m_colorLayout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+			{
+				CmdTransition(command, m_color.image, m_colorLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+				m_colorLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			}
+			if (m_trans1Layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+			{
+				CmdTransition(command, m_trans1.image, m_trans1Layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+				m_trans1Layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			}
+			if (m_trans2Layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+			{
+				CmdTransition(command, m_trans2.image, m_trans2Layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+				m_trans2Layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			}
 		}
 	};
 	auto clearDepth = [&]()
@@ -3737,6 +3861,10 @@ void CVulkan3D::DrawScene(VkCommandBuffer cmd, double alpha, bool newSimulation)
 		// The transparency targets were cleared by begin() above, so the compositor will not combine
 		// the previous frame's transparency with this frame's white flash.
 		finishScene();
+		// Same hand-over as the normal path below. Leaving it out here was the bug: the composite
+		// draw of the *next* frame samples these images, and they were still in the layout the
+		// dynamic-rendering pass left them in (COLOR_ATTACHMENT_OPTIMAL).
+		handOverTargets();
 		return;
 	}
 
@@ -3869,42 +3997,7 @@ void CVulkan3D::DrawScene(VkCommandBuffer cmd, double alpha, bool newSimulation)
 	//
 	// The same reasoning applies to the non-MSAA path, where the compositor samples m_color directly,
 	// so both images are handed over here.
-	if (m_samples > VK_SAMPLE_COUNT_1_BIT)
-	{
-		if (m_resolveLayout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
-		{
-			CmdTransition(command, m_colorResolve.image, m_resolveLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-			m_resolveLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		}
-		if (m_trans1ResolveLayout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
-		{
-			CmdTransition(command, m_trans1Resolve.image, m_trans1ResolveLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-			m_trans1ResolveLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		}
-		if (m_trans2ResolveLayout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
-		{
-			CmdTransition(command, m_trans2Resolve.image, m_trans2ResolveLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-			m_trans2ResolveLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		}
-	}
-	else
-	{
-		if (m_colorLayout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
-		{
-			CmdTransition(command, m_color.image, m_colorLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-			m_colorLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		}
-		if (m_trans1Layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
-		{
-			CmdTransition(command, m_trans1.image, m_trans1Layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-			m_trans1Layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		}
-		if (m_trans2Layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
-		{
-			CmdTransition(command, m_trans2.image, m_trans2Layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-			m_trans2Layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		}
-	}
+	handOverTargets();
 }
 
 bool CVulkan3D::SceneNeedsLos() const

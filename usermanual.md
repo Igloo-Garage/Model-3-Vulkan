@@ -1,6 +1,6 @@
 # Model 3-Vulkan User Manual (Vulkan + SDL3)
 
-> Applies to **v0.9.8.3a**. Every version the program shows - window title bar, console banner, save
+> Applies to **v0.9.8.3b**. Every version the program shows - window title bar, console banner, save
 > metadata - comes from `SUPERMODEL_FORK_VERSION` in `Src/Version.h`.
 > This manual is about *how to use the emulator and how to set it up*. Measured rendering data lives in
 > `sdl3_reports/`, the change history in `devdocs/CHANGELOG.md`, and troubleshooting patterns in
@@ -44,7 +44,7 @@ a save made in the OpenGL build does not appear as a card in the Vulkan build's 
 but "Import legacy .st" converts it.
 
 The two builds also name themselves apart in the title bar, so a screenshot says which one is running:
-`Model 3-Vulkan v0.9.8.3a - <game>` for the Vulkan build and `Supermodel-OpenGL v0.9.8.3a - <game>` for
+`Model 3-Vulkan v0.9.8.3b - <game>` for the Vulkan build and `Supermodel-OpenGL v0.9.8.3b - <game>` for
 the OpenGL one.
 
 > The SDL3 build needs **Vulkan 1.3 core** (`dynamicRendering` and `synchronization2` are core 1.3
@@ -205,11 +205,17 @@ Gamepads are the exception: they are in daily use here (an Xbox-layout pad and a
 - **HD texture packs** (Core tab, and the Tab panel while playing): **Load HD texture pack** reads
   replacements from `Data/Assets/HDTextures/<romset>/`; **Dump this game's textures** exports every
   sub-texture the game draws to `Data/Assets/DumpTextures/<romset>/` as an RGBA8 PNG whose name carries
-  its content hash. PNG and WebP are accepted at any scale (2x, 4x, 8x ...), with a full 8-bit alpha
-  channel, hardware mip chains and 16x anisotropic filtering. Textures without a replacement keep using
-  the original. **F4** or the panel's Reload button rescans the folder without restarting; a texture
-  that finishes dumping can be upscaled and dropped straight into `HDTextures/<romset>/` under the same
-  name. While the panel is open the emulator is paused, so the reload applies when you close it.
+  its content hash. PNG, WebP and **DDS** (BC1/BC3/BC5/BC7, with or without a mip chain, optionally
+  zstd-compressed to `.dds.zst`) are accepted at any scale (2x, 4x, 8x ...), with a full 8-bit alpha
+  channel, hardware mip chains and 16x anisotropic filtering. DDS blocks and their mip chain are
+  uploaded untouched, so they cost less video memory and load faster; when one hash has several files
+  the priority is `.dds.zst` > `.dds` > `.webp` > `.png`, and a GPU without BC compression skips the
+  DDS files and keeps using PNG/WebP. Textures without a replacement keep using
+  the original. **F4** switches the replacements on and off while playing, which is the quickest way
+  to compare a pack against the original artwork; **F3** (or **Shift+F4**) and the panel's Reload button rescan
+  the folder without restarting, and a texture that finishes dumping can be upscaled and dropped
+  straight into `HDTextures/<romset>/` under the same name. While the panel is open the emulator is
+  paused, so the reload applies when you close it.
 - **Appearance** (Common → Appearance, right under Language): three interface themes, **Light (eye-care,
   default)**, **Dark** and **Original interface**, applied immediately. The first two use neither pure white
   nor pure black - the light theme is a warm alabaster with terracotta accents and charcoal ink, the dark
@@ -423,7 +429,8 @@ real wheel, Sinden gun or second machine will be the first confirmation.
 | `F6` | Change save slot (1–16; selects the next empty slot) |
 | `F7` | Load the current slot; if it is empty, load the newest save |
 | `F8` | Toggle presentation cadence 1x ↔ 2x |
-| `F4` | Reload HD texture packs (rescan `Data/Assets/HDTextures/<romset>/`) |
+| `F4` | Switch HD texture replacements on/off (compare against the original artwork) |
+| `F3` / `Shift+F4` | Rescan the HD texture pack (`Data/Assets/HDTextures/<romset>/`) |
 | `F9` / `F10` | Music volume − / + |
 | `F11` / `F12` | Effects volume − / + |
 | `Alt+S` | Screenshot into `Data/Screenshots/` |

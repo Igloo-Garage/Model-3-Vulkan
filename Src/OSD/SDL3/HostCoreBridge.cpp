@@ -21,6 +21,7 @@
  **/
 
 #include "OSD/SDL3/HostCoreBridge.h"
+#include "OSD/SDL3/HostCoreZstd.h"
 
 #include "OSD/FileSystemPath.h"
 
@@ -54,6 +55,7 @@ using SniffStateFn = int32_t (*)(const char*, int32_t*, char*, size_t);
 using RenameVkStateFn = int32_t (*)(const char*, const char*, char*, size_t);
 using ConvertStToVkStateFn = int32_t (*)(const char*, const char*, HostSaveMeta*, char*, size_t);
 using ListVkStatesFn = int32_t (*)(const char*, uint8_t*, size_t, size_t*, char*, size_t);
+using DecompressZstdFn = int32_t (*)(const uint8_t*, size_t, uint8_t*, size_t, size_t*, char*, size_t);
 
 /*
  * The module's file name on each platform.  Native AOT names a shared library
@@ -119,6 +121,7 @@ struct Bridge::Api
     RenameVkStateFn renameVkState = nullptr;
     ConvertStToVkStateFn convertStToVkState = nullptr;
     ListVkStatesFn listVkStates = nullptr;
+    DecompressZstdFn decompressZstd = nullptr;
 
     ~Api()
     {
@@ -179,6 +182,9 @@ std::expected<Bridge, Error> Bridge::Load(const std::filesystem::path& modulePat
     api->renameVkState = reinterpret_cast<RenameVkStateFn>(resolve("HostCore_RenameVkState"));
     api->convertStToVkState = reinterpret_cast<ConvertStToVkStateFn>(resolve("HostCore_ConvertStToVkState"));
     api->listVkStates = reinterpret_cast<ListVkStatesFn>(resolve("HostCore_ListVkStates"));
+    // Optional: see the note on HasZstdDecompressor().  An older module still loads, it just
+    // cannot read .dds.zst texture packs.
+    api->decompressZstd = reinterpret_cast<DecompressZstdFn>(resolve("HostCore_DecompressZstd"));
 
     if (api->abiVersion == nullptr || api->version == nullptr || api->loadIni == nullptr ||
         api->saveIni == nullptr || api->saveVkState == nullptr || api->loadVkState == nullptr ||
@@ -443,6 +449,52 @@ std::expected<std::vector<SaveEntry>, Error> Bridge::ListVkStates(
     return entries;
 }
 
+bool Bridge::HasZstdDecompressor() const
+{
+    return m_api != nullptr && m_api->decompressZstd != nullptr;
+}
+
+std::expected<std::vector<std::uint8_t>, Error> Bridge::DecompressZstd(
+    const std::vector<std::uint8_t>& frame) const
+{
+    if (!m_api)
+        return std::unexpected(Error{HOSTCORE_ERR_INTERNAL, "The host core module is not loaded."});
+    if (m_api->decompressZstd == nullptr)
+    {
+        return std::unexpected(Error{HOSTCORE_ERR_UNSUPPORTED,
+            "The host core module does not export HostCore_DecompressZstd."});
+    }
+    if (frame.empty())
+        return std::unexpected(Error{HOSTCORE_ERR_INVALID_ARG, "The compressed frame is empty."});
+
+    char error[512] = {};
+
+    size_t required = 0;
+    int32_t status = m_api->decompressZstd(
+        frame.data(), frame.size(), nullptr, 0, &required, error, sizeof(error));
+    if (status != HOSTCORE_ERR_BUFFER_TOO_SMALL && status != HOSTCORE_OK_STATUS)
+        return std::unexpected(MakeError(status, error, "The zstd frame could not be read."));
+
+    // A frame that decompresses to nothing is not a texture; refuse rather than hand back
+    // an empty buffer that the parser would then reject with a less useful message.
+    if (required == 0)
+        return std::unexpected(Error{HOSTCORE_ERR_FORMAT, "The zstd frame decompresses to zero bytes."});
+
+    std::vector<std::uint8_t> decompressed(required);
+
+    size_t written = 0;
+    error[0] = '\0';
+    status = m_api->decompressZstd(
+        frame.data(), frame.size(), decompressed.data(), decompressed.size(), &written, error, sizeof(error));
+    if (status != HOSTCORE_OK_STATUS)
+        return std::unexpected(MakeError(status, error, "The zstd frame could not be decompressed."));
+    if (written == 0 || written > decompressed.size())
+        return std::unexpected(Error{HOSTCORE_ERR_FORMAT, "The zstd frame reported an impossible length."});
+
+    decompressed.resize(written);
+    return decompressed;
+}
+
 std::filesystem::path DefaultModulePath()
 {
     const std::string base = FileSystemPath::GetBasePath();
@@ -467,6 +519,38 @@ std::expected<Bridge*, Error> Shared()
     if (bridge)
         return bridge.get();
     return std::unexpected(failure);
+}
+
+/*
+ * C++17 half of the wrapper.  The Vulkan core cannot include HostCoreBridge.h, so these
+ * two functions are the only surface it sees; both live here, where the module's
+ * std::expected interface is available.
+ */
+bool ZstdAvailable()
+{
+    auto shared = Shared();
+    return shared && (*shared)->HasZstdDecompressor();
+}
+
+bool DecompressZstdFrame(const std::vector<std::uint8_t>& frame,
+    std::vector<std::uint8_t>& out, std::string& error)
+{
+    auto shared = Shared();
+    if (!shared)
+    {
+        error = shared.error().message;
+        return false;
+    }
+
+    auto decompressed = (*shared)->DecompressZstd(frame);
+    if (!decompressed)
+    {
+        error = decompressed.error().message;
+        return false;
+    }
+
+    out = std::move(*decompressed);
+    return true;
 }
 
 } // HostCore

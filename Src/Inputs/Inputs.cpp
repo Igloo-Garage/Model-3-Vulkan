@@ -76,7 +76,8 @@ CInputs::CInputs(std::shared_ptr<CInputSystem> system)
 	// The key above Tab, so the two are together on the keyboard and neither is a key a game wants.
 	uiToggleStatsOsd   = AddSwitchInput("UIToggleStatsOsd",   "Statistics Overlay",    Game::INPUT_UI, "KEY_BACKQUOTE");
 	uiToggleVrr        = AddSwitchInput("UIToggleVrr",        "VRR 1x / 2x",           Game::INPUT_UI, "KEY_F8");
-	uiReloadHDTextures = AddSwitchInput("UIReloadHDTextures", "Reload HD Textures",    Game::INPUT_UI, "KEY_F4");
+	uiToggleHDTextures = AddSwitchInput("UIToggleHDTextures", "Toggle HD Textures",    Game::INPUT_UI, "KEY_F4");
+	uiReloadHDTextures = AddSwitchInput("UIReloadHDTextures", "Reload HD Textures",    Game::INPUT_UI, "KEY_F3,KEY_SHIFT+KEY_F4");
 #ifdef SUPERMODEL_DEBUGGER
 	uiEnterDebugger    = AddSwitchInput("UIEnterDebugger",    "Enter Debugger",        Game::INPUT_UI, "KEY_ALT+KEY_B");
 #endif

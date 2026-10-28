@@ -5429,6 +5429,27 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
         InfoLog("Pace: hotkey switched to VRR 2x (%.2f Hz).", kModel3StepHz * 2.0);
       }
     }
+    else if (Inputs->uiToggleHDTextures->Pressed())
+    {
+      /*
+       * A/B between the replacement pack and the original artwork.
+       *
+       * This is the same value the in-game panel's checkbox writes, and the renderer reads it once
+       * per simulation frame (CVulkan3D::BuildDrawList), so the switch takes effect on the next
+       * frame. Nothing is reloaded or freed: the loaded images stay resident, which is what makes
+       * flipping back and forth instant. F3 is the rescan, for a pack author replacing files while
+       * playing.
+       */
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+      const bool enable = !s_runtime_config["LoadHDTextures"].ValueAsDefault<bool>(false);
+      s_runtime_config.Set("LoadHDTextures", enable);
+      printf("HD textures: %s.\n", enable ? "replacement pack on" : "original artwork");
+      InfoLog("HD textures: %s with the F4 shortcut.",
+        enable ? "replacements enabled" : "replacements disabled");
+#else
+      InfoLog("HD textures: this build has no Vulkan renderer; the F4 shortcut does nothing.");
+#endif
+    }
     else if (Inputs->uiReloadHDTextures->Pressed())
     {
       /*
@@ -5439,9 +5460,9 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
 #if !defined(SUPERMODEL_OPENGL_ONLY)
       Vulkan3D::RequestHDTextureReload();
       printf("HD textures: reload requested.\n");
-      InfoLog("HD textures: reload requested with the F4 shortcut.");
+      InfoLog("HD textures: reload requested with the F3 shortcut.");
 #else
-      InfoLog("HD textures: this build has no Vulkan renderer; the F4 shortcut does nothing.");
+      InfoLog("HD textures: this build has no Vulkan renderer; the F3 shortcut does nothing.");
 #endif
     }
 
@@ -6445,7 +6466,8 @@ Util::Config::Node DefaultConfig()
    * Data/Assets/DumpTextures/<romset>/ as a PNG named after its content hash, so
    * the same file can be dropped into an HD pack unchanged. Both are per-session
    * switches: the renderer reads them every simulation frame, and the panel's
-   * Reload button (or F4) rescans the folder without restarting the game.
+   * Reload button (or F3) rescans the folder without restarting the game.
+   * F4 itself switches the replacements on and off for an A/B against the original.
    *
    * The key is DumpHDTextures rather than DumpTextures: the older key already
    * means "write the raw packed texture RAM on exit" and is still honoured.
