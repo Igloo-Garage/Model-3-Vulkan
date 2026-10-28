@@ -23,6 +23,7 @@
 #ifndef INCLUDED_INETBOARD_H
 #define INCLUDED_INETBOARD_H
 
+#include <string>
 #include "Types.h"
 #include "Game.h"
 #include "BlockFile.h"
@@ -36,6 +37,13 @@ public:
 
 	virtual void SaveState(CBlockFile* SaveState) = 0;
 	virtual void LoadState(CBlockFile* SaveState) = 0;
+
+	// Read-only diagnostic for SM3D_LOAD_DEBUG. Empty by default; the simulated board
+	// overrides it with the handshake state that is not part of SaveState().
+	virtual std::string DebugState(void) const
+	{
+		return std::string();
+	}
 
 	virtual void RunFrame(void) = 0;
 	virtual void Reset(void) = 0;

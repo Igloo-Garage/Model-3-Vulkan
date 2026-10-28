@@ -1939,6 +1939,22 @@ void CInputSystem::GrabMouse()
   m_grabMouse = true;
 }
 
+float CInputSystem::GetMouseAxisValueFloat(int mseNum, int axisNum) const
+{
+  // Backends with integer coordinates only: identical to the old path.
+  return (float)GetMouseAxisValue(mseNum, axisNum);
+}
+
+void CInputSystem::RefreshPointer()
+{
+  // Nothing to do by default: the backend has no source fresher than the event queue.
+}
+
+void CInputSystem::RefreshState()
+{
+  // Nothing to do by default: the backend refreshes its caches in Poll() and has no separate copy.
+}
+
 void CInputSystem::UngrabMouse()
 {
   m_grabMouse = false;
@@ -1950,8 +1966,29 @@ void CInputSystem::UngrabMouse()
 bool CInputSystem::SendForceFeedbackCmd(int joyNum, int axisNum, ForceFeedbackCmd ffCmd)
 {
   const JoyDetails *joyDetails = GetJoyDetails(joyNum);
-  if (!joyDetails->hasFFeedback || !joyDetails->axisHasFF[axisNum])
+  if (joyDetails == nullptr)
     return false;
+
+  const bool axisHasFF = axisNum >= 0 && axisNum < NUM_JOY_AXES && joyDetails->axisHasFF[axisNum];
+  if (!joyDetails->hasFFeedback || !axisHasFF)
+  {
+    /*
+     * Reported once, because this is the first gate a force-feedback command can die at and there
+     * is nothing else in the log to distinguish "the game sends none" from "the binding is not an
+     * analog pad axis". Vibration on a pad also stops here when the steering input is bound to a
+     * keyboard or a d-pad, which is the usual reason a pad that can rumble never does.
+     */
+    static bool reported = false;
+    if (!reported)
+    {
+      reported = true;
+      InfoLog("FFB: command %d for joystick %d dropped (hasFFeedback=%d, axis %d hasFF=%d); "
+        "bind an analog pad axis to the steering input for vibration.",
+        (int)ffCmd.id, joyNum, (int)joyDetails->hasFFeedback, axisNum, (int)axisHasFF);
+    }
+    return false;
+  }
+
   return ProcessForceFeedbackCmd(joyNum, axisNum, ffCmd);
 }
 
@@ -2352,7 +2389,7 @@ void CInputSystem::PrintDevices()
     for (int mseNum = 0; mseNum < m_numMice; mseNum++)
     {
       const MouseDetails *mseDetails = GetMouseDetails(mseNum);
-      printf(" %d: %s\n", mseNum + 1, mseDetails->name);
+      printf(" %d: %s\n", mseNum + 1, mseDetails != NULL ? mseDetails->name : "(removed)");
     }
   }
 
@@ -2432,7 +2469,21 @@ void CInputSystem::CMseAxisInputSource::SetAbsolute(bool absolute)
 
 int CInputSystem::CMseAxisInputSource::ScaleAxisValue(int minVal, int offVal, int maxVal) const
 {
-  int mseVal = m_system->GetMouseAxisValue(m_mseNum, m_axisNum);
+  /*
+   * Everything below works in 1/256 pixel units.
+   *
+   * A light gun maps the pointer's position in the window onto the arcade gun's much coarser
+   * range, so rounding the pointer to a whole pixel before scaling is what turns a slow, precise
+   * aim into a staircase. Scale() only looks at ratios, so multiplying the input value and both
+   * ends of the source range by the same factor changes nothing except letting the fractional
+   * part reach the result.
+   *
+   * GetMouseAxisValueFloat() is the integer value on every backend that has no floats, so the
+   * DirectInput and SDL2 paths behave exactly as before.
+   */
+  static const int kSubPixel = 256;
+
+  int mseVal;
   // If X- or Y-axis then convert to value centered around zero (ie relative to centre of display)
   int mseMin, mseMax;
   if (m_axisNum == AXIS_X || m_axisNum == AXIS_Y)
@@ -2440,21 +2491,24 @@ int CInputSystem::CMseAxisInputSource::ScaleAxisValue(int minVal, int offVal, in
     int dispExtent = (int)(m_axisNum == AXIS_X ? m_system->m_dispW : m_system->m_dispH);
     if (dispExtent == 0)
       return offVal;
-    mseMin = -dispExtent / 2;
-    mseMax = mseMin + dispExtent - 1;
-    mseVal = (m_axisNum == AXIS_X ? mseVal - m_system->m_dispX : mseVal - m_system->m_dispY) - dispExtent / 2;
+    const int dispOrigin = (int)(m_axisNum == AXIS_X ? m_system->m_dispX : m_system->m_dispY);
+    mseMin = (-dispExtent / 2) * kSubPixel;
+    mseMax = mseMin + (dispExtent - 1) * kSubPixel;
+    mseVal = (int)std::lround(m_system->GetMouseAxisValueFloat(m_mseNum, m_axisNum) * (float)kSubPixel)
+      - (dispOrigin + dispExtent / 2) * kSubPixel;
   }
   else
   {
     // Z-axis (wheel) is always between -100 and 100
-    mseMin = -100;
-    mseMax = 100;
+    mseMin = -100 * kSubPixel;
+    mseMax = 100 * kSubPixel;
+    mseVal = m_system->GetMouseAxisValue(m_mseNum, m_axisNum) * kSubPixel;
   }
   // Check value is not zero
   if (mseVal == 0)
     return offVal;
   // Scale values from dead zone to display edge, taking positive or negative values only or using the whole axis range as required
-  int dZone = m_absolute ? 0 : (mseVal > 0 ? m_deadPixels / 2 : m_deadPixels - m_deadPixels / 2);
+  int dZone = m_absolute ? 0 : (mseVal > 0 ? (m_deadPixels / 2) * kSubPixel : (m_deadPixels - m_deadPixels / 2) * kSubPixel);
   if      (m_axisDir == AXIS_POS)  return Scale(mseVal, dZone, dZone, mseMax, minVal, offVal, maxVal);
   else if (m_axisDir == AXIS_NEG)  return Scale(mseVal, -dZone, -dZone, mseMin, minVal, offVal, maxVal);
   else if (m_axisDir == AXIS_FULL)
@@ -2493,7 +2547,14 @@ bool CInputSystem::CMseAxisInputSource::GetValueAsSwitch(bool &val) const
 bool CInputSystem::CMseAxisInputSource::GetValueAsAnalog(int &val, int minVal, int offVal, int maxVal)
 {
   int axisVal = ScaleAxisValue(minVal, offVal, maxVal);
-  if (axisVal == offVal)
+  /*
+   * An absolute axis is a position, not an activity flag: the centre of the screen is a perfectly
+   * valid place to point. Reporting "no value" there made a multi-source binding fall through to
+   * the next device, so a mouse resting exactly at the centre was overridden by the joystick's own
+   * resting position - which is why a crosshair could sit well away from the pointer for as long as
+   * the pointer was near the middle.
+   */
+  if (axisVal == offVal && !m_absolute)
     return false;
   val = axisVal;
   return true;

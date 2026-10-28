@@ -28,6 +28,7 @@
 #ifndef INCLUDED_SOUNDBOARD_H
 #define INCLUDED_SOUNDBOARD_H
 
+#include <string>
 #include "Types.h"
 #include "CPU/Bus.h"
 #include "Model3/DSB.h"
@@ -103,6 +104,10 @@ public:
 	 *		SaveState	Block file to load state information from.
 	 */
 	void LoadState(CBlockFile *SaveState);
+
+	// Read-only diagnostic for SM3D_LOAD_DEBUG: 68K PC/IRQ state plus the SCSP MIDI and slot
+	// summary. Does not modify the sound board.
+	std::string DebugState(void);
 
 	/*
 	 * RunFrame(void):

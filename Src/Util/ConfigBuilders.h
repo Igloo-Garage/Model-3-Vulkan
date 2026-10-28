@@ -23,6 +23,7 @@
 #define INCLUDED_UTIL_CONFIGBUILDERS_H
 
 #include <string>
+#include <vector>
 
 namespace Util
 {
@@ -35,6 +36,20 @@ namespace Util
     bool FromINIFile(Node *config, const std::string &filename);
     void MergeINISections(Node *merged, const Node &x, const Node &y);
     void CopyINISection(Node *dest, const Node &src);
+    //
+    // Erases settings this build cannot honour, in the section and in every
+    // child section (a per-game section can carry the same key).  SetEmpty() is
+    // the config model's erase: the node stays but has no value, so the settings
+    // window skips it and WriteINIFile() never emits it.
+    //
+    void StripSettings(Node &section, const std::vector<std::string> &keys);
+    //
+    // Removes the settings that belonged to the Vulkan renderer, which the OpenGL-only
+    // build neither defines nor can honour.  Kept here rather than in the callers so
+    // that every place a configuration file enters the process (startup, a game
+    // session, the settings window's "load settings") uses the same list.
+    //
+    void StripRetiredVulkanSettings(Node &section);
     void WriteINIFile(const std::string &filename, const Node &config, const std::string &header_comment);
   }
 }

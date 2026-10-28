@@ -31,16 +31,30 @@
 #include "Types.h"
 #include "Inputs/InputSource.h"
 #include "Inputs/InputSystem.h"
-#include "SDLIncludes.h"
+#include "OSD/Platform/PlatformInput.h"
 
+#if defined(SUPERMODEL_PLATFORM_SDL2)
+// The SDL2 path keeps raw joystick/controller and SDL_Haptic handles. The SDL3 path reaches the
+// same information through PlatformInput.h, so this header stays SDL-free for that build.
+#include "SDLIncludes.h"
+#endif
+
+#include <cstdint>
 #include <vector>
 
 #define NUM_SDL_KEYS (sizeof(s_keyMap) / sizeof(SDLKeyMapStruct))
 
+/*
+ * Key-name to scancode mapping.
+ *
+ * The scancode type is the platform layer's, not SDL's: SDL2 and SDL3 both number
+ * scancodes as USB HID usage ids (page 0x07), so one table serves both backends and the
+ * header stays free of SDL types.
+ */
 struct SDLKeyMapStruct
 {
 	const char *keyName;
-	SDL_Scancode sdlKey;
+	OSD::Platform::Scancode sdlKey;
 };
 
 /*
@@ -57,39 +71,95 @@ private:
 	// Lookup table to map key names to SDLKeys
 	static SDLKeyMapStruct s_keyMap[];
 
+#if defined(SUPERMODEL_PLATFORM_SDL2)
 	// Vector to keep track of attached joysticks
 	std::vector<SDL_Joystick*> m_joysticks;
 
 	// Vector to keep track of attached gamepads
 	std::vector<SDL_GameController*> m_gamepads;
+#else
+	// SDL3 hands out opaque, reference-counted gamepad handles by id; the platform layer owns them,
+	// so this vector holds the ids whose state the input system reads.
+	std::vector<OSD::Platform::GamepadId> m_gamepadIds;
+
+	/*
+	 * One state snapshot per open device, refreshed once per frame by Poll().
+	 *
+	 * Platform::GetGamepadState() reads the device: every axis, every button, every hat. Calling it
+	 * from IsJoyButPressed() and GetJoyAxisValue() meant one of those per binding, dozens per frame,
+	 * all between the event drain and the emulated frame. A read is a cheap lookup into this vector.
+	 */
+	std::vector<OSD::Platform::GamepadState> m_gamepadStates;
+
+	/*
+	 * Pad vibration, held as a level rather than an edge.
+	 *
+	 * The drive board only sends a vibrate command when the value changes (see
+	 * CWheelBoard::SendVibrate), which matches a motor that keeps spinning while the value is
+	 * non-zero. SDL's gamepad rumble is a timed pulse, so a single command would buzz for 100 ms and
+	 * stop while the game still expects the motor to be running. Poll() re-issues the pulse for as
+	 * long as the stored value stays above zero.
+	 */
+	std::vector<float> m_padVibration;
+
+	void ServicePadVibration();
+
+	// Commands seen since the last summary, indexed by EForceFeedback. Logged every few seconds so a
+	// "the pad does not rumble" report can be answered from the log: nothing here means the game
+	// never asked, everything here means the request is leaving the emulator.
+	unsigned m_ffbCounts[4] = {};
+	void ReportForceFeedback();
+
+	void RefreshGamepadStates();
+#endif
 
 	// Vector of joystick details
 	std::vector<JoyDetails> m_joyDetails;
 
-	// SDL instance id of each open device, index-aligned with the vectors above.
+	// Stable device id of each open device, index-aligned with the vectors above.
 	//
-	// Device indices are only meaningful at enumeration time and are renumbered when anything is
-	// unplugged, whereas instance ids are stable for the life of a device - which is what
-	// SDL_JOYDEVICEREMOVED reports. Without this the removal event could only be matched by
-	// position, and a pad pulled out of the middle would close the wrong one.
-	std::vector<SDL_JoystickID> m_instanceIds;
+	// Enumeration indices are only meaningful at enumeration time and are renumbered when anything is
+	// unplugged, whereas ids are stable for the life of a device - which is what a removal event
+	// reports. Without this the removal event could only be matched by position, and a pad pulled out
+	// of the middle would close the wrong one.
+	std::vector<OSD::Platform::GamepadId> m_instanceIds;
 
-	// Current key state obtained from SDL
-	const Uint8 *m_keyState;
+	// Current key state obtained from the platform layer
+	const uint8_t *m_keyState;
 
-	// Current mouse state obtained from SDL
-	int m_mouseX;
-	int m_mouseY;
-	int m_mouseZ;
-	short m_mouseWheelDir;
-	Uint8 m_mouseButtons;
+	    // Current mouse state obtained from the platform layer
+	    int m_mouseX;
+	    int m_mouseY;
+	    // Same position, kept unrounded. The light-gun axes read this so that a slow, precise aim does
+	    // not step from pixel to pixel; SDL3 reports float coordinates, SDL2 integers widened here.
+	    float m_mouseXF;
+	    float m_mouseYF;
+	    int m_mouseZ;
+	    short m_mouseWheelDir;
+	    uint8_t m_mouseButtons;
 
-	// SDL2 ffb
+	#if defined(SUPERMODEL_PLATFORM_SDL3)
+	    // Per-device state, index-aligned with the mouse numbers the bindings name. Refreshed once per
+	    // frame in Poll(); GetMouseAxisValue() and IsMouseButPressed() read it for MOUSE1_/MOUSE2_
+	    // bindings, while ANY_MOUSE keeps the aggregate above.
+	    std::vector<OSD::Platform::MouseState> m_mouseStates;
+	    MouseDetails m_mouseDetails;
+	#endif
+
+	#if defined(SUPERMODEL_PLATFORM_SDL2)
+	// SDL2 haptics: the only force-feedback API in the tree that can express constant force, spring
+	// and friction, which is why these effects live in the SDL2 binary. The SDL3 target uses rumble
+	// only (see PlatformInput.h).
 	SDL_HapticEffect eff;
+	#endif
+	// Strength percentages. Shared by both backends: the SDL3 path scales its haptic effects with
+	// the same ini keys, so an existing configuration keeps its tuning.
 	unsigned sdlConstForceMax;
 	unsigned sdlSelfCenterMax;
 	unsigned sdlFrictionMax;
 	unsigned sdlVibrateMax;
+
+	#if defined(SUPERMODEL_PLATFORM_SDL2)
 	struct hapticInfo
 	{
 		SDL_Haptic* SDLhaptic = NULL;
@@ -99,6 +169,7 @@ private:
 		int effectFrictionForceID = -1;
 	};
 	std::vector<hapticInfo> m_SDLHapticDatas;
+	#endif
 
 	/*
 	 * Opens all attached joysticks.
@@ -123,10 +194,10 @@ private:
 	void CloseJoystickEntry(int index);
 
 	/*
-	 * Closes the device with the given SDL instance id, if it is open. Returns whether anything
+	 * Closes the device with the given stable device id, if it is open. Returns whether anything
 	 * was closed.
 	 */
-	bool CloseJoystickAt(SDL_JoystickID instanceId);
+	bool CloseJoystickAt(OSD::Platform::GamepadId instanceId);
 
 	/*
 	 * Closes all attached joysticks.
@@ -154,6 +225,8 @@ protected:
 	bool IsKeyPressed(int kbdNum, int keyIndex) const;
 
 	int GetMouseAxisValue(int mseNum, int axisNum) const;
+
+	float GetMouseAxisValueFloat(int mseNum, int axisNum) const;
 
 	int GetMouseWheelDir(int mseNum) const;
 
@@ -185,7 +258,9 @@ protected:
 
 	void FrictionForceEffect(float force, int joyNum);
 
+#if defined(SUPERMODEL_PLATFORM_SDL2)
 	bool HasBasicForce(SDL_Haptic* hap);
+#endif
 
 public:
 	/*
@@ -219,6 +294,13 @@ public:
 	const JoyDetails *GetJoyDetails(int joyNum);
 
 	bool Poll();
+
+	void RefreshPointer();
+	void RefreshState();
+
+	// Copies the platform snapshot into the caches the bindings read; shared by Poll() and
+	// RefreshState().
+	void ReadSnapshot();
 
 	void SetMouseVisibility(bool visible);
 };

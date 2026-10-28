@@ -53,6 +53,7 @@
  */
 
 #include "DriveBoard.h"
+#include "Model3/Model3Timing.h"
 
 #include "Supermodel.h"
 
@@ -150,14 +151,17 @@ void CDriveBoard::LoadState(CBlockFile* SaveState)
     if (wasEnabled != isEnabled || wasSimulated != m_simulated)
     {
         Disable();
-        ErrorLog("Halting drive board emulation due to mismatch in active and restored states.");
+        ErrorLog("Drive board halted: the save state was recorded with it %s, this session started with it %s. "
+            "Force feedback and wheel vibration stay off for this session - start a new game, or load a "
+            "state saved with the same Force feedback setting.",
+            wasEnabled ? "enabled" : "disabled", isEnabled ? "enabled" : "disabled");
     }
 }
 
 int CDriveBoard::GetFramecycles() const
 {
     int freq = (int)m_z80Clock * 1000000;
-    int frameCycles = (int)(freq / 57.524);
+    int frameCycles = (int)(freq / kModel3RefreshHz);
 
     return frameCycles;
 }

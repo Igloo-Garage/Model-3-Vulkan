@@ -67,7 +67,10 @@
 #include <new>
 #include <cmath>
 #include <cstdlib>
+#include <climits>
 #include <chrono>
+#include <atomic>
+#include <thread>
 #include <cstdio>
 #include <cstring>
 #include <cstdarg>
@@ -79,10 +82,26 @@
 #include <filesystem>
 #include <system_error>
 #include <utility>
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+// C++23 startup layer: std::format for the messages and std::println for the
+// pre-window diagnostics.  The SDL2 target remains C++17 and never sees these.
+#include <exception>
+#include <format>
+#include <print>
+#endif
+#if defined(SUPERMODEL_PURE_VULKAN)
+#include <fstream>
+#endif
+#if !defined(SUPERMODEL_PURE_VULKAN)
 #include <GL/glew.h>
+#endif
 
-#ifdef SUPERMODEL_WIN32
+#if defined(SUPERMODEL_WIN32) && defined(SUPERMODEL_PLATFORM_SDL2)
+// DirectInput/Raw Input is one of the SDL2 binary's reasons to exist; the SDL3 binary has no such
+// backend, so it must not even see the header.
 #include "DirectInputSystem.h"
+#endif
+#ifdef SUPERMODEL_WIN32
 #include "WinOutputs.h"
 #endif
 #include "NetOutputs.h"
@@ -94,27 +113,65 @@
 #include "OSD/FileSystemPath.h"
 #include "GameLoader.h"
 #include "SDLInputSystem.h"
+#include "OSD/Platform/Platform.h"
+#include "OSD/Platform/PlatformInput.h"
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+#include "OSD/SDL3/AppRuntime.h"
+#include "OSD/SDL3/StartupLog.h"
+#include "OSD/SDL3/VulkanRequirement.h"
+#if defined(_WIN32)
+// SDL_SetWindowsMessageHook lives in SDL_system.h, which the SDL3 build does not otherwise pull
+// in (only the SDL2 build includes the umbrella header). Used by the modal-loop pause below.
+#include <SDL3/SDL_system.h>
+#endif
+#endif
+#if defined(SUPERMODEL_PURE_VULKAN)
+#include "OSD/SDL3/HostCoreBridge.h"
+#endif
+#if defined(SUPERMODEL_PLATFORM_SDL2)
+// SDL2 only: the Win32 message hook below, and the DirectInput window adapter.
+// Neither has an SDL3 equivalent that shared code needs.
 #include "SDLIncludes.h"
+#include "OSD/Platform/SDL2/PlatformSDL2Internal.h"
+#endif
 #include "Debugger/SupermodelDebugger.h"
+#if defined(SUPERMODEL_PURE_VULKAN)
+// Only the interfaces: the concrete OpenGL renderers are not part of this
+// executable and their headers include <GL/glew.h>.
+#include "Graphics/IRender2D.h"
+#include "Graphics/IRender3D.h"
+#else
 #ifndef SUPERMODEL_OSX
 #include "Graphics/Legacy3D/Legacy3D.h"
 #endif
 #include "Graphics/New3D/New3D.h"
 #include "Graphics/Render2D.h"
+#include "Graphics/New3D/VBO.h"
+#include "Graphics/SuperAA.h"
+#endif
+#if defined(SUPERMODEL_PURE_VULKAN) && defined(SUPERMODEL_OPENGL_ONLY)
+#error "A target cannot be both Pure-Vulkan and OpenGL-only."
+#endif
+
+#if !defined(SUPERMODEL_OPENGL_ONLY)
 #include "Graphics/Vulkan3D/VulkanContext.h"
 #include "Graphics/Vulkan3D/Vulkan2D.h"
 #include "Graphics/Vulkan3D/Vulkan3D.h"
+#include "Graphics/Vulkan3D/HDTextures.h"
+#endif
 #include "Model3/IEmulator.h"
 #include "Model3/Model3.h"
+#include "Model3/Model3Timing.h"
 #include "OSD/Audio.h"
-#include "Graphics/New3D/VBO.h"
-#include "Graphics/SuperAA.h"
+#include "OSD/DisplayPacer.h"
 #include "Sound/MPEG/MpegAudio.h"
 
 #include <iostream>
 #include "Util/BMPFile.h"
 
+#if !defined(SUPERMODEL_PURE_VULKAN)
 #include "Crosshair.h"
+#endif
 #include "OSD/ConfigFile.h"
 #include "Gui.h"
 #include "Overlay.h"
@@ -124,7 +181,7 @@
 
 #ifdef _WIN32
 #include <windows.h>    // AttachConsole()/AllocConsole()/GetConsoleWindow() - see ShowConsoleWindow()
-#include <SDL_syswm.h>  // SDL_GetWindowWMInfo(), used to find the HWND for the window icon
+#include "OSD/Windows/SplashScreen.h"
 // WMI, used to enumerate the attached displays so their EDID timing ranges can be read. The project
 // already links wbemuuid.lib because DirectInputSystem uses the same API to spot XInput devices.
 #include <wbemidl.h>
@@ -147,7 +204,7 @@ extern "C" {
  Generic
 ******************************************************************************/
 
-void SetWindowIcon(SDL_Window* window)
+void SetWindowIcon(OSD::Platform::Window* window)
 {
 #ifdef _WIN32
     if (window == nullptr)
@@ -167,12 +224,7 @@ void SetWindowIcon(SDL_Window* window)
         GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR);
 
     // Without the HWND there is nothing to set the icon on; the executable icon still applies.
-    SDL_SysWMinfo info;
-    SDL_VERSION(&info.version);
-    if (SDL_GetWindowWMInfo(window, &info) != SDL_TRUE)
-        return;
-
-    HWND hwnd = info.info.win.window;
+    HWND hwnd = static_cast<HWND>(OSD::Platform::GetNativeWindowHandle(window));
     if (hwnd == nullptr)
         return;
 
@@ -194,7 +246,14 @@ void SetWindowIcon(SDL_Window* window)
 ******************************************************************************/
 
 static const std::string s_analysisPath = Util::Format() << FileSystemPath::GetPath(FileSystemPath::Analysis);
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+// The SDL3 build binds its settings to its own executable name, so the file is
+// derived at startup (Model3-Vulkan.ini) instead of being hard-coded.
+// InitializeSDL3Startup() fills this before anything can read it.
+static std::string s_configFilePath;
+#else
 static const std::string s_configFilePath = Util::Format() << FileSystemPath::GetPath(FileSystemPath::Config) << "Supermodel.ini";
+#endif
 static const std::string s_gameXMLFilePath = Util::Format() << FileSystemPath::GetPath(FileSystemPath::Config) << "Games.xml";
 static const std::string s_musicXMLFilePath = Util::Format() << FileSystemPath::GetPath(FileSystemPath::Config) << "Music.xml";
 
@@ -242,9 +301,50 @@ static Util::Config::Node s_runtime_config("Global");
  Display Management
 ******************************************************************************/
 
-SDL_Window *s_window = nullptr;
+static OSD::Platform::Window *s_platformWindow = nullptr;
+#if !defined(SUPERMODEL_OPENGL_ONLY)
 static Vulkan3D::CVulkanContext *s_vkContext = nullptr;
 
+/*
+ * The 2D renderer of the running session, for the overlay's frosted backdrop.
+ *
+ * The blur chain lives in CVulkan2D because that is the class holding the finished frame; the
+ * overlay only samples the result. Kept as a file-level pointer rather than captured because the
+ * hand-over is two plain function pointers, matching the existing SetOverlayPass() arrangement.
+ */
+static Vulkan3D::CVulkan2D *s_overlayFrostRenderer = nullptr;
+
+static OverlayFrostTexture OverlayFrostTextureFromRenderer()
+{
+  OverlayFrostTexture texture;
+  if (s_overlayFrostRenderer != nullptr)
+  {
+    texture.view = s_overlayFrostRenderer->UiFrostView();
+    texture.generation = s_overlayFrostRenderer->UiFrostGeneration();
+  }
+  return texture;
+}
+#endif
+
+/*
+ * The game window is created hidden and revealed once a frame has reached the display.
+ *
+ * A window created visible is on screen while the device, the shaders and the ROM are being set up,
+ * which is an empty black rectangle for a second or two - the same gap the settings window covers
+ * with its start-up artwork. There is no artwork here, so the window is simply kept invisible until
+ * there is a picture to put in it. Set by CreateGLScreen()/CreateVulkanScreen(), cleared at the
+ * first present in EndFrameVideo().
+ *
+ * The reveal has to be in EndFrameVideo() rather than in the set-up code: that is the one place
+ * both renderers pass through (the Vulkan backend presents in CVulkanContext::EndFrame, the OpenGL
+ * one in SwapWindow), and it is the first moment the contents of the window are worth showing.
+ */
+static bool s_windowRevealPending = false;
+// Whether the game window was asked to take the foreground. The raise moves with the reveal: raising
+// a hidden window can put an empty one on screen, which is what this is here to avoid.
+static bool s_windowRevealRaise = false;
+
+#if !defined(SUPERMODEL_OPENGL_ONLY)
 /*
  * The Vulkan 3D renderer, kept in its concrete type as well as the interface.
  *
@@ -254,9 +354,19 @@ static Vulkan3D::CVulkanContext *s_vkContext = nullptr;
  * IRender3D with a method that only one of its three implementations has anything to say about.
  */
 static Vulkan3D::CVulkan3D *s_vk3dRenderer = nullptr;
+
+/*
+ * The Vulkan 2D renderer, kept for the same reason as the 3D one: the light-gun crosshair is drawn
+ * by it rather than by the ImGui overlay, and the game loop needs its concrete type to hand it the
+ * current position each frame. Null on the OpenGL backends, where CCrosshair draws the crosshair.
+ */
+static Vulkan3D::CVulkan2D *s_vk2dRenderer = nullptr;
+#endif
 // GL context of the game window. Kept separate from the settings GUI's own context, which stays
 // alive across game sessions (see DestroyGLScreen()).
-static SDL_GLContext s_glContext = nullptr;
+#if !defined(SUPERMODEL_PURE_VULKAN)
+static OSD::Platform::GLContext *s_glContext = nullptr;
+#endif
 
 // How the fullscreen window is set up. Resolved once at startup by ResolveFullScreenMode().
 enum class FullScreenMode
@@ -270,6 +380,12 @@ enum class FullScreenMode
 };
 
 static FullScreenMode s_fullScreenMode = FullScreenMode::Borderless;
+// Mode reserved for the exclusive paths by ResolveFullScreenMode() and applied by
+// ApplyFullScreenMode(). Kept separate from the window because the window does not exist yet when
+// the flavour is resolved, and because applying the mode and entering fullscreen is one call in the
+// platform layer.
+static OSD::Platform::DisplayMode s_exclusiveMode{};
+static bool s_haveExclusiveMode = false;
 
 /*
  * Position and size of rectangular region within OpenGL display to render to.
@@ -286,7 +402,9 @@ static CRTcolor CRTcolors = CRTcolor::None; // default to no gamma/color adaptio
 /*
  * Crosshair stuff
  */
+#if !defined(SUPERMODEL_PURE_VULKAN)
 static CCrosshair* s_crosshair = nullptr;
+#endif
 
 /*
  * RaiseProcessPriority():
@@ -344,13 +462,18 @@ static void RaiseProcessPriority()
  * loop stops depending on the message pump, i.e. runs on its own thread. Do not assume this hook
  * covers every configuration.
  */
-// The hook itself is Windows-only. UINT_PTR, HWND, the WM_* messages and SetTimer()/KillTimer() are
-// Win32 types and constants that do not exist under SDL's X11, Wayland or Cocoa back ends, so the
-// declarations have to sit inside the guard as well as the code that uses them. Guarding only the
-// body of SetModalLoopHook() - as an earlier revision did - left the declarations at file scope and
-// made a GCC/Clang build fail with "'UINT_PTR' does not name a type" before it ever reached the
-// function. Everything Windows-specific is now inside one block, and other targets compile a stub.
-#ifdef _WIN32
+// The hook itself is Windows-only, and so is the SDL2 path that needs it: SDL2's own message pump is
+// bypassed when DirectInput pumps Win32 messages itself. UINT_PTR, HWND, the WM_* messages and
+// SetTimer()/KillTimer() are Win32 types and constants that do not exist under SDL's X11, Wayland or
+// Cocoa back ends, so the declarations have to sit inside the guard as well as the code that uses
+// them. Guarding only the body of SetModalLoopHook() - as an earlier revision did - left the
+// declarations at file scope and made a GCC/Clang build fail with "'UINT_PTR' does not name a type"
+// before it ever reached the function. Everything Windows-specific is now inside one block, and
+// other targets compile a stub.
+//
+// The SDL3 target pauses instead, which is what dragging a window should do anyway: see
+// ModalLoopPauseHook below for why running frames is not an option there.
+#if defined(_WIN32) && defined(SUPERMODEL_PLATFORM_SDL2)
 static IEmulator* s_modalEmulator = nullptr;
 // Must not collide with SDL's own modal-loop timer, which uses a pointer as its id.
 static const UINT_PTR kModalFrameTimerId = 0x5F4D;
@@ -383,16 +506,105 @@ static void SDLCALL ModalLoopMessageHook(void* /*userdata*/, void* hWnd, unsigne
 }
 #endif  // _WIN32
 
+#if defined(_WIN32) && defined(SUPERMODEL_PLATFORM_SDL3)
+static IEmulator* s_moveLoopEmulator = nullptr;
+static bool* s_moveLoopPaused = nullptr;
+// Set only while this hook is the reason the game is paused, so a pause the player asked for is
+// never undone by the end of a drag.
+static bool s_moveLoopSuspended = false;
+
+/*
+ * Pausing while the window is dragged or resized.
+ *
+ * Windows runs its own modal loop for a title-bar drag, entered from inside DispatchMessage. The
+ * frame loop is parked there for as long as the drag lasts, so no frames are emulated - but the
+ * sound board thread is woken by the audio device, keeps producing in real time, and the ring buffer
+ * under-runs over and over. Under-runs replay from where writing stopped, so a drag turns the audio
+ * into a short loop.
+ *
+ * Emulating frames from the hook (the SDL2 route above) is not an option here: this build's frame
+ * loop pumps SDL's event queue, and re-entering SDL's pump from inside its own modal loop is exactly
+ * the situation SDL_processing_messages exists to prevent. Pausing is both safer and what the player
+ * expects from grabbing the title bar.
+ *
+ * Entering the loop happens before any frame is in progress - the main thread is in the event pump -
+ * so stopping the board threads here is the same operation Alt+P performs, just triggered by the OS.
+ */
+static void OnWindowModalLoop(bool entered)
+{
+  if (s_moveLoopEmulator == nullptr || s_moveLoopPaused == nullptr)
+    return;
+
+  if (entered)
+  {
+    // Already paused by Alt+P or by the overlay: nothing to stop, and resuming later must not
+    // override the player's decision.
+    if (s_moveLoopSuspended || *s_moveLoopPaused)
+      return;
+
+    s_moveLoopSuspended = true;
+    *s_moveLoopPaused = true;
+    s_moveLoopEmulator->PauseThreads();
+    SetAudioEnabled(false);
+    // The frame loop is parked in the modal loop, so nothing else can report this; without the line a
+    // stalled sound buffer during a drag looks like an audio bug rather than the intended pause.
+    InfoLog("Window: drag/resize started; pausing the emulator until it ends.");
+  }
+  else if (s_moveLoopSuspended)
+  {
+    s_moveLoopSuspended = false;
+    *s_moveLoopPaused = false;
+    // The device queued whatever was left before the pause; dropping it keeps the resume in step
+    // with the picture instead of replaying the tail of the last buffer.
+    FlushAudioBuffer();
+    s_moveLoopEmulator->ResumeThreads();
+    SetAudioEnabled(true);
+    InfoLog("Window: drag/resize finished; resuming.");
+  }
+}
+
+static bool SDLCALL ModalLoopPauseHook(void* /*userdata*/, MSG* msg)
+{
+  switch (msg->message)
+  {
+  case WM_ENTERSIZEMOVE:
+  case WM_ENTERMENULOOP:
+    OnWindowModalLoop(true);
+    break;
+
+  case WM_EXITSIZEMOVE:
+  case WM_EXITMENULOOP:
+    OnWindowModalLoop(false);
+    break;
+
+  default:
+    break;
+  }
+
+  // SDL3 reads true as "not handled, carry on": anything else swallows the message, and returning
+  // false for WM_ENTERSIZEMOVE stops SDL from starting its own live-resize timer.
+  return true;
+}
+#endif  // _WIN32
+
 // No-op away from Windows: there is no modal loop to keep alive there, because the frame loop is not
 // parked inside a Win32 DispatchMessage() call. Kept unconditional so the call sites stay free of
 // #ifdef noise.
-static void SetModalLoopHook(IEmulator* emulator)
+static void SetModalLoopHook(IEmulator* emulator, bool* pausedFlag)
 {
-#ifdef _WIN32
+#if defined(_WIN32) && defined(SUPERMODEL_PLATFORM_SDL2)
+  (void)pausedFlag;
   s_modalEmulator = emulator;
   SDL_SetWindowsMessageHook(emulator != nullptr ? ModalLoopMessageHook : nullptr, nullptr);
+#elif defined(_WIN32) && defined(SUPERMODEL_PLATFORM_SDL3)
+  s_moveLoopEmulator = emulator;
+  s_moveLoopPaused = emulator != nullptr ? pausedFlag : nullptr;
+  if (emulator == nullptr)
+    s_moveLoopSuspended = false;
+  SDL_SetWindowsMessageHook(emulator != nullptr ? ModalLoopPauseHook : nullptr, nullptr);
 #else
   (void)emulator;
+  (void)pausedFlag;
 #endif
 }
 
@@ -497,11 +709,32 @@ void SetConsoleVisible(bool show)
   ShowConsoleWindow(show);
 }
 
+/*
+ * Whether the 3D scene is rasterised at the Model 3's native 496x384 instead of the visible picture's
+ * resolution.
+ *
+ * Vulkan only, and read only to decide how the picture rectangle is computed and what the settings
+ * window reports. The key does not exist in the OpenGL-only build's defaults, and reading it there
+ * would create an empty node that the ini writer would then persist into the shared file.
+ *
+ * It takes precedence over IntegerScale: both decide how the picture is scaled, and running them at
+ * once means one of the two silently does nothing. The settings window greys IntegerScale out while
+ * this is on, so the precedence is visible where it matters.
+ */
+static bool LowResolutionRenderingEnabled()
+{
+#if defined(SUPERMODEL_OPENGL_ONLY)
+  return false;
+#else
+  return s_runtime_config["InternalResolution"].ValueAsDefault<int>(0) != 0;
+#endif
+}
+
 static void CalcScreenGeometry(unsigned *xOffsetPtr, unsigned *yOffsetPtr, unsigned *xResPtr, unsigned *yResPtr, unsigned *totalXResPtr, unsigned *totalYResPtr, bool keepAspectRatio)
 {
   int actualWidth = 0;
   int actualHeight = 0;
-  SDL_GetWindowSize(s_window, &actualWidth, &actualHeight);
+  OSD::Platform::GetWindowSize(s_platformWindow, &actualWidth, &actualHeight);
   *totalXResPtr = (unsigned)actualWidth;
   *totalYResPtr = (unsigned)actualHeight;
 
@@ -558,7 +791,15 @@ static void CalcScreenGeometry(unsigned *xOffsetPtr, unsigned *yOffsetPtr, unsig
     // the window is already the requested size (fit == 1).
     if (xResF > 0.0f && yResF > 0.0f && actualWidth > 0 && actualHeight > 0)
     {
-      if (s_runtime_config["IntegerScale"].ValueAsDefault<bool>(false))
+      /*
+       * Low-resolution rendering leaves the ordinary 4:3 fit alone.
+       *
+       * The picture stays the same size as it is without the option - what shrinks is the resolution
+       * the 3D scene is rasterised at, which is upscaled onto this rectangle (see CVulkan2D). An
+       * integer multiple of the rectangle is neither needed nor useful there: the picture would get
+       * smaller while the 3D cost stayed the same, which is the opposite of what the option is for.
+       */
+      if (!LowResolutionRenderingEnabled() && s_runtime_config["IntegerScale"].ValueAsDefault<bool>(false))
       {
         // Whole-number magnification, with the leftover screen area left as black bars.
         //
@@ -575,6 +816,25 @@ static void CalcScreenGeometry(unsigned *xOffsetPtr, unsigned *yOffsetPtr, unsig
         float nativeFitY = float(panelHeight) / 384.0f;
         if (nativeFitY < nativeFit)
           nativeFit = nativeFitY;
+
+        /*
+         * The window is the surface actually being rendered into, and it can be smaller than the
+         * panel's integer area: a 1920x1080 window on a 4K panel picks multiple 5 from the panel
+         * alone, which is 2480x1920. The clamps at the end of this function then shrank width and
+         * height independently - 1920x1080 - which turned the 4:3 picture into 16:9 instead of
+         * leaving bars. Taking the smaller of the panel's and the window's multiple keeps the area
+         * inside the window with its aspect intact.
+         *
+         * It cannot regress the mixed-scaling case the note above is about: there the panel's
+         * reported size is *smaller* than the window's, so the panel's multiple is already the
+         * smaller one and nothing changes.
+         */
+        float windowFit = float(actualWidth) / 496.0f;
+        const float windowFitY = float(actualHeight) / 384.0f;
+        if (windowFitY < windowFit)
+          windowFit = windowFitY;
+        if (windowFit < nativeFit)
+          nativeFit = windowFit;
         int multiple = (int)nativeFit;
         if (multiple < 1)
           multiple = 1;
@@ -641,6 +901,7 @@ static void CalcScreenGeometry(unsigned *xOffsetPtr, unsigned *yOffsetPtr, unsig
   *yResPtr = (unsigned)viewHeight;
 }
 
+#if !defined(SUPERMODEL_PURE_VULKAN)
 static Result SetGLGeometry(unsigned *xOffsetPtr, unsigned *yOffsetPtr, unsigned *xResPtr, unsigned *yResPtr, unsigned *totalXResPtr, unsigned *totalYResPtr, bool keepAspectRatio)
 {
   CalcScreenGeometry(xOffsetPtr, yOffsetPtr, xResPtr, yResPtr, totalXResPtr, totalYResPtr, keepAspectRatio);
@@ -657,7 +918,7 @@ static Result SetGLGeometry(unsigned *xOffsetPtr, unsigned *yOffsetPtr, unsigned
   for (int i = 0; i < 3; i++)
   {
     glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
-    SDL_GL_SwapWindow(s_window);
+    OSD::Platform::SwapWindow(s_platformWindow);
   }
 
   UINT32 correction = (UINT32)(((*yResPtr / 384.) * 2.) + 0.5); // due to the 2D layer compensation (2 pixels off)
@@ -675,6 +936,7 @@ static Result SetGLGeometry(unsigned *xOffsetPtr, unsigned *yOffsetPtr, unsigned
   }
   return Result::OKAY;
 }
+#endif
 
 // static void GLAPIENTRY DebugCallback(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar* message, const void* userParam)
 // {
@@ -711,21 +973,29 @@ static Result SetGLGeometry(unsigned *xOffsetPtr, unsigned *yOffsetPtr, unsigned
 // assumption - see the note on ClassifyCadence() in StatsOsd.cpp - and the display's own on-screen
 // refresh readout is the only authority.
 //
-// Either route also sets the frame pacer to the arcade rate so the game runs at the speed the
-// panel scans. Scripts/ArcadeDisplay.ps1 enumerates the available modes, can save/restore the
-// desktop mode and can launch the emulator with these options already set.
+// Either route also sets RefreshRate to the arcade rate, which is what the original OpenGL loop
+// paces from. The Vulkan loop paces from RefreshRateMode instead, so there the presentation
+// cadence is whatever the user chose and this route only decides how the display is driven.
+// Scripts/ArcadeDisplay.ps1 enumerates the available modes, can save/restore the desktop mode
+// and can launch the emulator with these options already set.
 //
 // Looks for a display mode at (roughly) the given refresh rate, preferring the exact render
 // resolution, then the desktop resolution, then anything on the output. SDL reports integer
 // refresh rates, so a custom 57.524 Hz timing shows up as 57 or 58; both are accepted.
 //
-// displayIndex is an SDL display index, not the \\.\DISPLAYn number - see GetDisplays() for the
-// mapping between the two. Every SDL call in here is per-display, so which monitor is being asked
+// displayIndex is a platform display index, not the \\.\DISPLAYn number - see GetDisplays() for the
+// mapping between the two. Every mode query in here is per-display, so which monitor is being asked
 // matters: a custom 57.524 Hz timing is a property of one output's mode list, and asking the wrong
 // one reports the mode as missing when it exists.
-static bool FindArcadeDisplayModeImpl(float refreshRateHz, int displayIndex, SDL_DisplayMode& best, bool quiet)
+//
+// The bit-depth test the SDL2 version had (SDL_BITSPERPIXEL) is gone: Platform::DisplayMode carries
+// geometry and rate only, and both back ends already list the fullscreen-capable formats, which are
+// all 24 or 32 bpp in practice.
+static bool FindArcadeDisplayModeImpl(float refreshRateHz, int displayIndex, OSD::Platform::DisplayMode& best, bool quiet)
 {
-    const int display_mode_count = SDL_GetNumDisplayModes(displayIndex);
+    const OSD::Platform::DisplayId display = OSD::Platform::GetDisplayIdForIndex(displayIndex);
+
+    const int display_mode_count = OSD::Platform::GetDisplayModeCount(display);
     if (display_mode_count < 1) {
         if (!quiet)
             InfoLog("Exclusive fullscreen: no display modes reported.");
@@ -734,17 +1004,16 @@ static bool FindArcadeDisplayModeImpl(float refreshRateHz, int displayIndex, SDL
 
     const int wantedMilliHz = (int)(refreshRateHz * 1000.0f + 0.5f);
 
-    auto isArcadeRate = [&](const SDL_DisplayMode& mode, int& delta) {
-        if (SDL_BITSPERPIXEL(mode.format) < 24)
+    auto isArcadeRate = [&](const OSD::Platform::DisplayMode& mode, int& delta) {
+        const int rate = (int)(mode.refreshHz + 0.5f);
+        if (rate != 57 && rate != 58)
             return false;
-        if (mode.refresh_rate != 57 && mode.refresh_rate != 58)
-            return false;
-        delta = std::abs(mode.refresh_rate * 1000 - wantedMilliHz);
+        delta = std::abs(rate * 1000 - wantedMilliHz);
         return true;
     };
 
-    SDL_DisplayMode desktop{};
-    const bool haveDesktop = SDL_GetDesktopDisplayMode(displayIndex, &desktop) == 0;
+    OSD::Platform::DisplayMode desktop{};
+    const bool haveDesktop = OSD::Platform::GetDesktopDisplayMode(display, &desktop);
 
     bool haveBest = false;
     int bestDelta = 1 << 30;
@@ -756,16 +1025,16 @@ static bool FindArcadeDisplayModeImpl(float refreshRateHz, int displayIndex, SDL
     for (int pass = 0; pass < 3 && !haveBest; pass++) {
         for (int i = 0; i < display_mode_count; ++i) {
 
-            SDL_DisplayMode mode;
+            OSD::Platform::DisplayMode mode{};
 
-            if (SDL_GetDisplayMode(displayIndex, i, &mode) != 0)
+            if (!OSD::Platform::GetDisplayMode(display, i, &mode))
                 continue;
 
             // Collect the rates offered at the render resolution, for the failure message.
-            if (pass == 0 && (unsigned)mode.w == totalXRes && (unsigned)mode.h == totalYRes) {
+            if (pass == 0 && (unsigned)mode.width == totalXRes && (unsigned)mode.height == totalYRes) {
                 if (!availableRates.empty())
                     availableRates.append(", ");
-                availableRates.append(std::to_string(mode.refresh_rate));
+                availableRates.append(std::to_string((int)(mode.refreshHz + 0.5f)));
             }
 
             int delta = 0;
@@ -773,11 +1042,11 @@ static bool FindArcadeDisplayModeImpl(float refreshRateHz, int displayIndex, SDL
                 continue;
 
             if (pass == 0) {
-                if ((unsigned)mode.w != totalXRes || (unsigned)mode.h != totalYRes)
+                if ((unsigned)mode.width != totalXRes || (unsigned)mode.height != totalYRes)
                     continue;
             }
             else if (pass == 1) {
-                if (!haveDesktop || mode.w != desktop.w || mode.h != desktop.h)
+                if (!haveDesktop || mode.width != desktop.width || mode.height != desktop.height)
                     continue;
             }
 
@@ -796,7 +1065,7 @@ static bool FindArcadeDisplayModeImpl(float refreshRateHz, int displayIndex, SDL
     return haveBest;
 }
 
-static bool FindArcadeDisplayMode(float refreshRateHz, int displayIndex, SDL_DisplayMode& best)
+static bool FindArcadeDisplayMode(float refreshRateHz, int displayIndex, OSD::Platform::DisplayMode& best)
 {
     return FindArcadeDisplayModeImpl(refreshRateHz, displayIndex, best, false);
 }
@@ -810,7 +1079,7 @@ static bool FindArcadeDisplayMode(float refreshRateHz, int displayIndex, SDL_Dis
  */
 bool HasArcadeDisplayMode(float refreshRateHz)
 {
-    SDL_DisplayMode mode{};
+    OSD::Platform::DisplayMode mode{};
     return FindArcadeDisplayModeImpl(refreshRateHz, GetConfiguredDisplaySdlIndex(), mode, true);
 }
 
@@ -855,7 +1124,7 @@ static std::string NarrowFromWide(const wchar_t* text)
 
 struct DisplayNumberQuery
 {
-    const SDL_Rect* rect;
+    const OSD::Platform::Rect* rect;
     int number;
     bool primary;               // MONITORINFOF_PRIMARY on the monitor that matched
     std::string deviceName;     // "\\\\.\\DISPLAYn", for the per-display mode query below
@@ -907,7 +1176,7 @@ static BOOL CALLBACK FindDisplayNumberProc(HMONITOR monitor, HDC, LPRECT, LPARAM
 
     const RECT& r = info.rcMonitor;
     if (query->rect->x != r.left || query->rect->y != r.top ||
-        query->rect->w != (r.right - r.left) || query->rect->h != (r.bottom - r.top))
+        query->rect->width != (r.right - r.left) || query->rect->height != (r.bottom - r.top))
         return TRUE;
 
     // "\\.\DISPLAY12" -> 12. The prefix carries no digits, so the digits in the name are the number.
@@ -926,7 +1195,7 @@ static BOOL CALLBACK FindDisplayNumberProc(HMONITOR monitor, HDC, LPRECT, LPARAM
     return FALSE;           // found it; stop enumerating
 }
 
-static DisplayNumberQuery WindowsDisplayInfoForRect(const SDL_Rect& rect)
+static DisplayNumberQuery WindowsDisplayInfoForRect(const OSD::Platform::Rect& rect)
 {
     DisplayNumberQuery query{ &rect, 0, false, std::string(), 0, 0 };
     EnumDisplayMonitors(nullptr, nullptr, FindDisplayNumberProc, reinterpret_cast<LPARAM>(&query));
@@ -938,7 +1207,7 @@ static DisplayNumberQuery WindowsDisplayInfoForRect(const SDL_Rect& rect)
 const std::vector<DisplayInfo>& GetDisplays()
 {
     static std::vector<DisplayInfo> cache;
-    static Uint32 cacheTick = 0;
+    static OSD::Platform::Nanoseconds cacheTick = 0;
 
     /*
      * Rebuilt on the same two-second cadence as the EDID info, and for a related reason: the mode
@@ -949,11 +1218,11 @@ const std::vector<DisplayInfo>& GetDisplays()
      * An empty result is not cached, because the usual cause is that SDL's video subsystem is not
      * up yet rather than that the machine has no outputs.
      */
-    const Uint32 now = SDL_GetTicks();
-    if (!cache.empty() && (now - cacheTick) < 2000)
+    const OSD::Platform::Nanoseconds now = OSD::Platform::Now();
+    if (!cache.empty() && (now - cacheTick) < 2000000000LL)
         return cache;
 
-    const int count = SDL_GetNumVideoDisplays();
+    const int count = OSD::Platform::GetDisplayCount();
     if (count < 1)
         return cache;
 
@@ -968,36 +1237,34 @@ const std::vector<DisplayInfo>& GetDisplays()
 
     for (int i = 0; i < count; i++)
     {
+        OSD::Platform::DisplayInfo platform{};
+        if (!OSD::Platform::GetDisplayInfo(i, &platform))
+            continue;
+
         DisplayInfo info;
         info.sdlIndex = i;
+        info.name = (platform.name != nullptr && *platform.name != '\0') ? platform.name : ("Display " + std::to_string(i + 1));
 
-        const char* name = SDL_GetDisplayName(i);
-        info.name = (name != nullptr && *name != '\0') ? name : ("Display " + std::to_string(i + 1));
-
-        SDL_Rect bounds{};
-        if (SDL_GetDisplayBounds(i, &bounds) == 0)
-        {
-            info.width = bounds.w;
-            info.height = bounds.h;
+        info.width = platform.bounds.width;
+        info.height = platform.bounds.height;
 #ifdef _WIN32
-            const DisplayNumberQuery match = WindowsDisplayInfoForRect(bounds);
-            info.number = match.number;
-            info.primary = match.primary;
-            info.deviceName = match.deviceName;
-            info.panelWidth = match.panelWidth;
-            info.panelHeight = match.panelHeight;
+        const DisplayNumberQuery match = WindowsDisplayInfoForRect(platform.bounds);
+        info.number = match.number;
+        info.primary = match.primary;
+        info.deviceName = match.deviceName;
+        info.panelWidth = match.panelWidth;
+        info.panelHeight = match.panelHeight;
 #else
-            // SDL orders the system's main display first, and documents index 0 as the primary; there
-            // is no per-display flag to ask for outside Windows.
-            info.primary = (i == 0);
+        // SDL orders the system's main display first and documents index 0 as the primary; the
+        // platform layer reads the real flag where the backend exposes one.
+        info.primary = platform.primary;
 #endif
-        }
 
-        SDL_DisplayMode desktop{};
-        if (SDL_GetDesktopDisplayMode(i, &desktop) == 0)
-            info.desktopHz = desktop.refresh_rate;
+        OSD::Platform::DisplayMode desktop{};
+        if (OSD::Platform::GetDesktopDisplayMode(platform.id, &desktop))
+            info.desktopHz = (int)(desktop.refreshHz + 0.5f);
 
-        SDL_DisplayMode arcade{};
+        OSD::Platform::DisplayMode arcade{};
         info.hasArcadeMode = FindArcadeDisplayModeImpl(seekRateHz, i, arcade, true);
 
         if (info.number == 0)
@@ -1144,11 +1411,12 @@ static bool GetConfiguredFullscreenSize(int& width, int& height)
         }
     }
 
-    SDL_DisplayMode desktop{};
-    if (SDL_GetDesktopDisplayMode(displayIndex, &desktop) == 0 && desktop.w > 0 && desktop.h > 0)
+    OSD::Platform::DisplayMode desktop{};
+    if (OSD::Platform::GetDesktopDisplayMode(OSD::Platform::GetDisplayIdForIndex(displayIndex), &desktop) &&
+        desktop.width > 0 && desktop.height > 0)
     {
-        width = desktop.w;
-        height = desktop.h;
+        width = desktop.width;
+        height = desktop.height;
         return true;
     }
 
@@ -1199,8 +1467,11 @@ IntegerScaleInfo GetIntegerScaleInfo()
         multiple = 1;
 
     info.valid = true;
+    // Low-resolution rendering wins: IntegerScale is ignored while it is on, so reporting it as
+    // active would describe a rectangle the geometry code did not use.
     info.active = s_runtime_config["IntegerScale"].ValueAsDefault<bool>(false)
-        && !s_runtime_config["Stretch"].ValueAsDefault<bool>(false);
+        && !s_runtime_config["Stretch"].ValueAsDefault<bool>(false)
+        && !LowResolutionRenderingEnabled();
     info.multiple = multiple;
     info.visibleWidth = 496 * multiple;
     info.visibleHeight = 384 * multiple;
@@ -1628,6 +1899,7 @@ DisplayRateSupport ConfiguredDisplayRateSupport(float hz)
  * NOTE: keepAspectRatio should always be true. It has not yet been tested with
  * the wide screen hack.
  */
+#if !defined(SUPERMODEL_PURE_VULKAN)
 static Result CreateGLScreen(bool coreContext, const std::string &caption, bool focusWindow, unsigned *xOffsetPtr, unsigned *yOffsetPtr, unsigned *xResPtr, unsigned *yResPtr, unsigned *totalXResPtr, unsigned *totalYResPtr, bool keepAspectRatio, bool fullScreen)
 // The quadRendering parameter is gone: it existed only to decide between an OpenGL 4.5 and a 4.1
 // context, and since the quad shader no longer needs 4.30 features there is nothing to decide.
@@ -1638,34 +1910,33 @@ static Result CreateGLScreen(bool coreContext, const std::string &caption, bool 
   // Call only once per program session (this is because of issues with
   // DirectInput when the window is destroyed and a new one created). Use
   // ResizeGLScreen() to change resolutions instead.
-  if (s_window != nullptr)
+  if (s_platformWindow != nullptr)
   {
     return ErrorLog("Internal error: CreateGLScreen() called more than once");
   }
 
   // Initialize video subsystem
-  if (SDL_Init(SDL_INIT_VIDEO) != 0)
-    return ErrorLog("Unable to initialize SDL video subsystem: %s\n", SDL_GetError());
+  if (!OSD::Platform::Initialize(OSD::Platform::Subsystem_Video))
+    return ErrorLog("Unable to initialize SDL video subsystem: %s\n", OSD::Platform::GetError());
 
   // Important GL attributes
-  SDL_GL_SetAttribute(SDL_GL_RED_SIZE,8);
-  SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE,8);
-  SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE,8);
+  OSD::Platform::GLAttributes attributes;
+  attributes.redSize = 8;
+  attributes.greenSize = 8;
+  attributes.blueSize = 8;
   if(s_runtime_config["New3DEngine"].ValueAsDefault<bool>(true))
   {
-    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE,0);
-    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE,0);
+    attributes.depthSize = 0;
+    attributes.stencilSize = 0;
   }
   else
   {
-    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE,24);
-    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE,8);
+    attributes.depthSize = 24;
+    attributes.stencilSize = 8;
   }
-  SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER,1);
+  attributes.doubleBuffer = true;
 
   if (coreContext) {
-      SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-
       /*
        * 4.1, unconditionally.
        *
@@ -1678,44 +1949,57 @@ static Result CreateGLScreen(bool coreContext, const std::string &caption, bool 
        * and asking for 4.5 would shut out GPUs that are perfectly capable of running the emulator.
        * It also makes the "OpenGL 4.1" figure in README.txt true rather than aspirational.
        */
-      SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
-      SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
+      attributes.coreProfile = true;
+      attributes.majorVersion = 4;
+      attributes.minorVersion = 1;
   }
+  else
+  {
+      attributes.coreProfile = false;
+  }
+  OSD::Platform::SetGLAttributes(attributes);
 
   // Created on the configured output rather than on the primary one. The window's display is what
   // the fullscreen calls act on, so for the exclusive modes this has to be decided here: resolving
   // the flavour afterwards would otherwise apply a custom timing to whichever monitor the window
-  // landed on, which with SDL_WINDOWPOS_CENTERED is always the primary display.
+  // landed on, which with a centred position is always the primary display.
   const int displayIndex = GetConfiguredDisplaySdlIndex();
 
   // Set video mode
-  s_window = SDL_CreateWindow(caption.c_str(), SDL_WINDOWPOS_CENTERED_DISPLAY(displayIndex), SDL_WINDOWPOS_CENTERED_DISPLAY(displayIndex), *totalXResPtr, *totalYResPtr, SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | (fullScreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0));
-  if (nullptr == s_window)
+  OSD::Platform::WindowDesc desc;
+  desc.title = caption.c_str();
+  desc.width = (int)*totalXResPtr;
+  desc.height = (int)*totalYResPtr;
+  desc.display = OSD::Platform::GetDisplayIdForIndex(displayIndex);
+  desc.fullscreenDesktop = fullScreen;
+  // Hidden until the first frame; see the note on s_windowRevealPending.
+  desc.flags = OSD::Platform::WindowFlag_OpenGL | OSD::Platform::WindowFlag_Hidden;
+
+  s_platformWindow = OSD::Platform::CreatePlatformWindow(desc);
+  if (nullptr == s_platformWindow)
   {
-    ErrorLog("Unable to create an OpenGL display: %s\n", SDL_GetError());
+    ErrorLog("Unable to create an OpenGL display: %s\n", OSD::Platform::GetError());
     return Result::FAIL;
   }
-  SetWindowIcon(s_window);
+  SetWindowIcon(s_platformWindow);
 
-  if (focusWindow)
-  {
-    SDL_RaiseWindow(s_window);
-  }
+  // Deferred to the first present, together with showing the window.
+  s_windowRevealPending = true;
+  s_windowRevealRaise = focusWindow;
 
   // Create OpenGL context
-  SDL_GLContext context = SDL_GL_CreateContext(s_window);
-  if (nullptr == context)
+  s_glContext = OSD::Platform::CreateGLContext(s_platformWindow);
+  if (nullptr == s_glContext)
   {
-    ErrorLog("Unable to create OpenGL context: %s\n", SDL_GetError());
+    ErrorLog("Unable to create OpenGL context: %s\n", OSD::Platform::GetError());
     return Result::FAIL;
   }
-  s_glContext = context;
 
   // Set vsync
-  SDL_GL_SetSwapInterval(s_runtime_config["VSync"].ValueAsDefault<bool>(false) ? 1 : 0);
+  OSD::Platform::SetGLSwapInterval(s_runtime_config["VSync"].ValueAsDefault<bool>(false) ? 1 : 0);
 
   // Set the context as the current window context
-  SDL_GL_MakeCurrent(s_window, context);
+  OSD::Platform::MakeGLContextCurrent(s_platformWindow, s_glContext);
 
   // Initialize GLEW, allowing us to use features beyond OpenGL 1.2
   err = glewInit();
@@ -1753,58 +2037,87 @@ static Result CreateGLScreen(bool coreContext, const std::string &caption, bool 
 
   return SetGLGeometry(xOffsetPtr, yOffsetPtr, xResPtr, yResPtr, totalXResPtr, totalYResPtr, keepAspectRatio);
 }
+#endif
 
 static void DestroyGLScreen()
 {
+  // A session that ends before it ever presented (a load failure, say) leaves the flag set; clearing
+  // it here keeps the next window from inheriting it.
+  s_windowRevealPending = false;
+  s_windowRevealRaise = false;
+#ifdef _WIN32
+  // The splash shown while a deferred state was pending is owned by this window; hiding it here as
+  // well covers the session ending (or failing) before the state was ever applied.
+  OSD::Windows::HideStartupSplash();
+#endif
+#if !defined(SUPERMODEL_OPENGL_ONLY)
   if (s_vkContext != nullptr)
   {
     delete s_vkContext;
     s_vkContext = nullptr;
-    if (s_window != nullptr)
-      SDL_DestroyWindow(s_window);
-    s_window = nullptr;
+    if (s_platformWindow != nullptr)
+    {
+      OSD::Platform::DestroyWindow(s_platformWindow);
+      s_platformWindow = nullptr;
+    }
     return;
   }
-  if (s_window != nullptr)
+#endif
+  if (s_platformWindow != nullptr)
   {
+#if !defined(SUPERMODEL_PURE_VULKAN)
     // Delete the context belonging to the game window, not whichever context happens to be
     // current: the settings GUI keeps its own window and GL context alive across sessions.
     if (s_glContext != nullptr)
     {
-      SDL_GL_DeleteContext(s_glContext);
+      OSD::Platform::DestroyGLContext(s_glContext);
       s_glContext = nullptr;
     }
-    SDL_DestroyWindow(s_window);
-    s_window = nullptr;
+#endif
+    OSD::Platform::DestroyWindow(s_platformWindow);
+    s_platformWindow = nullptr;
   }
 }
 
+#if !defined(SUPERMODEL_OPENGL_ONLY)
 static Result CreateVulkanScreen(const std::string &caption, bool focusWindow, unsigned *xOffsetPtr, unsigned *yOffsetPtr, unsigned *xResPtr, unsigned *yResPtr, unsigned *totalXResPtr, unsigned *totalYResPtr, bool keepAspectRatio, bool fullScreen)
 {
-  if (s_window != nullptr)
+  if (s_platformWindow != nullptr)
     return ErrorLog("Internal error: CreateVulkanScreen() called more than once");
-  if (SDL_Init(SDL_INIT_VIDEO) != 0)
-    return ErrorLog("Unable to initialize SDL video subsystem: %s\n", SDL_GetError());
+  if (!OSD::Platform::Initialize(OSD::Platform::Subsystem_Video))
+    return ErrorLog("Unable to initialize SDL video subsystem: %s\n", OSD::Platform::GetError());
 
   // Same reasoning as CreateGLScreen(): the window has to be on the configured output before any
   // fullscreen mode is applied, because the mode applies to the window's display.
   const int displayIndex = GetConfiguredDisplaySdlIndex();
-  s_window = SDL_CreateWindow(caption.c_str(), SDL_WINDOWPOS_CENTERED_DISPLAY(displayIndex), SDL_WINDOWPOS_CENTERED_DISPLAY(displayIndex), *totalXResPtr, *totalYResPtr, SDL_WINDOW_VULKAN | SDL_WINDOW_SHOWN | (fullScreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0));
-  if (nullptr == s_window)
+
+  OSD::Platform::WindowDesc desc;
+  desc.title = caption.c_str();
+  desc.width = (int)*totalXResPtr;
+  desc.height = (int)*totalYResPtr;
+  desc.display = OSD::Platform::GetDisplayIdForIndex(displayIndex);
+  desc.fullscreenDesktop = fullScreen;
+  // Hidden until the first frame; see the note on s_windowRevealPending.
+  desc.flags = OSD::Platform::WindowFlag_Vulkan | OSD::Platform::WindowFlag_Hidden;
+
+  s_platformWindow = OSD::Platform::CreatePlatformWindow(desc);
+  if (nullptr == s_platformWindow)
   {
-    ErrorLog("Unable to create a Vulkan display: %s\n", SDL_GetError());
+    ErrorLog("Unable to create a Vulkan display: %s\n", OSD::Platform::GetError());
     return Result::FAIL;
   }
-  SetWindowIcon(s_window);
-  if (focusWindow)
-    SDL_RaiseWindow(s_window);
+  SetWindowIcon(s_platformWindow);
+  // Deferred to the first present, together with showing the window.
+  s_windowRevealPending = true;
+  s_windowRevealRaise = focusWindow;
 
   s_vkContext = new Vulkan3D::CVulkanContext();
-  if (Result::OKAY != s_vkContext->InitDevice(s_window, s_runtime_config["VkValidation"].ValueAsDefault<bool>(false), s_runtime_config["VSync"].ValueAsDefault<bool>(false), s_runtime_config["VulkanDevice"].ValueAsDefault<std::string>("")))
+  if (Result::OKAY != s_vkContext->InitDevice(s_platformWindow, s_runtime_config["VkValidation"].ValueAsDefault<bool>(false), s_runtime_config["VSync"].ValueAsDefault<bool>(false), s_runtime_config["VulkanDevice"].ValueAsDefault<std::string>("")))
     return Result::FAIL;
   CalcScreenGeometry(xOffsetPtr, yOffsetPtr, xResPtr, yResPtr, totalXResPtr, totalYResPtr, keepAspectRatio);
   return Result::OKAY;
 }
+#endif
 
 // Chooses the fullscreen flavour actually used. Exclusive fullscreen is only entered when a
 // 57/58 Hz mode was successfully prepared by SetFullScreenRefreshRate(); everything else keeps
@@ -1858,6 +2171,11 @@ static FullScreenMode ResolveFullScreenMode()
     const float refreshRateHz = s_runtime_config["ExclusiveRefreshRate"].ValueAsDefault<float>(0.0f);
     const bool wantExclusive = s_runtime_config["ExclusiveFullscreen"].ValueAsDefault<bool>(false);
 
+    // A session may leave without entering the mode it resolved (the driver refusing the switch is
+    // the normal case). Clearing here means a later session can never apply the previous one's mode.
+    s_exclusiveMode = OSD::Platform::DisplayMode();
+    s_haveExclusiveMode = false;
+
     // Which output this session drives. Resolved once here and reported in the log, because every
     // check below is a property of one monitor's mode list rather than of "the display" - a custom
     // 57.524 Hz timing belongs to the output it was created for, and looking for it on the wrong one
@@ -1875,11 +2193,10 @@ static FullScreenMode ResolveFullScreenMode()
     // speed the panel will scan at and the two are 1:1.
     //
     // The G-SYNC/VRR path also ends up in exclusive fullscreen, and there the panel follows whatever
-    // rate is presented. Pacing at 57.524 Hz is the arcade-accurate choice and needs no custom mode,
-    // so it is applied automatically when the configured display's timing range contains the rate.
-    // The stored RefreshRate preference is left untouched: switching back to borderless restores it.
-    // A display whose range excludes the rate, or cannot be read, keeps the configured rate and the
-    // log says which case it was.
+    // rate is presented. RefreshRate is set to 57.5242 so the OpenGL loop runs at the arcade rate;
+    // the Vulkan loop takes its cadence from RefreshRateMode, so the user's choice there wins and
+    // this block only makes the display follow it. The stored RefreshRate preference is left
+    // untouched: switching back to borderless restores it.
     //
     // Note what is deliberately *not* derived from this setting: the emulated CPU's per-frame cycle
     // budget is fixed at the arcade's 57.524160 Hz (see CModel3::RunMainBoardFrame). Pacing at 60 Hz
@@ -1890,17 +2207,39 @@ static FullScreenMode ResolveFullScreenMode()
     else
     {
         const DisplayRateSupport support = ConfiguredDisplayRateSupport(57.5242f);
+        // RefreshRate is still written because the OpenGL loop paces from it. The Vulkan loop paces
+        // from RefreshRateMode, so there the number is only a legacy fallback and the log must not
+        // describe it as the rate the session is actually presenting at.
         if (support == DisplayRateSupport::Supported)
         {
             s_runtime_config.Get("RefreshRate").SetValue(57.5242f);
+#if defined(SUPERMODEL_OPENGL_ONLY)
             InfoLog("Exclusive fullscreen: G-SYNC/VRR path; the display timing range includes 57.524 Hz, pacing at the arcade rate.");
+#else
+            InfoLog("Exclusive fullscreen: G-SYNC/VRR path; the display timing range includes 57.524 Hz; "
+                "the panel follows the rate chosen under Presentation cadence.");
+#endif
         }
         else if (support == DisplayRateSupport::Unsupported)
+        {
+#if defined(SUPERMODEL_OPENGL_ONLY)
             InfoLog("Exclusive fullscreen: G-SYNC/VRR path; the display timing range excludes 57.524 Hz, keeping RefreshRate %.4f Hz.",
                 s_runtime_config["RefreshRate"].ValueAs<float>());
+#else
+            InfoLog("Exclusive fullscreen: G-SYNC/VRR path; the display timing range excludes 57.524 Hz; "
+                "the panel follows the rate chosen under Presentation cadence.");
+#endif
+        }
         else
+        {
+#if defined(SUPERMODEL_OPENGL_ONLY)
             InfoLog("Exclusive fullscreen: G-SYNC/VRR path; the display timing range is unknown, keeping RefreshRate %.4f Hz.",
                 s_runtime_config["RefreshRate"].ValueAs<float>());
+#else
+            InfoLog("Exclusive fullscreen: G-SYNC/VRR path; the display timing range is unknown; "
+                "the panel follows the rate chosen under Presentation cadence.");
+#endif
+        }
     }
 
     if (!s_runtime_config["VSync"].ValueAsDefault<bool>(true))
@@ -1908,11 +2247,13 @@ static FullScreenMode ResolveFullScreenMode()
 
     if (refreshRateHz > 0.0f)
     {
-        SDL_DisplayMode mode{};
-        if (FindArcadeDisplayMode(refreshRateHz, displayIndex, mode) && SDL_SetWindowDisplayMode(s_window, &mode) == 0)
+        OSD::Platform::DisplayMode mode{};
+        if (FindArcadeDisplayMode(refreshRateHz, displayIndex, mode))
         {
+            s_exclusiveMode = mode;
+            s_haveExclusiveMode = true;
             InfoLog("Exclusive fullscreen: fixed mode %ux%u@%i Hz selected (arcade rate %.4f Hz).",
-                mode.w, mode.h, mode.refresh_rate, refreshRateHz);
+                mode.width, mode.height, (int)(mode.refreshHz + 0.5f), refreshRateHz);
             return FullScreenMode::ExclusiveArcade;
         }
         InfoLog("Exclusive fullscreen: no usable 57/58 Hz display mode; falling back to G-SYNC/VRR at the desktop mode.");
@@ -1925,18 +2266,19 @@ static FullScreenMode ResolveFullScreenMode()
     // window size: otherwise SDL chooses whatever it considers closest to the (arbitrary) render
     // resolution, which would run a non-native mode that the display then has to scale. Using the
     // desktop mode keeps the image native and lets us pillarbox the 4:3 picture inside it.
-    SDL_DisplayMode desktop{};
-    if (SDL_GetDesktopDisplayMode(displayIndex, &desktop) == 0)
+    OSD::Platform::DisplayMode desktop{};
+    if (OSD::Platform::GetDesktopDisplayMode(OSD::Platform::GetDisplayIdForIndex(displayIndex), &desktop))
     {
         /*
-         * The size is replaced with the panel's own where it could be read, keeping SDL's refresh
-         * rate. SDL reports this display's desktop mode as 2880x1620 on a machine with a 4K primary
-         * at 150% scaling and a 1080p secondary at 100%: the process asks for system DPI awareness,
-         * so Windows converts the geometry of any monitor whose scaling differs from the primary's
-         * into the system DPI's space, and 1920x1080 becomes 2880x1620. Nothing is wrong with SDL's
-         * arithmetic - the number is simply in a different space from the panel's pixels. Asking the
-         * driver for a mode of that size fails, and the failure is silent: the window keeps whatever
-         * size it had, which for a supersampled render resolution is larger than the screen.
+         * The size is replaced with the panel's own where it could be read, keeping the desktop
+         * refresh rate. SDL reports this display's desktop mode as 2880x1620 on a machine with a 4K
+         * primary at 150% scaling and a 1080p secondary at 100%: the process asks for system DPI
+         * awareness, so Windows converts the geometry of any monitor whose scaling differs from the
+         * primary's into the system DPI's space, and 1920x1080 becomes 2880x1620. Nothing is wrong
+         * with SDL's arithmetic - the number is simply in a different space from the panel's pixels.
+         * Asking the driver for a mode of that size fails, and the failure is silent: the window
+         * keeps whatever size it had, which for a supersampled render resolution is larger than the
+         * screen.
          *
          * GetConfiguredFullscreenSize() explains the rest, and is also what sizes the window.
          */
@@ -1944,15 +2286,14 @@ static FullScreenMode ResolveFullScreenMode()
         int panelHeight = 0;
         if (GetConfiguredFullscreenSize(panelWidth, panelHeight))
         {
-            desktop.w = panelWidth;
-            desktop.h = panelHeight;
+            desktop.width = panelWidth;
+            desktop.height = panelHeight;
         }
 
-        if (SDL_SetWindowDisplayMode(s_window, &desktop) == 0)
-            InfoLog("Exclusive fullscreen: desktop mode %ux%u@%i Hz set on display %d; G-SYNC/VRR should track the emulator rate.",
-                desktop.w, desktop.h, desktop.refresh_rate, displayIndex);
-        else
-            InfoLog("Exclusive fullscreen: could not set the desktop mode (%s); letting SDL choose.", SDL_GetError());
+        s_exclusiveMode = desktop;
+        s_haveExclusiveMode = true;
+        InfoLog("Exclusive fullscreen: desktop mode %ux%u@%i Hz reserved for display %d; G-SYNC/VRR should track the emulator rate.",
+            desktop.width, desktop.height, (int)(desktop.refreshHz + 0.5f), displayIndex);
     }
     else
         InfoLog("Exclusive fullscreen: desktop mode unavailable; G-SYNC/VRR will track the emulator rate.");
@@ -1964,16 +2305,17 @@ static Result ApplyFullScreenMode(bool fullScreen)
 {
     if (!fullScreen)
     {
-        if (SDL_SetWindowFullscreen(s_window, 0) < 0)
+        if (!OSD::Platform::SetFullscreen(s_platformWindow, false))
         {
-            ErrorLog("Unable to enter windowed mode: %s\n", SDL_GetError());
+            ErrorLog("Unable to enter windowed mode: %s\n", OSD::Platform::GetError());
             return Result::FAIL;
         }
         return Result::OKAY;
     }
 
-    if (s_fullScreenMode != FullScreenMode::Borderless &&
-        SDL_SetWindowFullscreen(s_window, SDL_WINDOW_FULLSCREEN) == 0)
+    if (s_fullScreenMode != FullScreenMode::Borderless && s_haveExclusiveMode &&
+        OSD::Platform::SetExclusiveFullscreen(s_platformWindow,
+            OSD::Platform::GetDisplayIdForIndex(GetConfiguredDisplaySdlIndex()), s_exclusiveMode))
     {
         return Result::OKAY;
     }
@@ -1985,9 +2327,9 @@ static Result ApplyFullScreenMode(bool fullScreen)
         s_fullScreenMode = FullScreenMode::Borderless;
     }
 
-    if (SDL_SetWindowFullscreen(s_window, SDL_WINDOW_FULLSCREEN_DESKTOP) < 0)
+    if (!OSD::Platform::SetFullscreen(s_platformWindow, true))
     {
-        ErrorLog("Unable to enter fullscreen mode: %s\n", SDL_GetError());
+        ErrorLog("Unable to enter fullscreen mode: %s\n", OSD::Platform::GetError());
         return Result::FAIL;
     }
     return Result::OKAY;
@@ -2016,12 +2358,12 @@ static void ApplyWindowSize(bool fullScreen, unsigned *totalXResPtr, unsigned *t
     int height = 0;
     if (GetConfiguredFullscreenSize(width, height))
     {
-      SDL_SetWindowSize(s_window, width, height);
+      OSD::Platform::SetWindowSize(s_platformWindow, width, height);
       return;
     }
   }
 
-  SDL_SetWindowSize(s_window, *totalXResPtr, *totalYResPtr);
+  OSD::Platform::SetWindowSize(s_platformWindow, *totalXResPtr, *totalYResPtr);
 }
 
 /*
@@ -2035,36 +2377,59 @@ static void LogWindowSize(const char *backend)
 {
   int width = 0;
   int height = 0;
-  SDL_GetWindowSize(s_window, &width, &height);
+  OSD::Platform::GetWindowSize(s_platformWindow, &width, &height);
   InfoLog("%s: window size %dx%d.", backend, width, height);
 }
 
-static void ReportRenderInfo(uint32_t aaFactor, unsigned totalXRes, unsigned totalYRes)
+static void ReportRenderInfo(uint32_t aaFactor, unsigned xRes, unsigned yRes, unsigned totalXRes, unsigned totalYRes)
 {
   StatsRenderInfo info;
 
+#if !defined(SUPERMODEL_OPENGL_ONLY)
   if (s_vkContext)
   {
     /*
-     * Vulkan renders at the swapchain extent - the window size, which in fullscreen is the display's
-     * and not XResolution - and antialiases with hardware MSAA rather than a scaled buffer. The two
-     * figures below are therefore the same number, which is why the readout only prints the second
-     * when they differ.
+     * Vulkan rasterises the scene into the visible viewport (xRes*yRes) inside a render target the
+     * size of the swapchain. In fullscreen the swapchain is the display, not XResolution, and with
+     * integer scaling the viewport is the multiple the panel allows - so reporting only the extent
+     * showed 3840x2160 for a 3x preset that was actually drawing 2480x1920. Both are reported now:
+     * the scene size first, the target after the arrow.
      *
      * The sample count comes from the renderer rather than the configuration because Init() may have
      * reduced it: a driver that cannot support the requested count for both attachments silently ends
      * up at 1x, and reporting the request would show antialiasing that is not happening.
      */
     const VkExtent2D extent = s_vkContext->Extent();
-    info.width = extent.width;
-    info.height = extent.height;
-    info.outputWidth = extent.width;
-    info.outputHeight = extent.height;
+    /*
+     * With low-resolution rendering the scene is rasterised at a fixed 496x384 and upscaled onto the
+     * picture rectangle, so the picture's size is the *output* rather than the render size. Reporting
+     * the viewport as the render size would claim 1395x1080 worth of work where 496x384 is being
+     * done, which is exactly the number this line exists to get right.
+     */
+    const VkExtent2D render = s_vk3dRenderer ? s_vk3dRenderer->RenderExtent() : VkExtent2D{};
+    if (render.width > 0 && render.height > 0)
+    {
+      info.width = render.width;
+      info.height = render.height;
+      info.outputWidth = xRes;
+      info.outputHeight = yRes;
+    }
+    else
+    {
+      info.width = xRes;
+      info.height = yRes;
+      info.outputWidth = extent.width;
+      info.outputHeight = extent.height;
+    }
     info.samples = s_vk3dRenderer ? (int)s_vk3dRenderer->SampleCount() : 1;
     info.method = (info.samples > 1) ? StatsAntiAliasing::Msaa : StatsAntiAliasing::None;
     StatsOsdSetRenderInfo(info);
     return;
   }
+#else
+  (void)xRes;
+  (void)yRes;
+#endif
 
   /*
    * OpenGL: supersampling. SuperAA owns a framebuffer at the output size multiplied by the factor -
@@ -2086,6 +2451,7 @@ static void ReportRenderInfo(uint32_t aaFactor, unsigned totalXRes, unsigned tot
   StatsOsdSetRenderInfo(info);
 }
 
+#if !defined(SUPERMODEL_OPENGL_ONLY)
 static Result ResizeVulkanScreen(unsigned *xOffsetPtr, unsigned *yOffsetPtr, unsigned *xResPtr, unsigned *yResPtr, unsigned *totalXResPtr, unsigned *totalYResPtr, bool keepAspectRatio, bool fullScreen)
 {
   if (s_vkContext && s_vkContext->Device())
@@ -2103,7 +2469,9 @@ static Result ResizeVulkanScreen(unsigned *xOffsetPtr, unsigned *yOffsetPtr, uns
     return Result::FAIL;
   return Result::OKAY;
 }
+#endif
 
+#if !defined(SUPERMODEL_PURE_VULKAN)
 static Result ResizeGLScreen(unsigned *xOffsetPtr, unsigned *yOffsetPtr, unsigned *xResPtr, unsigned *yResPtr, unsigned *totalXResPtr, unsigned *totalYResPtr, bool keepAspectRatio, bool fullScreen)
 {
   ApplyWindowSize(fullScreen, totalXResPtr, totalYResPtr);
@@ -2190,6 +2558,7 @@ static void PrintGLInfo(bool createScreen, bool infoLog, bool printExtensions)
   if (infoLog)  InfoLog("");
   else      printf("\n");
 }
+#endif // SUPERMODEL_PURE_VULKAN
 
 #ifdef DEBUG
 static void PrintBAT(unsigned regu, unsigned regl)
@@ -2273,12 +2642,14 @@ static void DumpPPCRegisters(IBus *bus)
 }
 #endif
 
+#if !defined(SUPERMODEL_PURE_VULKAN)
 static void SaveFrameBuffer(const std::string& file)
 {
     std::shared_ptr<uint8_t> pixels(new uint8_t[totalXRes * totalYRes * 4], std::default_delete<uint8_t[]>());
     glReadPixels(0, 0, totalXRes, totalYRes, GL_RGBA, GL_UNSIGNED_BYTE, pixels.get());
     Util::WriteSurfaceToBMP<Util::RGBA8>(file, pixels.get(), totalXRes, totalYRes, true);
 }
+#endif
 
 void Screenshot()
 {
@@ -2308,10 +2679,17 @@ void Screenshot()
 
     // In Vulkan the frame lives in the swapchain and there is no glReadPixels, so the image is
     // copied out by the backend on the next frame instead.
+#if defined(SUPERMODEL_OPENGL_ONLY)
+    SaveFrameBuffer(file);
+#elif defined(SUPERMODEL_PURE_VULKAN)
+    if (s_vkContext != nullptr)
+        s_vkContext->RequestScreenshot(file);
+#else
     if (s_vkContext != nullptr)
         s_vkContext->RequestScreenshot(file);
     else
         SaveFrameBuffer(file);
+#endif
 }
 /******************************************************************************
  Render State Analysis
@@ -2338,6 +2716,7 @@ static std::string GetFileBaseName(const std::string &file)
   return base;
 }
 
+#if !defined(SUPERMODEL_PURE_VULKAN)
 static void TestPolygonHeaderBits(IEmulator *Emu)
 {
   const static std::vector<uint32_t> unknownPolyBits
@@ -2421,6 +2800,7 @@ static void TestPolygonHeaderBits(IEmulator *Emu)
     printf("Produced: %s\n", file.c_str());
   }
 }
+#endif // SUPERMODEL_PURE_VULKAN
 
 #endif
 
@@ -2441,13 +2821,403 @@ static void TestPolygonHeaderBits(IEmulator *Emu)
 
 static const int STATE_FILE_VERSION = 6;  // save state file version
 static const int NVRAM_FILE_VERSION = 0;  // NVRAM file version
-static unsigned s_saveSlot = 1;           // save state slot # (1-8)
+
+/*
+ * Quick-save slots exposed by the in-game menu and cycled with F6.  The file naming has always
+ * allowed two digits and the save manager lists every container it finds, but the menu and the
+ * hotkey cycle stop here so the list stays a page rather than a directory dump.
+ */
+static constexpr unsigned SAVE_SLOT_COUNT = 16;
+
+static unsigned s_saveSlot = 1;           // save state slot # (1..SAVE_SLOT_COUNT)
+
+/*
+ * Slot file names.
+ *
+ * The container keeps the classic slot numbering, one letter apart from it: slot 1 of daytona2 is
+ * "daytona2.zst1" where the plain block file is "daytona2.st1".  Both names are produced here so the
+ * save, load and overlay paths cannot disagree about where a slot lives.
+ */
+static std::string SaveSlotContainer(const std::string& game, unsigned slot)
+{
+  return Util::Format() << FileSystemPath::GetPath(FileSystemPath::SavePathType()) << game << ".zst" << slot;
+}
+
+static std::string SaveSlotLegacyFile(const std::string& game, unsigned slot)
+{
+  return Util::Format() << FileSystemPath::GetPath(FileSystemPath::SavePathType()) << game << ".st" << slot;
+}
+
+#if defined(SUPERMODEL_OPENGL_ONLY)
+/*
+ * Where the OpenGL-only build found its saves before the folders were split, and where the Vulkan
+ * build still keeps its .st fallback files. Reading from it keeps old slots visible after the split;
+ * new saves always go to SavePathType().
+ */
+static std::string SaveSlotLegacyFallback(const std::string& game, unsigned slot)
+{
+  return Util::Format() << FileSystemPath::GetPath(FileSystemPath::Saves) << game << ".st" << slot;
+}
+#endif
+
+/* True when either form of the slot already holds a save. */
+static bool SaveSlotOccupied(const std::string& game, unsigned slot)
+{
+  std::error_code error;
+  if (std::filesystem::exists(SaveSlotContainer(game, slot), error) && !error)
+    return true;
+
+  error.clear();
+  if (std::filesystem::exists(SaveSlotLegacyFile(game, slot), error) && !error)
+    return true;
+
+#if defined(SUPERMODEL_OPENGL_ONLY)
+  error.clear();
+  return std::filesystem::exists(SaveSlotLegacyFallback(game, slot), error) && !error;
+#else
+  return false;
+#endif
+}
+
+/*
+ * The slot F6 should select.
+ *
+ * F5 on its own deliberately writes back to the slot that was loaded, which is what makes
+ * "load, play, F5" overwrite the save the player resumed. F6 is the explicit request for a
+ * different slot, so it is the one place that should skip saves that already exist; writing over
+ * the next numeric save is not what that request means.
+ *
+ * The search starts after the current slot and wraps, so a session that started from slot 7 finds
+ * slot 8 rather than dropping back to 1. When all sixteen are occupied the next numeric slot is
+ * returned so F6 still cycles; choosing a save to overwrite deliberately is what the in-game menu
+ * and the Manage saves window are for.
+ *
+ * Slot 0 is outside the quick-save range: it is where imported legacy .st0 files live, and zst0 is
+ * not one of the sixteen entries the menu lists.
+ */
+static unsigned NextFreeSaveSlot(const std::string& game, unsigned current)
+{
+  const unsigned start = current <= SAVE_SLOT_COUNT ? current : 0;
+  for (unsigned step = 1; step <= SAVE_SLOT_COUNT; ++step)
+  {
+    const unsigned slot = ((start + step - 1) % SAVE_SLOT_COUNT) + 1;
+    if (!SaveSlotOccupied(game, slot))
+      return slot;
+  }
+
+  return (start % SAVE_SLOT_COUNT) + 1;
+}
+
+/*
+ * The newest slot that actually holds a save, for quick-load.
+ *
+ * A fresh session starts on the first free slot because that is where F5 should write. That slot is
+ * empty by definition, so F7 must not stop there: it means "load my save", and the save the player
+ * wants is almost always the newest one. The in-game menu remains the way to pick an older slot
+ * deliberately.
+ *
+ * Returns 0 when the quick-save range has no saves at all (zst0/st0 imported files are outside it).
+ */
+static unsigned NewestSaveSlot(const std::string& game)
+{
+  for (unsigned slot = SAVE_SLOT_COUNT; slot > 0; --slot)
+  {
+    if (SaveSlotOccupied(game, slot))
+      return slot;
+  }
+  return 0;
+}
+
+/*
+ * The slot a save file belongs to: "lamachin.zst3" and "lamachin.st3" both give 3.
+ *
+ * Returns -1 when the name carries no slot number, so slot 0 (which the imported .st0 files use) is
+ * still distinguishable from "not a slot at all".  The result is used to make F5 write back to the
+ * save the player actually loaded instead of the slot the hotkeys happened to be pointing at.
+ */
+static int SaveSlotFromPath(const std::filesystem::path& path)
+{
+  const std::string name = path.filename().string();
+  const auto dot = name.rfind('.');
+  if (dot == std::string::npos || dot + 1 >= name.size())
+    return -1;
+
+  const std::string suffix = name.substr(dot + 1);
+  std::string digits;
+  if (suffix.rfind("zst", 0) == 0)
+    digits = suffix.substr(3);
+  else if (suffix.rfind("st", 0) == 0)
+    digits = suffix.substr(2);
+  else
+    return -1;
+
+  if (digits.empty() || digits.size() > 2)
+    return -1;
+  for (const char c : digits)
+  {
+    if (c < '0' || c > '9')
+      return -1;
+  }
+  return std::stoi(digits);
+}
+
+#if defined(SUPERMODEL_PURE_VULKAN)
+/*
+ * Reads a file into memory.  Used for the staged block file and for the thumbnail the container
+ * carries; both are small and are read once per save.
+ */
+static bool ReadWholeFile(const std::string& path, std::vector<std::uint8_t>& contents)
+{
+  std::ifstream input(path, std::ios::binary | std::ios::ate);
+  if (!input)
+    return false;
+
+  const std::streamsize size = input.tellg();
+  if (size < 0)
+    return false;
+
+  contents.resize((std::size_t)size);
+  input.seekg(0, std::ios::beg);
+  if (size > 0 && !input.read(reinterpret_cast<char*>(contents.data()), size))
+  {
+    contents.clear();
+    return false;
+  }
+  return true;
+}
+
+/*
+ * Unpacks a .zst container (or a legacy .st, which the module passes through unchanged) into the
+ * temporary block file the upstream loader expects.  Returns false and logs on any failure, so the
+ * caller can fall back to the classic path.
+ */
+static bool ExtractStateContainer(const std::filesystem::path& container, std::string& temporaryPath)
+{
+  auto bridge = OSD::HostCore::Shared();
+  if (!bridge)
+  {
+    ErrorLog("HostCore: %s", bridge.error().message.c_str());
+    return false;
+  }
+
+  auto loaded = (*bridge)->LoadVkState(container);
+  if (!loaded)
+  {
+    ErrorLog("HostCore: cannot load '%s': %s", container.string().c_str(),
+      loaded.error().message.c_str());
+    return false;
+  }
+
+  const std::string temporary =
+    Util::Format() << FileSystemPath::GetPath(FileSystemPath::Saves) << ".vktmp.st";
+  std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+  output.write(reinterpret_cast<const char*>(loaded->bytes.data()),
+    (std::streamsize)loaded->bytes.size());
+  output.close();
+  if (!output)
+  {
+    ErrorLog("HostCore: cannot write the temporary save state '%s'.", temporary.c_str());
+    return false;
+  }
+
+  temporaryPath = temporary;
+  return true;
+}
+
+/*
+ * A save that is waiting for its thumbnail.
+ *
+ * The picture cannot be grabbed from inside the UI callback: this frame's swapchain image has not
+ * been drawn yet, and the previous one still shows the panel whose Save button was just pressed.
+ * So the state bytes are staged in memory, the renderer is asked for a thumbnail of the next frame
+ * (captured before the interface is drawn), and the container is packaged a frame or two later when
+ * the PNG shows up. The emulator is paused for the whole sequence, so nothing moves in between, and
+ * a capture that never arrives simply produces a save without a thumbnail.
+ */
+struct PendingSave
+{
+  bool active = false;
+  int framesWaited = 0;
+  std::string game;
+  std::string target;
+  std::string legacyTarget;    // written instead if the container cannot be produced
+  std::string thumbnailPath;   // empty when no capture was requested
+  std::vector<std::uint8_t> raw;
+};
+
+static PendingSave s_pendingSave;
+// Unique per save: a fixed ".vkthumb.png" could be left over from an earlier save when a
+// capture fails or the renderer still holds the old file, and the container would then be
+// packaged with a thumbnail from a different frame.
+static unsigned s_thumbnailSerial = 0;
+
+static void PackagePendingSave(const std::vector<std::uint8_t>& thumbnail)
+{
+  auto bridge = OSD::HostCore::Shared();
+  if (!bridge)
+  {
+    ErrorLog("HostCore: %s", bridge.error().message.c_str());
+    return;
+  }
+
+  HostSaveMeta meta = {};
+  meta.StructSize = sizeof(HostSaveMeta);
+  std::snprintf(meta.GameName, sizeof(meta.GameName), "%s", s_pendingSave.game.c_str());
+  std::snprintf(meta.Title, sizeof(meta.Title), "%s",
+    std::filesystem::path(s_pendingSave.target).filename().string().c_str());
+  std::snprintf(meta.Version, sizeof(meta.Version), "%s", SUPERMODEL_FORK_VERSION);
+
+  if (auto saved = (*bridge)->SaveVkState(s_pendingSave.target, meta, s_pendingSave.raw, thumbnail); saved)
+  {
+    std::error_code sizeError;
+    const auto written = std::filesystem::file_size(s_pendingSave.target, sizeError);
+    printf("Saved state to '%s'.\n", s_pendingSave.target.c_str());
+    InfoLog("Saved state to '%s' (zstd container, %zu bytes from %zu, thumbnail %zu bytes).",
+      s_pendingSave.target.c_str(), (std::size_t)(sizeError ? 0 : written), s_pendingSave.raw.size(),
+      thumbnail.size());
+  }
+  else
+  {
+    // The state bytes are what the classic loader expects, so a packaging failure still leaves the
+    // player with a working save rather than with nothing.
+    ErrorLog("Unable to write '%s': %s. Falling back to a plain .st file.", s_pendingSave.target.c_str(),
+      saved.error().message.c_str());
+
+    std::ofstream fallback(s_pendingSave.legacyTarget, std::ios::binary | std::ios::trunc);
+    fallback.write(reinterpret_cast<const char*>(s_pendingSave.raw.data()),
+      (std::streamsize)s_pendingSave.raw.size());
+    fallback.close();
+    if (fallback)
+    {
+      printf("Saved state to '%s'.\n", s_pendingSave.legacyTarget.c_str());
+      InfoLog("Saved state to '%s' (plain block file).", s_pendingSave.legacyTarget.c_str());
+    }
+    else
+    {
+      ErrorLog("Unable to save state to '%s' either.", s_pendingSave.legacyTarget.c_str());
+    }
+  }
+}
+
+/*
+ * Called once per frame. Picks up the thumbnail when the renderer's worker has finished writing it,
+ * or gives up after half a second - a session where the swapchain cannot be read (or a paused loop
+ * that stops presenting) must still produce a save.
+ */
+static void ServicePendingSave()
+{
+  if (!s_pendingSave.active)
+    return;
+
+  std::vector<std::uint8_t> thumbnail;
+  bool ready = s_pendingSave.thumbnailPath.empty();
+  if (!ready)
+  {
+    std::error_code sizeError;
+    const auto size = std::filesystem::file_size(s_pendingSave.thumbnailPath, sizeError);
+    if (!sizeError && size > 0)
+      ready = ReadWholeFile(s_pendingSave.thumbnailPath, thumbnail);
+  }
+
+  if (!ready && ++s_pendingSave.framesWaited < 30)
+    return;
+
+  if (!s_pendingSave.thumbnailPath.empty())
+  {
+    std::error_code removeError;
+    std::filesystem::remove(s_pendingSave.thumbnailPath, removeError);
+  }
+
+  PackagePendingSave(thumbnail);
+  s_pendingSave = PendingSave();
+}
+#endif
 
 static void SaveState(IEmulator *Model3)
 {
+#if defined(SUPERMODEL_PURE_VULKAN)
+  /*
+   * Package the state through the C# module.
+   *
+   * The upstream serialiser writes into a CBlockFile, which is file based; changing that would touch
+   * the state layout, so the block file is written to a staging path first and then handed over as
+   * bytes.  On any failure the classic .st below is still written, so a save is never silently lost
+   * because the cold-path module is missing.
+   */
+  if (auto bridge = OSD::HostCore::Shared(); bridge)
+  {
+    const std::string game = Model3->GetGame().name;
+    const std::string staging =
+      Util::Format() << FileSystemPath::GetPath(FileSystemPath::Saves) << ".vkstmp.st";
+
+    CBlockFile state;
+    if (Result::OKAY == state.Create(staging, "Supermodel Save State",
+          "Supermodel Version " SUPERMODEL_VERSION))
+    {
+      int32_t fileVersion = STATE_FILE_VERSION;
+      state.Write(&fileVersion, sizeof(fileVersion));
+      state.Write(game);
+      Model3->SaveState(&state);
+      state.Close();
+
+      std::vector<std::uint8_t> raw;
+      const bool staged = ReadWholeFile(staging, raw);
+      std::error_code removeError;
+      std::filesystem::remove(staging, removeError);
+
+      if (staged)
+      {
+        const std::string target = SaveSlotContainer(game, s_saveSlot);
+
+        // A save still waiting for its thumbnail is flushed first, so pressing F5 twice in quick
+        // succession cannot drop the first one. With no thumbnail to wait for it is written here.
+        if (s_pendingSave.active)
+        {
+          s_pendingSave.framesWaited = 30;
+          ServicePendingSave();
+        }
+
+        s_pendingSave.active = true;
+        s_pendingSave.framesWaited = 0;
+        s_pendingSave.game = game;
+        s_pendingSave.target = target;
+        s_pendingSave.legacyTarget = SaveSlotLegacyFile(game, s_saveSlot);
+        s_pendingSave.raw = std::move(raw);
+
+        if (s_vkContext != nullptr)
+        {
+          char thumbName[48];
+          std::snprintf(thumbName, sizeof(thumbName), ".vkthumb-%u.png", ++s_thumbnailSerial);
+          const std::string thumbnail =
+            Util::Format() << FileSystemPath::GetPath(FileSystemPath::Saves) << thumbName;
+          // A unique name means a leftover from a previous save cannot be mistaken for this
+          // frame's picture, even if the renderer cannot overwrite the old file.
+          std::error_code removeError;
+          std::filesystem::remove(thumbnail, removeError);
+          s_vkContext->RequestThumbnail(thumbnail, 480, 360);
+          s_pendingSave.thumbnailPath = thumbnail;
+        }
+
+        // Packaged by ServicePendingSave(): immediately when no capture was requested, otherwise as
+        // soon as the renderer has written the thumbnail.
+        ServicePendingSave();
+        return;
+      }
+      else
+      {
+        ErrorLog("Unable to read back the staged save state '%s'.", staging.c_str());
+      }
+    }
+    else
+    {
+      ErrorLog("Unable to save state to '%s'.", staging.c_str());
+    }
+  }
+#endif
+
   CBlockFile  SaveState;
 
-  std::string file_path = Util::Format() << FileSystemPath::GetPath(FileSystemPath::Saves) << Model3->GetGame().name << ".st" << s_saveSlot;
+  std::string file_path = SaveSlotLegacyFile(Model3->GetGame().name, s_saveSlot);
   if (Result::OKAY != SaveState.Create(file_path, "Supermodel Save State", "Supermodel Version " SUPERMODEL_VERSION))
   {
     ErrorLog("Unable to save state to '%s'.", file_path.c_str());
@@ -2466,25 +3236,21 @@ static void SaveState(IEmulator *Model3)
   InfoLog("Saved state to '%s'.", file_path.c_str());
 }
 
-static void LoadState(IEmulator *Model3, std::string file_path = std::string())
+static bool LoadStateFromFile(IEmulator *Model3, const std::string &file_path)
 {
   CBlockFile  SaveState;
-
-  // Generate file path
-  if (file_path.empty())
-    file_path = Util::Format() << FileSystemPath::GetPath(FileSystemPath::Saves) << Model3->GetGame().name << ".st" << s_saveSlot;
 
   // Open and check to make sure format is correct
   if (Result::OKAY != SaveState.Load(file_path))
   {
     ErrorLog("Unable to load state from '%s'.", file_path.c_str());
-    return;
+    return false;
   }
 
   if (Result::OKAY != SaveState.FindBlock("Supermodel Save State"))
   {
     ErrorLog("'%s' does not appear to be a valid save state file.", file_path.c_str());
-    return;
+    return false;
   }
 
   int32_t fileVersion;
@@ -2492,14 +3258,127 @@ static void LoadState(IEmulator *Model3, std::string file_path = std::string())
   if (fileVersion != STATE_FILE_VERSION)
   {
     ErrorLog("'%s' is incompatible with this version of Supermodel.", file_path.c_str());
-    return;
+    return false;
   }
 
   // Load
   Model3->LoadState(&SaveState);
   SaveState.Close();
   printf("Loaded state from '%s'.\n", file_path.c_str());
-  InfoLog("Loaded state from '%s'.", file_path.c_str());
+  InfoLog("Loaded state from '%s' (PPC PC=%08X, LR=%08X).", file_path.c_str(),
+    ppc_get_pc(), ppc_get_lr());
+  return true;
+}
+
+/*
+ * Loads the current slot.
+ *
+ * The container is preferred; a slot that only has the classic .st file still loads, so saves made
+ * before this format existed - or by the SDL2 build - keep working.  An explicitly supplied path is
+ * used as given (that is how the session's initial state is loaded).
+ *
+ * A quick-load starts on the slot F5 would write to. On a fresh session that is the first free
+ * slot, which is empty, so F7 falls back to the newest save instead of reporting a load failure.
+ * Without this, F6 (which deliberately skips occupied slots) made the existing saves unreachable
+ * from the keyboard: the session began on slot 4 and F7 kept trying 4, 5, 6...
+ */
+static void LoadState(IEmulator *Model3, std::string file_path = std::string())
+{
+  std::string temporary;
+
+#if defined(SUPERMODEL_PURE_VULKAN)
+  // A save still waiting for its thumbnail has not been written yet; finish it first so loading a
+  // slot right after saving it sees the new state rather than the previous one. This has to run
+  // before the empty-slot fallback, otherwise a just-requested save would not be counted yet and
+  // F7 would load an older slot instead.
+  if (s_pendingSave.active)
+  {
+    s_pendingSave.framesWaited = 30;
+    ServicePendingSave();
+  }
+#endif
+
+  if (file_path.empty() && !SaveSlotOccupied(Model3->GetGame().name, s_saveSlot))
+  {
+    const unsigned newest = NewestSaveSlot(Model3->GetGame().name);
+    if (newest == 0)
+    {
+      ErrorLog("No save state in slot %u for '%s'.", s_saveSlot, Model3->GetGame().name.c_str());
+      return;
+    }
+
+    InfoLog("Save slot %u is empty; loading the newest save in slot %u.", s_saveSlot, newest);
+    printf("Save slot: %u\n", newest);
+    s_saveSlot = newest;
+  }
+
+#if defined(SUPERMODEL_PURE_VULKAN)
+  if (file_path.empty())
+  {
+    const std::string container = SaveSlotContainer(Model3->GetGame().name, s_saveSlot);
+    std::error_code existsError;
+    if (std::filesystem::exists(container, existsError) && !existsError)
+    {
+      if (ExtractStateContainer(container, temporary))
+        file_path = temporary;
+    }
+  }
+  else
+  {
+    /*
+     * An explicit path may point at a .zst container.
+     *
+     * That is the format this build writes, and -load-state (and the "start from
+     * this state" setting behind it) used to accept only the raw block file
+     * inside it - so the one file a user is most likely to hand over was the one
+     * it refused.  The module passes a legacy .st through unchanged, so trying
+     * the container first is safe for both formats; a path that is neither falls
+     * through to the classic loader below, which reports it.
+     */
+    std::error_code existsError;
+    if (std::filesystem::exists(file_path, existsError) && !existsError)
+    {
+      if (ExtractStateContainer(file_path, temporary))
+        file_path = temporary;
+    }
+  }
+#endif
+
+  if (file_path.empty())
+  {
+    file_path = SaveSlotLegacyFile(Model3->GetGame().name, s_saveSlot);
+#if defined(SUPERMODEL_OPENGL_ONLY)
+    /*
+     * Files written before the two executables were given separate save folders still live in
+     * Data/Saves. Read them when the new folder has nothing for this slot, so splitting the folder
+     * does not hide a player's existing states from the OpenGL build.
+     */
+    std::error_code existsError;
+    if (!std::filesystem::exists(file_path, existsError) || existsError)
+    {
+      const std::string fallback = SaveSlotLegacyFallback(Model3->GetGame().name, s_saveSlot);
+      existsError.clear();
+      if (std::filesystem::exists(fallback, existsError) && !existsError)
+        file_path = fallback;
+    }
+#endif
+  }
+
+  LoadStateFromFile(Model3, file_path);
+
+  /*
+   * The unpacked state is a temporary file - except when a tool asks to keep it.
+   *
+   * The OpenGL-only executable has no HostCore and cannot read the .zst container, so comparing
+   * the two renderers against one save means turning the container into the raw block file it
+   * wraps. Tools\Capture-Frame.ps1 -RawState does that by setting this and copying .vktmp.st while
+   * the session runs.
+   */
+  if (!temporary.empty() && std::getenv("SM3D_KEEP_STATE_TEMP") == nullptr)
+  {
+    std::error_code removeError;
+    std::filesystem::remove(temporary, removeError);
+  }
 }
 
 static void SaveNVRAM(IEmulator *Model3)
@@ -2584,48 +3463,88 @@ static void PrintGLError(GLenum error)
 static CInputs *videoInputs = NULL;
 static uint32_t currentInputs = 0;
 
+/*
+ * Present timestamp for the SM3D_FRAME_TIMING probe.
+ *
+ * EndFrameVideo() runs inside the renderer while the accumulator lives in the game loop, so the two
+ * halves talk through these file-scope values. The sequence number tells the loop whether this frame
+ * actually reached a present, which matters for frames that skip rendering.
+ */
+static bool s_frameTiming = false;
+static uint64_t s_framePresentNs = 0;
+static uint64_t s_framePresentSeq = 0;
+
 bool BeginFrameVideo()
 {
+#if !defined(SUPERMODEL_OPENGL_ONLY)
   if (s_vkContext)
     return s_vkContext->BeginFrame();
+#endif
   return true;
 }
 
 void EndFrameVideo()
 {
+#if !defined(SUPERMODEL_OPENGL_ONLY)
   if (s_vkContext)
   {
     s_vkContext->EndFrame();
   }
   else
+#endif
   {
     /*
      * The game's own drawing is finished. The overlay is recorded first so the crosshair can be
      * drawn after it: the crosshair is the one thing that must never be covered, including by the
-     * settings panel and the statistics readout. The Vulkan path reaches the same result inside its
-     * renderer, where the crosshair is part of the overlay's foreground draw list.
+     * settings panel and the statistics readout. Vulkan reaches the same result inside its renderer,
+     * where DrawCrosshairPass() runs after DrawOverlayPass().
      */
     OverlayRenderGL();
 
     // Show crosshairs for light gun games
+#if !defined(SUPERMODEL_PURE_VULKAN)
     if (s_crosshair && videoInputs)
       s_crosshair->Update(currentInputs, videoInputs, xOffset, yOffset, xRes, yRes);
+#endif
 
-    SDL_GL_SwapWindow(s_window);
+    OSD::Platform::SwapWindow(s_platformWindow);
+  }
+
+  /*
+   * The first frame has been presented, so the window is worth showing. Both backends have passed
+   * their present call by this point, and the flag makes this happen exactly once per window.
+   */
+  if (s_windowRevealPending && s_platformWindow != nullptr)
+  {
+    s_windowRevealPending = false;
+    OSD::Platform::ShowWindow(s_platformWindow);
+    if (s_windowRevealRaise)
+      OSD::Platform::RaiseWindow(s_platformWindow);
+    InfoLog("Window: shown once the first frame had been presented.");
+  }
+
+  // Timestamped after the present/swap call returns, so poll-to-present includes any blocking the
+  // backend did waiting for an image or for vblank. It is not the moment the image is scanned out.
+  if (s_frameTiming)
+  {
+    s_framePresentNs = OSD::Platform::Now();
+    s_framePresentSeq++;
   }
 }
 
+#if !defined(SUPERMODEL_OPENGL_ONLY)
 /*
- * Builds the crosshair state for the Vulkan overlay.
+ * Builds the crosshair state for the Vulkan renderer.
  *
- * The OpenGL renderer draws its own crosshair directly; Vulkan has no equivalent, so it uses the
- * overlay's foreground draw list. Positions are window pixels mapped through the game viewport,
- * which is the same geometry the OpenGL crosshair uses. Clamping keeps the crosshair visible at the
- * edge when the pointer is pushed against the window border.
+ * Vulkan draws the crosshair natively (see CVulkan2D::SetCrosshair); the OpenGL renderer draws its
+ * own. Positions are window pixels mapped through the game viewport, which is the same geometry the
+ * OpenGL crosshair uses. Clamping keeps the crosshair visible at the edge when the pointer is pushed
+ * against the window border.
  */
-static void UpdateOverlayCrosshair(CInputs *Inputs, uint32_t currentInputs, unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned yRes)
+static void UpdateOverlayCrosshair(CInputs *Inputs, uint32_t currentInputs, unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned yRes, float uiScale)
 {
-  OverlayCrosshairState state;
+  Vulkan3D::CrosshairState state;
+  state.uiScale = uiScale;
 
   const unsigned crosshairs = s_runtime_config["Crosshairs"].ValueAs<unsigned>() & 3;
   if (s_vkContext && Inputs != nullptr && crosshairs != 0)
@@ -2654,57 +3573,319 @@ static void UpdateOverlayCrosshair(CInputs *Inputs, uint32_t currentInputs, unsi
         ((float)Inputs->gunY[1]->value - 80.0f) / (465.0f - 80.0f));
 
     state.visible = state.players != 0;
+
+    /*
+     * Light-gun probe (SM3D_GUN_PROBE=1).
+     *
+     * The crosshair is the only thing that reads the axis values at this point in the frame; the
+     * game reads them again just before the simulation step. Printing both the raw value and the
+     * pixel the crosshair was given makes an offset between the two sides measurable instead of
+     * something inferred from a screenshot.
+     */
+    static const bool logGun = (std::getenv("SM3D_GUN_PROBE") != nullptr);
+    static uint64_t lastGunLog = 0;
+    if (logGun && (lastGunLog == 0 || OSD::Platform::Now() - lastGunLog > 1000000000ull))
+    {
+      lastGunLog = OSD::Platform::Now();
+      InfoLog("GunProbe: axis X %u (%.4f), Y %u (%.4f); viewport %ux%u at %u,%u -> crosshair %.1f,%.1f.",
+        (unsigned)Inputs->analogGunX[0]->value, Inputs->analogGunX[0]->ValueAsFraction(),
+        (unsigned)Inputs->analogGunY[0]->value, Inputs->analogGunY[0]->ValueAsFraction(),
+        xRes, yRes, xOffset, yOffset, state.x[0], state.y[0]);
+    }
   }
 
-  OverlaySetCrosshair(state);
+  if (s_vk2dRenderer)
+    s_vk2dRenderer->SetCrosshair(state);
 }
+#endif
 
 
 /******************************************************************************
  Frame Timing
 ******************************************************************************/
 
-static uint64_t s_perfCounterFrequency = 0;
-
-static uint64_t GetDesiredRefreshRateMilliHz()
+static uint64_t GetDesiredFramePeriodNs()
 {
-  // The refresh rate is expressed as mHz (millihertz -- Hz * 1000) in order to
-  // be expressable as an integer. E.g.: 57.524 Hz -> 57524 mHz.
-  float refreshRateHz = std::abs(s_runtime_config["RefreshRate"].ValueAs<float>());
-  uint64_t refreshRateMilliHz = uint64_t(1000.0 * refreshRateHz);
-  return refreshRateMilliHz;
+  // Derived from the rate itself rather than from whole millihertz. Rounding 57.52416 Hz to
+  // 57,524 mHz yields 17,384,048 ns, which is 2.8 ppm longer than the emulator's own step
+  // (17,384,000 ns) - that is exactly the slow drift the arcade preset used to have, and it would
+  // come back through this door. The configured range keeps the rate positive; the guard is for a
+  // hand-edited file.
+  const float refreshRateHz = std::abs(s_runtime_config["RefreshRate"].ValueAs<float>());
+  if (!(refreshRateHz > 0.0f))
+    return OSD::Platform::kNanosecondsPerSecond / 60;
+  return (uint64_t)((double)OSD::Platform::kNanosecondsPerSecond / (double)refreshRateHz);
+}
+
+/*
+ * The rate the window's display is scanning at right now.
+ *
+ * GetDesktopDisplayMode() would report the desktop's mode, which is correct for
+ * borderless but wrong in exclusive fullscreen - there the panel is on the mode
+ * the session selected, and it need not match the desktop. The pacer asks for
+ * this instead. Returns 0 when the mode cannot be read, which makes Auto fall
+ * back to 60 Hz rather than to a divide by zero.
+ */
+static double GetCurrentPanelRefreshHz()
+{
+  if (s_platformWindow == nullptr)
+    return 0.0;
+  OSD::Platform::DisplayMode mode = {};
+  if (!OSD::Platform::GetCurrentDisplayMode(s_platformWindow, &mode))
+    return 0.0;
+  return mode.refreshHz > 1.0f ? (double)mode.refreshHz : 0.0;
+}
+
+// True when the ini, a [game] section or the command line named RefreshRateMode. Set while the
+// arguments are processed; see ResolveConfiguredRefreshRateMode() for why it matters.
+static bool s_refreshModeExplicit = true;
+
+static RefreshRateMode GetConfiguredRefreshRateMode()
+{
+  const int mode = s_runtime_config["RefreshRateMode"].ValueAsDefault<int>(1);
+  switch (mode)
+  {
+  case 0: return RefreshRateMode::Original;
+  case 2: return RefreshRateMode::Fixed;
+  case 3: return RefreshRateMode::Vrr2x;
+  case 4: return RefreshRateMode::Vrr3x;
+  case 5: return RefreshRateMode::Vrr4x;
+  case 6: return RefreshRateMode::Vrr8x;
+  default: return RefreshRateMode::Auto;
+  }
+}
+
+/*
+ * The panel rate the pacer is allowed to see.
+ *
+ * PaceAssumePanelHz exists for testing only: the multiples have hard rate
+ * requirements (2x needs 120 Hz, 4x needs 235, 8x needs 470), and a machine with
+ * one panel cannot exercise the fallback paths otherwise. 0 means "ask the
+ * display", which is what every shipped configuration uses.
+ */
+static double GetEffectivePanelRefreshHz()
+{
+  const double assumed = s_runtime_config["PaceAssumePanelHz"].ValueAsDefault<float>(0.0f);
+  if (assumed > 1.0)
+    return assumed;
+  return GetCurrentPanelRefreshHz();
+}
+
+/*
+ * Whether this display can present at N times the arcade rate.
+ *
+ * The rule lives in DisplayPacer.h so that the settings window greys out exactly
+ * what this refuses; see PanelSupportsPhaseCount there.
+ */
+static bool PanelSupportsPhaseMode(RefreshRateMode mode, double panelHz)
+{
+  return PanelSupportsPhaseCount(PhaseCountForMode(mode), panelHz);
+}
+
+/*
+ * The requested mode, or the fastest phase mode the display can actually take.
+ *
+ * Falling back rather than refusing keeps a configuration written on one machine
+ * usable on another: a user who picks 4x and moves the game to a 120 Hz panel
+ * gets 2x and a log line, not a black screen or a silent reversion to 60 Hz.
+ */
+static RefreshRateMode ResolvePhaseModeForPanel(RefreshRateMode requested, double panelHz)
+{
+  if (PhaseCountForMode(requested) <= 0)
+    return requested;
+  if (PanelSupportsPhaseMode(requested, panelHz))
+    return requested;
+
+  static const RefreshRateMode kCandidates[] = {
+    RefreshRateMode::Vrr8x, RefreshRateMode::Vrr4x,
+    RefreshRateMode::Vrr3x, RefreshRateMode::Vrr2x
+  };
+  for (RefreshRateMode candidate : kCandidates)
+  {
+    if (PhaseCountForMode(candidate) < PhaseCountForMode(requested) &&
+        PanelSupportsPhaseMode(candidate, panelHz))
+      return candidate;
+  }
+
+  return RefreshRateMode::Original;
+}
+
+/*
+ * Whether the display really offers an arcade-rate fullscreen mode, cached.
+ *
+ * Enumerating a display's modes is not free and the answer only changes when the output does, so
+ * the pacing block - which re-resolves the mode every frame - cannot ask this directly.
+ */
+static bool ArcadeDisplayModeAvailableCached()
+{
+  static bool fetched = false;
+  static bool available = false;
+  static int checkedDisplay = -1;
+
+  const int display = GetConfiguredDisplaySdlIndex();
+  if (!fetched || display != checkedDisplay)
+  {
+    fetched = true;
+    checkedDisplay = display;
+    available = HasArcadeDisplayMode(57.5242f);
+  }
+  return available;
+}
+
+/*
+ * The mode the pacer should run, after the automatic rules.
+ *
+ * Auto means "follow the display". Two cases where that is not what the player wants:
+ *
+ *   - the display is already running at the arcade rate (a native 57/58 Hz mode, or VRR following
+ *     the emulator). Presenting at 57.524 Hz with interpolation would then hold the picture half a
+ *     frame behind for nothing, so it becomes Original.
+ *
+ *   - nothing in the configuration names a mode (a fresh installation) and the display offers a
+ *     mode at the arcade rate. Presenting at it is the arcade original's own cadence: every
+ *     emulated frame shown exactly once, no interpolation. Only a real mode counts, not an EDID
+ *     range that happens to contain 57.5 - a panel that merely lists it still scans at 60 unless
+ *     such a mode is selected, and 57.5 Hz into a 60 Hz scan judders more than interpolating.
+ */
+static RefreshRateMode ResolveConfiguredRefreshRateMode(double panelHz)
+{
+  RefreshRateMode mode = GetConfiguredRefreshRateMode();
+
+  if (mode == RefreshRateMode::Auto && panelHz > 1.0 &&
+      std::fabs(panelHz - kModel3StepHz) <= kModel3StepHz * 0.005)
+  {
+    static bool reported = false;
+    if (!reported)
+    {
+      reported = true;
+      InfoLog("Pace: the display is running at %.3f Hz, the arcade rate; using Original presentation.", panelHz);
+    }
+    return RefreshRateMode::Original;
+  }
+
+  if (mode == RefreshRateMode::Auto && !s_refreshModeExplicit && ArcadeDisplayModeAvailableCached())
+  {
+    static bool reported = false;
+    if (!reported)
+    {
+      reported = true;
+      InfoLog("Pace: the display offers a 57.524 Hz mode and no refresh rate mode was chosen; using Original.");
+    }
+    return RefreshRateMode::Original;
+  }
+
+  return mode;
+}
+
+/*
+ * Logs a fallback once per distinct (requested, resolved) pair.
+ *
+ * The mode is re-resolved every frame so that plugging in a different display is
+ * noticed immediately, and a fallback is exactly the state that persists - so
+ * the message has to be emitted on change rather than per evaluation.
+ */
+static void ReportPaceFallback(RefreshRateMode requested, RefreshRateMode resolved, double panelHz)
+{
+  if (resolved == requested)
+    return;
+
+  static int lastRequested = -1;
+  static int lastResolved = -1;
+  if (lastRequested == (int)requested && lastResolved == (int)resolved)
+    return;
+  lastRequested = (int)requested;
+  lastResolved = (int)resolved;
+
+  InfoLog("Pace: %s (%.2f Hz) does not fit this display's %.1f Hz; presentation falls back to %s.",
+    RefreshRateModeName(requested), kModel3StepHz * PhaseCountForMode(requested),
+    panelHz, RefreshRateModeName(resolved));
+}
+
+/*
+ * Highest whole refresh rate the configured output advertises.
+ *
+ * The desktop mode is not enough: exclusive fullscreen can select a mode the
+ * desktop is not running, which is exactly how a 120/144 Hz panel is usually
+ * driven. The fullscreen mode list is therefore the authority, and the desktop
+ * rate is only a fallback when the driver reports no modes at all. Cached per
+ * output because enumerating modes allocates and the answer cannot change while
+ * a display is attached.
+ *
+ * Rates are rounded to the nearest whole Hz on purpose: SDL reports 59.94 and
+ * 119.88 for panels everyone calls 60 and 120, and refusing those entries would
+ * grey out the only rate the panel can actually take.
+ */
+static int MaxSupportedRefreshHz()
+{
+  static int fetchedDisplay = -2;
+  static int maxHz = 0;
+
+  const int displayIndex = GetConfiguredDisplaySdlIndex();
+  if (displayIndex == fetchedDisplay)
+    return maxHz;
+
+  fetchedDisplay = displayIndex;
+  maxHz = 0;
+  const OSD::Platform::DisplayId display = OSD::Platform::GetDisplayIdForIndex(displayIndex);
+  const int modeCount = OSD::Platform::GetDisplayModeCount(display);
+  for (int i = 0; i < modeCount; ++i)
+  {
+    OSD::Platform::DisplayMode mode{};
+    if (!OSD::Platform::GetDisplayMode(display, i, &mode) || !(mode.refreshHz > 1.0f))
+      continue;
+    const int hz = (int)std::lround((double)mode.refreshHz);
+    if (hz > maxHz)
+      maxHz = hz;
+  }
+  if (maxHz <= 0)
+  {
+    OSD::Platform::DisplayMode mode{};
+    if (OSD::Platform::GetDesktopDisplayMode(display, &mode) && mode.refreshHz > 1.0f)
+      maxHz = (int)std::lround((double)mode.refreshHz);
+  }
+
+  InfoLog("Pace: display %d reports modes up to %d Hz; fixed-rate choices above that are refused.",
+    displayIndex, maxHz);
+  return maxHz;
+}
+
+static double GetConfiguredFixedRefreshHz()
+{
+  const int configured = s_runtime_config["FixedRefreshRate"].ValueAsDefault<int>(120);
+  const int requested = configured > 1 ? configured : 60;
+
+  /*
+   * Refuse a rate this display never scans. The settings window greys the same
+   * choices out and clamps the saved value at start-up; doing it here as well
+   * covers a [game] section, a command line or a value carried over from another
+   * machine without relying on the interface having run first.
+   */
+  const int clamped = ClampFixedRefreshRate(requested, MaxSupportedRefreshHz());
+  if (clamped != requested)
+  {
+    static int lastRequested = -1;
+    static int lastClamped = -1;
+    if (lastRequested != requested || lastClamped != clamped)
+    {
+      lastRequested = requested;
+      lastClamped = clamped;
+      InfoLog("Pace: fixed %d Hz is above this display's maximum; using %d Hz instead.",
+        requested, clamped);
+    }
+    return (double)clamped;
+  }
+  return (double)requested;
+}
+
+static bool GetConfiguredInterpolation()
+{
+  return s_runtime_config["MotionInterpolation"].ValueAsDefault<bool>(true)
+    && !s_runtime_config["LowLatency"].ValueAsDefault<bool>(false);
 }
 
 static void SuperSleepUntil(const uint64_t target)
 {
-  uint64_t time = SDL_GetPerformanceCounter();
-
-  // If we're ahead of the target, we're done
-  if (time >= target)
-  {
-    return;
-  }
-
-  // Because OS sleep is not accurate,
-  // we actually sleep until a maximum of 2 milliseconds are left.
-  while (int64_t(target - time) * 1000 > 2 * int64_t(s_perfCounterFrequency))
-  {
-    SDL_Delay(1);
-    time = SDL_GetPerformanceCounter();
-  }
-
-  // Spin until requested time
-  int64_t remain;
-  do
-  {
-    // according to all available processor documentation for x86 and arm,
-    // spinning should pause the processor for a short while for better
-    // power efficiency and (surprisingly) overall faster system performance
-    #ifdef SDL_CPUPauseInstruction
-    SDL_CPUPauseInstruction();
-    #endif
-    remain = target - SDL_GetPerformanceCounter();
-  } while (remain > 0);
+  OSD::Platform::SleepUntil(static_cast<OSD::Platform::Nanoseconds>(target));
 }
 
 
@@ -2732,9 +3913,21 @@ static void SaveOverlaySettings()
     return;
   }
 
+#if defined(SUPERMODEL_OPENGL_ONLY)
+  // The file is written back wholesale, so a key left over from the dual-renderer
+  // build would survive every "Apply" in the in-game panel.  Remove them before
+  // anything is merged into it.
+  Util::Config::StripRetiredVulkanSettings(fileConfig);
+#endif
+
   // Only the keys the panel offers are taken from the runtime configuration, so an Apply cannot
   // quietly persist an unrelated change that something else made at run time.
+  // Keep in step with kOverlayKeys in Overlay.cpp: that list is what Cancel restores, this one is
+  // what Apply writes back.
   static const char* const keys[] = {
+    "CRTcolors", "UpscaleMode",
+    // Vulkan2D's light-gun border pass.
+    "SindenBorder", "SindenBorderWidth", "SindenBorderBrightness",
     "WideScreen",
     "PostFXAA", "PostCRT", "PostScanlines", "PostScanlineIntensity",
     "PostMaskType", "PostMaskScale", "PostMaskIntensity",
@@ -2754,6 +3947,58 @@ static void SaveOverlaySettings()
   InfoLog("Overlay: settings saved to '%s'.", s_configFilePath.c_str());
 }
 
+/*
+ * Optional read-only watchdog for save-state load diagnosis.
+ *
+ * Inert unless SM3D_LOAD_DEBUG is set. It exists because the interesting failure is a hang: the
+ * main thread stops inside EndSimulationFrame() and the periodic PACE line never appears again, so
+ * a log written only at load time cannot say whether the PPC is spinning. This thread polls the
+ * emulator once a second, which keeps producing lines while the main loop is stuck.
+ *
+ * The destructor stops the thread on every normal return from Supermodel(). If the process is hard
+ * killed instead, the thread dies with it; the log lines already written are what matter.
+ */
+class LoadDebugWatchdog
+{
+public:
+  explicit LoadDebugWatchdog(IEmulator *emulator) : m_emulator(emulator)
+  {
+    const char *enabled = std::getenv("SM3D_LOAD_DEBUG");
+    if (enabled == nullptr || *enabled == '\0')
+      return;
+
+    m_thread = std::thread([this]() {
+      while (!m_stop.load())
+      {
+        // Ten short sleeps rather than one long one, so shutdown is not delayed by a second.
+        for (int i = 0; i < 10 && !m_stop.load(); ++i)
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (m_stop.load())
+          break;
+
+        const std::string snapshot = m_emulator->DebugSnapshot("watchdog");
+        if (!snapshot.empty())
+          InfoLog("%s", snapshot.c_str());
+      }
+    });
+  }
+
+  ~LoadDebugWatchdog()
+  {
+    m_stop.store(true);
+    if (m_thread.joinable())
+      m_thread.join();
+  }
+
+  LoadDebugWatchdog(const LoadDebugWatchdog &) = delete;
+  LoadDebugWatchdog &operator=(const LoadDebugWatchdog &) = delete;
+
+private:
+  IEmulator *m_emulator = nullptr;
+  std::atomic<bool> m_stop{false};
+  std::thread m_thread;
+};
+
 #ifdef SUPERMODEL_DEBUGGER
 int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *Inputs, COutputs *Outputs, std::shared_ptr<Debugger::CDebugger> Debugger)
 {
@@ -2763,11 +4008,125 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
 {
 #endif // SUPERMODEL_DEBUGGER
   std::string initialState = s_runtime_config["InitStateFile"].ValueAs<std::string>();
+  // Whether s_saveSlot already describes the state this session starts from.
+  bool slotKnown = false;
+#if defined(SUPERMODEL_PURE_VULKAN)
+  std::string deferredState;
+  /*
+   * How long after the session starts the pending state is applied.
+   *
+   * A save state may only be dropped into a machine that has finished its power-on initialisation.
+   * Applied to a machine that is still in its boot ROM (one second in, the old value), Virtua Fighter
+   * 3 Team Battle resumes and then runs at about one twenty-fifth of its normal speed: 0.3 s of game
+   * time in 8 s of wall clock, measured against 7.7 s for the same state applied three seconds in.
+   * Three seconds of emulated machine time is where the boot handover is comfortably complete here.
+   *
+   * The wait is counted in emulated frames rather than wall-clock time, so a machine that cannot keep
+   * up does not shorten the boot the state is waiting for. SM3D_DEFER_LOAD_SECONDS overrides it for
+   * diagnostics (0 = apply immediately, before the first frame).
+   */
+  constexpr double kDeferredLoadSeconds = 3.0;
+  double deferredLoadSeconds = kDeferredLoadSeconds;
+  if (const char *delay = std::getenv("SM3D_DEFER_LOAD_SECONDS"))
+  {
+    const double parsed = std::atof(delay);
+    if (parsed >= 0.0)
+      deferredLoadSeconds = parsed;
+  }
+  const uint64_t deferredLoadFrames = (uint64_t)(deferredLoadSeconds * kModel3RefreshHz);
+  uint64_t simFramesThisSession = 0;
+  // True while the start-up artwork is covering the boot sequence the pending state waits out.
+  bool deferredLoadSplash = false;
+
+  /*
+   * A save chosen in the settings window's Manage Saves dialog arrives as a
+   * .zst path (or a legacy .st). It is applied from the frame loop once the
+   * machine has booted, with the same PauseThreads/LoadState/ResumeThreads
+   * sequence F7 uses; see kDeferredLoadSeconds for why the boot has to happen
+   * first.
+   */
+  if (const std::filesystem::path pending = GuiTakePendingVkState(); !pending.empty())
+  {
+    /*
+     * F5 writes to the slot that was loaded, not to the one the hotkeys were left on: the file name
+     * carries the slot number, so a session started from "lamachin.zst3" overwrites .zst3 rather
+     * than dropping the new state into slot 1 alongside it.
+     */
+    if (const int slot = SaveSlotFromPath(pending); slot >= 0 && slot <= 99)
+    {
+      s_saveSlot = (unsigned)slot;
+      slotKnown = true;
+    }
+
+    deferredState = pending.string();
+    InfoLog("Manage saves: deferring load of '%s' until the game is running.",
+      pending.string().c_str());
+  }
+
+  /*
+   * -load-state goes through the same deferred path as Manage Saves → Load.
+   *
+   * It used to be applied before the first frame, with one frame run first so that gpusReady and the
+   * read-only snapshots existed. That put the state into a machine that had not booted yet, which is
+   * the case the delay exists to avoid (see kDeferredLoadSeconds); the pre-loop frame is no longer
+   * needed because the machine now boots normally first. The GUI's own pending state wins if both
+   * are present.
+   */
+  if (!initialState.empty() && deferredState.empty())
+  {
+    deferredState = initialState;
+    InfoLog("Init state: deferring load of '%s' until the game has started.", initialState.c_str());
+  }
+
+#ifdef _WIN32
+  /*
+   * The machine is about to spend the next three seconds booting, and none of that is what the
+   * player asked to see. Cover the whole monitor with the start-up artwork - the same picture the
+   * settings window shows while its own renderer comes up - and take it down once the state has
+   * been applied. It is a topmost layered window owned by the game window, so the game window can
+   * be revealed underneath it without showing through.
+   *
+   * Shown here rather than just before the frame loop so that the ROM load and renderer set-up are
+   * covered too, which would otherwise be several seconds of black.
+   */
+  if (!deferredState.empty() && s_platformWindow != nullptr)
+  {
+    deferredLoadSplash = OSD::Windows::ShowStartupSplash(s_platformWindow, true);
+    InfoLog("Save state: covering the boot sequence with the start-up artwork (%s).",
+      deferredLoadSplash ? "shown" : "unavailable");
+  }
+#endif
+#endif
+
+  /*
+   * Which slot F5 writes to.
+   *
+   * A session started from a save keeps that save's slot, which is what makes "load, play, F5"
+   * overwrite the state the player resumed (the .zst path above already set it; the legacy
+   * -load-state path may name a slot too). A session that did not start from a save has no slot to
+   * write back to, so it fills the lowest free one instead of reusing whatever slot the previous
+   * session left selected - deleting a save leaves a gap that the next new save should take.
+   */
+  if (!slotKnown)
+  {
+    const int loadedSlot = initialState.empty() ? -1 : SaveSlotFromPath(initialState);
+    s_saveSlot = (loadedSlot >= 0 && loadedSlot <= 99)
+      ? (unsigned)loadedSlot
+      : NextFreeSaveSlot(game.name, 0);
+  }
+
+  // Support-visible: F7 starts on this slot, and on a fresh session it is the first free one.
+  InfoLog("Quick-save slot %u (%s).", s_saveSlot,
+    SaveSlotOccupied(game.name, s_saveSlot) ? "occupied" : "empty");
+
   uint64_t    prevFPSTicks;
   unsigned    fpsFramesElapsed;
   bool        gameHasLightguns = false;
   bool        quit = false;
   bool        paused = false;
+  // True when the emulator is paused because the in-game panel is open, rather than by Alt+P.
+  // Closing the panel resumes only in that case; a manual pause survives it.
+  bool        overlayPausedEmulator = false;
   bool        dumpTimings = false;
   // Previous frame's overlay state, so the mouse visibility and input suppression are only touched
   // when it changes. See the note in the loop.
@@ -2798,21 +4157,32 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
   char titleStr[256];
   totalXRes = xRes = s_runtime_config["XResolution"].ValueAs<unsigned>();
   totalYRes = yRes = s_runtime_config["YResolution"].ValueAs<unsigned>();
-  snprintf(baseTitleStr, sizeof(baseTitleStr), SUPERMODEL_TITLE_FULL " - %s", game.title.c_str());
-  SDL_SetWindowTitle(s_window, baseTitleStr);
-  SDL_SetWindowSize(s_window, totalXRes, totalYRes);
+  // The region belongs in the title: a zip can hold a different revision than its name suggests, and
+  // the title bar is the only place the running revision is visible.
+  const std::string gameTitle = game.version.empty() ? game.title : game.title + " (" + game.version + ")";
+  snprintf(baseTitleStr, sizeof(baseTitleStr), SUPERMODEL_TITLE_FULL " - %s", gameTitle.c_str());
+  OSD::Platform::SetWindowTitle(s_platformWindow, baseTitleStr);
+  OSD::Platform::SetWindowSize(s_platformWindow, totalXRes, totalYRes);
 
   // Centred on the configured output rather than the primary one, so that windowed mode also opens
   // where the display setting says - otherwise a user who picked a second monitor gets the exclusive
   // modes on it and the window everywhere else. An explicit position still wins.
+  //
+  // The centring value used to be SDL's own SDL_WINDOWPOS_CENTERED_DISPLAY() sentinel, which leaked
+  // an SDL encoding into the configuration default. INT_MIN is the neutral spelling: no real window
+  // coordinate can take it, and it means the same thing to both backends.
+  constexpr int kWindowPositionCentered = INT_MIN;
   const int configuredDisplay = GetConfiguredDisplaySdlIndex();
-  int xpos = s_runtime_config["WindowXPosition"].ValueAsDefault<int>(SDL_WINDOWPOS_CENTERED_DISPLAY(configuredDisplay));
-  int ypos = s_runtime_config["WindowYPosition"].ValueAsDefault<int>(SDL_WINDOWPOS_CENTERED_DISPLAY(configuredDisplay));
-  SDL_SetWindowPosition(s_window, xpos, ypos);
+  const int xpos = s_runtime_config["WindowXPosition"].ValueAsDefault<int>(kWindowPositionCentered);
+  const int ypos = s_runtime_config["WindowYPosition"].ValueAsDefault<int>(kWindowPositionCentered);
+  if (xpos == kWindowPositionCentered || ypos == kWindowPositionCentered)
+    OSD::Platform::CenterWindowOnDisplay(s_platformWindow, OSD::Platform::GetDisplayIdForIndex(configuredDisplay));
+  else
+    OSD::Platform::SetWindowPosition(s_platformWindow, xpos, ypos);
 
   if (s_runtime_config["BorderlessWindow"].ValueAs<bool>())
   {
-    SDL_SetWindowBordered(s_window, SDL_FALSE);
+    OSD::Platform::SetWindowBordered(s_platformWindow, false);
   }
 
   // Pick the fullscreen flavour (borderless vs exclusive/G-SYNC vs fixed arcade timing) before the
@@ -2821,17 +4191,62 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
 
   bool stretch = s_runtime_config["Stretch"].ValueAs<bool>();
   bool fullscreen = s_runtime_config["FullScreen"].ValueAs<bool>();
+#if defined(SUPERMODEL_OPENGL_ONLY)
+  Result resized = ResizeGLScreen(&xOffset, &yOffset, &xRes, &yRes, &totalXRes, &totalYRes, !stretch, fullscreen);
+#elif defined(SUPERMODEL_PURE_VULKAN)
+  Result resized = ResizeVulkanScreen(&xOffset, &yOffset, &xRes, &yRes, &totalXRes, &totalYRes, !stretch, fullscreen);
+#else
   Result resized = s_vkContext
     ? ResizeVulkanScreen(&xOffset, &yOffset, &xRes, &yRes, &totalXRes, &totalYRes, !stretch, fullscreen)
     : ResizeGLScreen(&xOffset, &yOffset, &xRes, &yRes, &totalXRes, &totalYRes, !stretch, fullscreen);
+#endif
   if (Result::OKAY != resized)
     return 1;
 
   // Info log GL information
+#if defined(SUPERMODEL_PURE_VULKAN)
+  if (s_vkContext)
+    InfoLog("Vulkan 3D engine enabled.");
+#elif defined(SUPERMODEL_OPENGL_ONLY)
+  PrintGLInfo(false, true, false);
+#else
   if (s_vkContext)
     InfoLog("Vulkan 3D engine enabled.");
   else
     PrintGLInfo(false, true, false);
+#endif
+
+  /*
+   * Which loop this session runs.
+   *
+   * The high-refresh path needs a Vulkan swapchain to present into from the
+   * renderer; the OpenGL backends keep the original one-simulation-one-present
+   * loop, including their own frame limiter. This is a runtime decision in the
+   * dual binary and a compile-time one elsewhere.
+   */
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+  const bool highRefresh = (s_vkContext != nullptr);
+#else
+  const bool highRefresh = false;
+#endif
+
+  CDisplayPacer pacer;
+  {
+    const double panelHz = GetEffectivePanelRefreshHz();
+    const RefreshRateMode requested = ResolveConfiguredRefreshRateMode(panelHz);
+    const RefreshRateMode resolved = ResolvePhaseModeForPanel(requested, panelHz);
+    ReportPaceFallback(requested, resolved, panelHz);
+
+    DisplayPacerConfig pacerConfig;
+    pacerConfig.mode = resolved;
+    pacerConfig.fixedHz = GetConfiguredFixedRefreshHz();
+    pacerConfig.panelHz = panelHz;
+    pacerConfig.vsync = s_runtime_config["VSync"].ValueAsDefault<bool>(true);
+    pacerConfig.throttle = s_runtime_config["Throttle"].ValueAsDefault<bool>(true);
+    pacerConfig.interpolation = GetConfiguredInterpolation();
+    if (highRefresh)
+      pacer.Configure(pacerConfig, OSD::Platform::Now());
+  }
 
   // Initialize audio system
   SetAudioType(game.audio);
@@ -2848,7 +4263,7 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
   // focus; RunGameSession drops it explicitly on the way out.
   if (gameHasLightguns)
   {
-    SDL_SetWindowMouseGrab(s_window, SDL_TRUE);
+    OSD::Platform::SetWindowMouseGrab(s_platformWindow, true);
     InfoLog("Input: mouse confined to the game window for light gun aiming.");
   }
 
@@ -2875,11 +4290,10 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
     Model3->AttachOutputs(Outputs);
 
   // Frame timing
-  s_perfCounterFrequency = SDL_GetPerformanceFrequency();
-  uint64_t perfCountPerFrame = s_perfCounterFrequency * 1000 / GetDesiredRefreshRateMilliHz();
+  uint64_t perfCountPerFrame = GetDesiredFramePeriodNs();
   // Absolute target for the next frame. This is advanced by exactly one frame period
   // each time (see the main loop) instead of being rebased on the current time.
-  uint64_t nextTime = SDL_GetPerformanceCounter() + perfCountPerFrame;
+  uint64_t nextTime = OSD::Platform::Now() + perfCountPerFrame;
 
   // Initialize the renderers
   SuperAA* superAA = nullptr;
@@ -2887,6 +4301,7 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
   IRender3D *Render3D = nullptr;
   UpscaleMode upscaleMode = (UpscaleMode)s_runtime_config["UpscaleMode"].ValueAs<int>();
   unsigned aaTarget = 0;
+#if !defined(SUPERMODEL_OPENGL_ONLY)
   if (s_vkContext)
   {
     if (aaValue != 1)
@@ -2895,11 +4310,14 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
       aaValue = 1;
     }
     Vulkan3D::CVulkan2D* vk2d = new Vulkan3D::CVulkan2D(s_runtime_config, *s_vkContext);
+    s_vk2dRenderer = vk2d;
     Render2D = vk2d;
     s_vk3dRenderer = new Vulkan3D::CVulkan3D(s_runtime_config, Model3->GetGame().name, *s_vkContext, *vk2d);
     Render3D = s_vk3dRenderer;
   }
   else
+#endif
+#if !defined(SUPERMODEL_PURE_VULKAN)
   {
     superAA = new SuperAA(aaValue, CRTcolors);
     superAA->Init(totalXRes, totalYRes);  // pass actual frame sizes here
@@ -2912,11 +4330,25 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
     Render3D = (IRender3D *) new New3D::CNew3D(s_runtime_config, Model3->GetGame().name);
 #endif
   }
+#else
+  {
+    // Pure-Vulkan build only: the context cannot be null once a session is running.
+  }
+#endif
 
+  /*
+   * Init() is where the pipelines are actually created, and that is the cost the on-disk pipeline
+   * cache is meant to remove: from cold, every shader in the backend is compiled on every start.
+   */
+  const uint64_t rendererInitStart = OSD::Platform::Now();
   if (Result::OKAY != Render2D->Init(xOffset*aaValue, yOffset*aaValue, xRes*aaValue, yRes*aaValue, totalXRes*aaValue, totalYRes*aaValue, aaTarget, upscaleMode))
     goto QuitError;
   if (Result::OKAY != Render3D->Init(xOffset*aaValue, yOffset*aaValue, xRes*aaValue, yRes*aaValue, totalXRes*aaValue, totalYRes*aaValue, aaTarget))
     goto QuitError;
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+  if (s_vkContext)
+    InfoLog("Vulkan: pipelines ready (%.0f ms).", (OSD::Platform::Now() - rendererInitStart) / 1e6);
+#endif
 
   Model3->AttachRenderers(Render2D,Render3D, superAA);
 
@@ -2924,8 +4356,18 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
   // antialiasing. Done here because this is the only point where every input is known: the effective
   // supersampling factor (Vulkan has just forced it to 1), the window size, and - for Vulkan - the
   // sample count the driver actually granted.
-  ReportRenderInfo(aaValue, totalXRes, totalYRes);
+  ReportRenderInfo(aaValue, xRes, yRes, totalXRes, totalYRes);
 
+  /*
+   * C++23 (unlike the C++17 mode MSVC used to accept this in) rejects a goto
+   * that jumps over an initialized declaration in the same scope.  The two
+   * QuitError branches above and the ones inside the frame loop all target the
+   * label below it, so the loop and its locals live in their own scope:
+   * leaving a block with goto is well-formed, jumping over its initializers is
+   * not.  Nothing is reordered, and the cleanup at QuitError sees exactly the
+   * same objects as before.
+   */
+  {
   /*
    * In-game settings overlay.
    *
@@ -2941,8 +4383,22 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
    * The scale is taken from the display DPI so the panel is the same size as the settings window's
    * controls rather than tiny on a high-DPI screen. Clamped like the settings window clamps it.
    */
+  float overlayScale = 1.0f;
+
+  /*
+   * Match the in-game panel to the interface theme the settings window is using.
+   *
+   * The overlay owns a second ImGui context and applies the theme when it is created, so this has to
+   * be set before OverlayInit()/OverlayInitGL() - and it is why a theme change takes effect in the
+   * panel from the next session rather than immediately. 0 = light, 1 = dark, 2 = the pre-rework
+   * interface; anything else reads as the default rather than leaving the window unstyled.
+   */
   {
-    float overlayScale = 1.0f;
+    const int themeValue = s_runtime_config["UITheme"].ValueAsDefault<int>(0);
+    SetUiTheme(themeValue == 1 ? UiTheme::WarmDark
+      : (themeValue == 2 ? UiTheme::Classic : UiTheme::WarmPaper));
+  }
+  {
 #ifdef _WIN32
     if (HDC screen = GetDC(nullptr))
     {
@@ -2953,15 +4409,28 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
     if (overlayScale < 1.0f) overlayScale = 1.0f;
     if (overlayScale > 2.5f) overlayScale = 2.5f;
 
+#if !defined(SUPERMODEL_OPENGL_ONLY)
     if (s_vkContext)
     {
-      if (OverlayInit(*s_vkContext, s_window, overlayScale))
-        static_cast<Vulkan3D::CVulkan2D*>(Render2D)->SetOverlayPass(&OverlayRender);
+      if (OverlayInit(*s_vkContext, s_platformWindow, overlayScale))
+      {
+        Vulkan3D::CVulkan2D* renderer2D = static_cast<Vulkan3D::CVulkan2D*>(Render2D);
+        renderer2D->SetOverlayPass(&OverlayRender);
+        /*
+         * Frosted glass. The gate is asked once per frame and decides whether the blur chain runs
+         * at all, which is what keeps a session that never opens the panel at exactly zero cost; the
+         * source hands the overlay the half-resolution result to register with its own ImGui context.
+         */
+        renderer2D->SetUiFrostGate(&OverlayWantsFrost);
+        s_overlayFrostRenderer = renderer2D;
+        OverlaySetFrostTextureSource(&OverlayFrostTextureFromRenderer);
+      }
     }
     else
+#endif
     {
       // Requires the game window's context to be current, which CreateGLScreen left it as.
-      OverlayInitGL(s_window, overlayScale);
+      OverlayInitGL(s_platformWindow, overlayScale);
     }
 
     /*
@@ -2971,7 +4440,7 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
      * Set after the overlay is initialised because a readout with no ImGui backend behind it would be
      * enabled and invisible - see the note on StatsOsdEnabled in Overlay.cpp.
      */
-    StatsOsdSetWindow(s_window);
+    StatsOsdSetWindow(s_platformWindow);
 
     /*
      * The renderer is named from what is actually running, not from the configuration.
@@ -2981,8 +4450,26 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
      * backend that is not the one drawing the picture. Which renderer this session got is known here
      * and nowhere else, so it is decided here.
      */
+#if defined(SUPERMODEL_OPENGL_ONLY)
+    StatsOsdSetRenderer(s_runtime_config["New3DEngine"].ValueAs<bool>()
+      ? StatsRenderer::New3D : StatsRenderer::Legacy3D);
+#elif defined(SUPERMODEL_PURE_VULKAN)
+    StatsOsdSetRenderer(StatsRenderer::Vulkan3D);
+#else
     StatsOsdSetRenderer(s_vkContext ? StatsRenderer::Vulkan3D
       : (s_runtime_config["New3DEngine"].ValueAs<bool>() ? StatsRenderer::New3D : StatsRenderer::Legacy3D));
+#endif
+
+    /*
+     * The GPU's name for the readout, from the context that actually opened the device.
+     *
+     * Only Vulkan can supply one; the OpenGL backends leave the line unnamed rather than guess from
+     * a device string they never asked for. NVML overrides this with its own name on NVIDIA machines.
+     */
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+    if (s_vkContext)
+      StatsOsdSetGpuName(s_vkContext->DeviceName().c_str());
+#endif
 
     StatsOsdApplyConfig(s_runtime_config["ShowStatsOsd"].ValueAsDefault<bool>(false));
   }
@@ -2990,9 +4477,26 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
   // Reset emulator
   Model3->Reset();
 
+  // Starts only when SM3D_LOAD_DEBUG is set; otherwise this constructor does nothing.
+  LoadDebugWatchdog loadDebugWatchdog(Model3);
+
+#if defined(SUPERMODEL_PURE_VULKAN)
+  // The pending state was set up at the top of the function; nothing to do here on this build.
+#else
   // Load initial save state if requested
   if (!initialState.empty())
     LoadState(Model3, initialState);
+#endif
+
+#if defined(SUPERMODEL_PURE_VULKAN)
+  // Leaving the game while a save is still waiting for its thumbnail: finish it now rather than
+  // losing it with the session.
+  if (s_pendingSave.active)
+  {
+    s_pendingSave.framesWaited = 30;
+    ServicePendingSave();
+  }
+#endif
 
 #ifdef SUPERMODEL_DEBUGGER
   // If debugger was supplied, set it as logger and attach it to system
@@ -3006,14 +4510,17 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
 
   // Emulate!
   fpsFramesElapsed = 0;
-  prevFPSTicks = SDL_GetPerformanceCounter();
+  prevFPSTicks = OSD::Platform::Now();
   quit = false;
   paused = false;
+  overlayPausedEmulator = false;
   dumpTimings = false;
 #ifdef DEBUG
   if (dynamic_cast<CModel3GraphicsState *>(Model3))
   {
+#if !defined(SUPERMODEL_PURE_VULKAN)
     TestPolygonHeaderBits(Model3);
+#endif
     quit = true;
   }
 #endif
@@ -3023,8 +4530,9 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
   if (s_runtime_config["HighPriority"].ValueAsDefault<bool>(true))
     RaiseProcessPriority();
 
-  // Keep the game running while the window is dragged; see ModalLoopMessageHook.
-  SetModalLoopHook(Model3);
+  // Keep the game running while the window is dragged (SDL2), or pause it there (SDL3); see
+  // ModalLoopMessageHook / ModalLoopPauseHook.
+  SetModalLoopHook(Model3, &paused);
 
   /*
    * Save-state menu handlers for the in-game overlay.
@@ -3037,21 +4545,54 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
     OverlaySaveHandlers saveHandlers;
     saveHandlers.list = [Model3]() {
       std::vector<OverlaySaveSlot> slots;
-      const std::string base = Util::Format() << FileSystemPath::GetPath(FileSystemPath::Saves)
-        << Model3->GetGame().name << ".st";
-      for (unsigned slot = 1; slot <= 8; ++slot)
+      const std::string game = Model3->GetGame().name;
+      for (unsigned slot = 1; slot <= SAVE_SLOT_COUNT; ++slot)
       {
         OverlaySaveSlot info;
         info.slot = slot;
         info.active = (slot == s_saveSlot);
-        const std::string path = base + std::to_string(slot);
-        std::error_code ec;
-        info.exists = std::filesystem::exists(path, ec);
-        if (info.exists && !ec)
+
+        // A slot normally holds the container; the classic name is kept as the fallback so states
+        // written before it existed are still listed and still load.
+        std::string path = SaveSlotLegacyFile(game, slot);
+        bool exists = false;
+        std::error_code ec = {};
+        exists = std::filesystem::exists(path, ec) && !ec;
+#if defined(SUPERMODEL_OPENGL_ONLY)
+        /*
+         * The OpenGL build used to share Data/Saves with the Vulkan build. Keep those old .st files
+         * visible in the panel (and therefore selectable) even though new saves go to Saves_Legacy.
+         */
+        if (!exists)
+        {
+          const std::string fallback = SaveSlotLegacyFallback(game, slot);
+          std::error_code fallbackError = {};
+          if (std::filesystem::exists(fallback, fallbackError) && !fallbackError)
+          {
+            path = fallback;
+            exists = true;
+          }
+        }
+#endif
+#if defined(SUPERMODEL_PURE_VULKAN)
+        {
+          const std::string container = SaveSlotContainer(game, slot);
+          std::error_code containerError = {};
+          if (std::filesystem::exists(container, containerError) && !containerError)
+          {
+            path = container;
+            exists = true;
+          }
+        }
+#endif
+		info.exists = exists;
+		info.path = path;
+        if (exists)
         {
           const auto written = std::filesystem::last_write_time(path, ec);
           if (!ec)
           {
+            info.revision = (std::uint64_t)written.time_since_epoch().count();
             const auto age = std::filesystem::file_time_type::clock::now() - written;
             info.ageSeconds = std::chrono::duration<double>(age).count();
             if (info.ageSeconds < 0.0)
@@ -3062,7 +4603,11 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
       }
       return slots;
     };
+#if defined(SUPERMODEL_PURE_VULKAN)
+    saveHandlers.apply = [Model3, &paused, &deferredState, &deferredLoadSplash](unsigned slot, bool save) {
+#else
     saveHandlers.apply = [Model3, &paused](unsigned slot, bool save) {
+#endif
       // The same pause protocol the F5/F7 hotkeys use. When the emulator is already paused there is
       // nothing to do: the threads are stopped and the state is stable.
       if (!paused)
@@ -3078,6 +4623,18 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
       }
       else
       {
+#if defined(SUPERMODEL_PURE_VULKAN)
+        // The Tab panel's Load is a manual load; it wins over a deferred Manage Saves load.
+        deferredState.clear();
+#ifdef _WIN32
+        if (deferredLoadSplash)
+        {
+          deferredLoadSplash = false;
+          OSD::Windows::HideStartupSplash();
+        }
+#endif
+#endif
+        InfoLog("Overlay: loading save slot %u.", s_saveSlot);
         LoadState(Model3);
 #ifdef SUPERMODEL_DEBUGGER
         if (Debugger != NULL)
@@ -3094,16 +4651,196 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
     OverlaySetSaveHandlers(std::move(saveHandlers));
   }
 
-  // Temporary test hook: open the settings overlay at startup so the panel can be inspected
-  // without synthetic keyboard input, which the input system ignores.
-  if (std::getenv("SM3D_OVERLAY_OPEN") != nullptr)
-    OverlaySetVisible(s_runtime_config, true);
+  /*
+   * Test hook: open the in-game panel shortly after a session starts.
+   *
+   * Deferred rather than immediate. Opening it at frame zero pauses the emulator before it has
+   * rendered anything, and the window then shows a black frame with no panel in it - so the hook
+   * would photograph exactly nothing. The delay is counted in main-loop iterations, which is the
+   * only tick available here that does not depend on a debug switch.
+   */
+  int overlayOpenCountdown = std::getenv("SM3D_OVERLAY_OPEN") != nullptr ? 120 : -1;
+
+  /*
+   * Frame timing, off unless SM3D_FRAME_TIMING is in the environment.
+   *
+   * Two figures, averaged over one second: the ImGui frame the overlay builds (ui), and the gap from
+   * the input poll to the moment the frame is handed to the emulator for rendering (poll-to-render).
+   * The second is the part that matters for a light gun: it is time the player's aim spends waiting
+   * before the frame it belongs to is submitted.
+   *
+   * Gated by an environment variable rather than compiled out, so the same release binary can be
+   * measured before and after a change. When it is not set the loop pays one branch per frame.
+   */
+  const bool timing = std::getenv("SM3D_FRAME_TIMING") != nullptr;
+  s_frameTiming = timing;
+  uint64_t timingFrames = 0;
+  uint64_t timingOverlayNs = 0;
+  uint64_t timingRunNs = 0;
+  uint64_t timingGapNs = 0;
+  uint64_t timingPresentNs = 0;
+  uint64_t timingPresentFrames = 0;
+  uint64_t timingNextReport = OSD::Platform::Now() + OSD::Platform::kNanosecondsPerSecond;
+
+  /*
+   * Whether the picture handed to the swapchain reached the screen, from VK_KHR_present_wait.
+   *
+   * Counted over the same one-second window as the rest of the probe. Not a rate and not a fault
+   * when it is low: a loop that prepares the next frame while the previous one is still queued
+   * is pipelining normally. It is the figure that says whether the compositor consumed what it
+   * was given, which is otherwise invisible from in here.
+   */
+  uint64_t displayAttempts = 0;
+  uint64_t displayConfirms = 0;
+  uint64_t displayLate = 0;
+
+  /*
+   * Present phase calibration. The first presents after the pacer is configured block on the scan-out
+   * so its distance from the deadline can be measured; thereafter the wait costs nothing. Reset
+   * whenever the pacer is reconfigured, because a new mode or panel has a different vblank phase.
+   */
+  int presentCalibrationFrames = 16;
+  int64_t presentLeadSum = 0;
+  int presentLeadSamples = 0;
+
+  /*
+   * Sleep-lateness samples for the same probe: how far past the deadline the frame loop
+   * actually woke, in nanoseconds. A fixed-size sliding window (about ten seconds at 60 fps)
+   * gives a meaningful p99 without allocating per frame.
+   */
+  constexpr size_t kSleepLateSamples = 600;
+  int64_t sleepLate[kSleepLateSamples] = {};
+  size_t sleepLateCount = 0;
+  size_t sleepLateNext = 0;
+
+  // Last pacing values applied, so an edit in the in-game panel is noticed
+  // without rebuilding the pacer (and discarding the accumulator) every frame.
+  int lastPacerMode = (int)ResolvePhaseModeForPanel(GetConfiguredRefreshRateMode(), GetEffectivePanelRefreshHz());
+  int lastPacerFixed = (int)GetConfiguredFixedRefreshHz();
+  bool lastPacerInterp = GetConfiguredInterpolation();
+  OSD::Platform::Nanoseconds nextPanelCheck = OSD::Platform::Now() + OSD::Platform::kNanosecondsPerSecond;
+  OSD::Platform::Nanoseconds nextPaceLog = OSD::Platform::Now() + 5 * OSD::Platform::kNanosecondsPerSecond;
+  uint64_t perfSimNs = 0;
+  uint64_t perfRenderNs = 0;
+  uint64_t perfSubNs = 0;
+  uint64_t perfSubFrames = 0;
+  uint64_t perfFrames = 0;
+
+  /*
+   * Developer hook: SM3D_SCREENSHOT_AT=<seconds> requests one screenshot that many seconds into the
+   * session.
+   *
+   * The UI hotkey needs the game window to have keyboard focus. A script that starts the emulator
+   * does not get it (Windows' foreground lock keeps the launching shell in front), and an exclusive
+   * fullscreen session cannot hand it over at all - so screenshots for bug reports and A/B
+   * comparisons need a path that does not depend on focus. The clock starts here rather than at
+   * process start, so the delay means "after the state is loaded and the first frame is up".
+   */
+  const char *screenshotAt = std::getenv("SM3D_SCREENSHOT_AT");
+  const auto screenshotClock = std::chrono::steady_clock::now();
+  bool screenshotTaken = false;
+
+  /*
+   * Developer hook: SM3D_SCREENSHOT_FRAME=<n> is the same request counted in emulated frames.
+   *
+   * The seconds hook is wall clock, and start-up overhead differs by a few milliseconds between
+   * runs - which is several emulated frames. An A/B pair captured that way shows two different
+   * moments of the scene, so a pixel diff between them measures the camera as much as the change.
+   * Counting the same frames the deferred load counts makes two runs capture the same emulated
+   * frame. 0 or unset disables it.
+   *
+   * The shot is taken on the present that carries the simulation step. In the phase-locked modes
+   * one emulated frame is presented two to eight times with different interpolation weights, and a
+   * trigger that does not say which of those it wants lands on whichever one the clock produced.
+   *
+   * The counter is maintained by the Vulkan loop only; on the OpenGL build this hook never fires.
+   */
+  const char *screenshotFrameEnv = std::getenv("SM3D_SCREENSHOT_FRAME");
+  const uint64_t screenshotFrame =
+    (screenshotFrameEnv != nullptr && *screenshotFrameEnv != '\0') ? std::strtoull(screenshotFrameEnv, nullptr, 10) : 0;
+#if defined(SUPERMODEL_OPENGL_ONLY)
+  if (screenshotFrame != 0)
+    ErrorLog("Screenshot: SM3D_SCREENSHOT_FRAME is counted by the Vulkan frame loop; use SM3D_SCREENSHOT_AT with this build.");
+#endif
+
+  /*
+   * Developer hook: SM3D_SAVE_STATE_FRAME=<n> writes a save state at emulated frame n, and
+   * SM3D_SAVE_STATE_SLOT=<n> names the slot. Loading a state, letting the game reach a known
+   * frame, saving there and loading the new file in a second run is how the save-state blocks are
+   * exercised without a human at the keyboard. The slot override matters: a session started from
+   * "scudplus.zst1" would otherwise write back to .zst1, which is F5's normal behaviour.
+   *
+   * Vulkan only, like SM3D_SCREENSHOT_FRAME: the counter it compares against belongs to that loop.
+   */
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+  const char *saveStateFrameEnv = std::getenv("SM3D_SAVE_STATE_FRAME");
+  const uint64_t saveStateFrame =
+    (saveStateFrameEnv != nullptr && *saveStateFrameEnv != '\0') ? std::strtoull(saveStateFrameEnv, nullptr, 10) : 0;
+  const char *saveStateSlotEnv = std::getenv("SM3D_SAVE_STATE_SLOT");
+  const int saveStateSlot =
+    (saveStateSlotEnv != nullptr && *saveStateSlotEnv != '\0') ? std::atoi(saveStateSlotEnv) : -1;
+  bool saveStateFrameDone = false;
+#endif
 
   while (!quit)
   {
-    // Marks the boundary of one emulated frame, so the statistics readout measures the emulator's real
-    // frame rate rather than the rate it is presenting at. Before the input poll, so a frame that ends
-    // the loop is still counted.
+#if defined(SUPERMODEL_PURE_VULKAN)
+    // Packages a save that is waiting for its thumbnail. Runs at the top of the frame so the PNG
+    // written by the renderer's worker thread during the previous frames is picked up as soon as it
+    // is complete; with no thumbnail requested this writes the container immediately.
+    ServicePendingSave();
+
+    /*
+     * Manage Saves → Load (and -load-state) is applied here, not before the first frame.
+     *
+     * The machine has to have finished booting first, for the reason in the note on
+     * kDeferredLoadSeconds: a state restored into a machine that is still in its boot ROM leaves it
+     * running at about one twenty-fifth speed. The wait is counted in emulated frames, and the
+     * start-up artwork covers the boot sequence in the meantime, so the player sees the picture and
+     * then the resumed game rather than the game's own boot screen.
+     */
+    if (!deferredState.empty() && simFramesThisSession >= deferredLoadFrames)
+    {
+      const bool wasPaused = paused;
+      if (!wasPaused)
+      {
+        Model3->PauseThreads();
+        SetAudioEnabled(false);
+      }
+
+      InfoLog("Manage saves: loading deferred state '%s' (PPC PC=%08X LR=%08X after %llu emulated frame(s)).",
+        deferredState.c_str(), ppc_get_pc(), ppc_get_lr(),
+        (unsigned long long)simFramesThisSession);
+      LoadState(Model3, deferredState);
+
+      if (!wasPaused)
+      {
+        Model3->ResumeThreads();
+        SetAudioEnabled(true);
+      }
+
+      // The game is in the state the player asked for, so the cover comes down now.
+#ifdef _WIN32
+      if (deferredLoadSplash)
+      {
+        deferredLoadSplash = false;
+        OSD::Windows::HideStartupSplash();
+        InfoLog("Manage saves: start-up artwork removed after the state was applied.");
+      }
+#endif
+
+      std::error_code removeError;
+      const std::string deferredTemp =
+        Util::Format() << FileSystemPath::GetPath(FileSystemPath::Saves) << ".vktmp.st";
+      std::filesystem::remove(deferredTemp, removeError);
+      deferredState.clear();
+    }
+#endif
+
+    // Marks the boundary of one presented frame, so the statistics readout reports the rate frames
+    // actually reach the display at - including the interpolation-only presents of the 2x/3x/4x/8x
+    // modes, which is why it reads ~115 at 2x rather than the 57.5 Hz logic rate. Before the input
+    // poll, so a frame that ends the loop is still counted.
     StatsOsdFrameTick();
 
     // Re-sent every frame rather than once at startup: a fullscreen toggle or a display change can make
@@ -3111,10 +4848,144 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
     // session ended up rather than where it was intended to go.
     StatsOsdSetSyncMode(StatsSyncModeForCurrentSession());
 
+    /*
+     * Keep the pacer in step with edits made in the in-game panel, and with a
+     * display mode change after a fullscreen toggle. The mode/rate/interpolation
+     * values are cheap to read; the panel mode is queried once a second because
+     * it involves SDL and cannot change faster than the user can switch modes.
+     */
+    if (highRefresh)
+    {
+      /*
+       * The resolved mode, not the configured one: a phase multiple the display
+       * cannot take has to be downgraded here, before it reaches the pacer, and
+       * the downgrade has to be re-evaluated when the panel changes (a game moved
+       * to another monitor, an exclusive mode switch).
+       */
+      const double panelHz = GetEffectivePanelRefreshHz();
+      const RefreshRateMode requested = ResolveConfiguredRefreshRateMode(panelHz);
+      const RefreshRateMode resolved = ResolvePhaseModeForPanel(requested, panelHz);
+      ReportPaceFallback(requested, resolved, panelHz);
+
+      const int mode = (int)resolved;
+      const int fixed = (int)GetConfiguredFixedRefreshHz();
+      const bool interp = GetConfiguredInterpolation();
+      if (mode != lastPacerMode || fixed != lastPacerFixed || interp != lastPacerInterp)
+      {
+        lastPacerMode = mode;
+        lastPacerFixed = fixed;
+        lastPacerInterp = interp;
+        DisplayPacerConfig pacerConfig;
+        pacerConfig.mode = resolved;
+        pacerConfig.fixedHz = GetConfiguredFixedRefreshHz();
+        pacerConfig.panelHz = panelHz;
+        pacerConfig.vsync = s_runtime_config["VSync"].ValueAsDefault<bool>(true);
+        pacerConfig.throttle = s_runtime_config["Throttle"].ValueAsDefault<bool>(true);
+        pacerConfig.interpolation = interp;
+        pacer.Configure(pacerConfig, OSD::Platform::Now());
+        // A new mode or panel has a different vblank phase, so the previous lead says nothing and
+        // the phase has to be measured again.
+        presentCalibrationFrames = 16;
+        presentLeadSum = 0;
+        presentLeadSamples = 0;
+
+        /*
+         * A VRR multiple only reaches the panel if the driver is allowed to hold
+         * the frame until it is scanned. Without vsync the swapchain is MAILBOX
+         * or IMMEDIATE, the panel keeps its own rate, and a 115 Hz presentation
+         * is quantised onto a 120 Hz scan - the uneven cadence this mode exists
+         * to remove, with extra work.
+         */
+        if (PhaseCountForMode(resolved) > 0 && !pacerConfig.vsync)
+          InfoLog("Pace: VSync is off, so the display will not follow a %.2f Hz presentation; "
+            "enable VSync for the multiple to hold.", pacer.TargetPresentHz());
+      }
+
+      const OSD::Platform::Nanoseconds now = OSD::Platform::Now();
+      if (now >= nextPanelCheck)
+      {
+        nextPanelCheck = now + OSD::Platform::kNanosecondsPerSecond;
+        pacer.SetPanelHz(panelHz, (uint64_t)now);
+      }
+    }
+
     // The pacing rate, for the same reason and so that the borderless cadence check works even with the
     // readout switched off - which is the state most people are in while wondering why the picture
     // stutters.
-    StatsOsdSetTargetRate(s_runtime_config["RefreshRate"].ValueAsDefault<float>(0.0f));
+    StatsOsdSetTargetRate(highRefresh
+      ? (float)pacer.TargetPresentHz()
+      : s_runtime_config["RefreshRate"].ValueAsDefault<float>(0.0f));
+
+    /*
+     * The pacing line, from the last completed present. One frame of staleness is invisible in a text
+     * readout and it avoids reordering the loop: the readout is built below, before this frame's present.
+     */
+    {
+      StatsPaceInfo paceInfo;
+      paceInfo.valid = highRefresh;
+      if (highRefresh)
+      {
+        paceInfo.logicHz = pacer.MeasuredLogicHz();
+        paceInfo.presentHz = pacer.MeasuredPresentHz();
+        paceInfo.targetHz = pacer.TargetPresentHz();
+        paceInfo.panelHz = GetEffectivePanelRefreshHz();
+        paceInfo.alpha = pacer.LastAlpha();
+        paceInfo.ratio = pacer.Ratio();
+        paceInfo.interpolating = pacer.InterpolationEnabled();
+        paceInfo.modeLabel = RefreshRateModeName(pacer.Mode());
+        paceInfo.phaseLocked = pacer.IsPhaseLocked();
+        paceInfo.phaseCount = pacer.PhaseCount();
+        paceInfo.phaseIndex = pacer.PhaseIndex();
+        pacer.PhaseAlphas(paceInfo.phaseAlpha, 8);
+		        paceInfo.subFrameMs = perfSubFrames ? (double)perfSubNs / 1.0e6 / (double)perfSubFrames : 0.0;
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+        paceInfo.cuts = s_vk3dRenderer ? (unsigned)s_vk3dRenderer->TotalCuts() : 0u;
+#endif
+      }
+      StatsOsdSetPaceInfo(paceInfo);
+    }
+
+    if (highRefresh && OSD::Platform::Now() >= nextPaceLog)
+    {
+      nextPaceLog = OSD::Platform::Now() + 5 * OSD::Platform::kNanosecondsPerSecond;
+      // Sampled from the main thread while the PPC may be running; enough to tell a wait loop
+      // from a moving PC when a session is reported as frozen.
+      InfoLog("PPC: PC=%08X LR=%08X (sample).", ppc_get_pc(), ppc_get_lr());
+      const double simMs = perfFrames ? (double)perfSimNs / 1.0e6 / (double)perfFrames : 0.0;
+      const double renderMs = perfFrames ? (double)perfRenderNs / 1.0e6 / (double)perfFrames : 0.0;
+      const double subMs = perfSubFrames ? (double)perfSubNs / 1.0e6 / (double)perfSubFrames : 0.0;
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+      const unsigned lastDraws = s_vk3dRenderer ? s_vk3dRenderer->LastDrawCount() : 0u;
+      const unsigned long long totalCuts = s_vk3dRenderer ? s_vk3dRenderer->TotalCuts() : 0ull;
+#else
+      const unsigned lastDraws = 0u;
+      const unsigned long long totalCuts = 0ull;
+#endif
+      if (pacer.IsPhaseLocked())
+      {
+        InfoLog("PACE: mode %s, logic %.2f Hz, present %.2f Hz, target %.2f Hz, phase %d/%d (alpha %.3f), "
+          "sim %llu, presents %llu, dropped %llu, sim %.2f ms/frame, render %.2f ms/frame, "
+          "sub %.2f ms/frame, draws %u, cuts %llu, lead %.2f ms.",
+          RefreshRateModeName(pacer.Mode()), pacer.MeasuredLogicHz(), pacer.MeasuredPresentHz(),
+          pacer.TargetPresentHz(), pacer.PhaseIndex() + 1, pacer.PhaseCount(), pacer.LastAlpha(),
+          (unsigned long long)pacer.SimSteps(), (unsigned long long)pacer.Presents(),
+          (unsigned long long)pacer.DroppedSteps(), simMs, renderMs, subMs, lastDraws, totalCuts,
+          (double)pacer.PresentLead() / 1.0e6);
+      }
+      else
+      {
+        InfoLog("PACE: logic %.2f Hz, present %.2f Hz, target %.2f Hz, alpha %.3f, sim %llu, presents %llu, dropped %llu, sim %.2f ms/frame, render %.2f ms/frame, draws %u, cuts %llu, lead %.2f ms.",
+          pacer.MeasuredLogicHz(), pacer.MeasuredPresentHz(), pacer.TargetPresentHz(), pacer.LastAlpha(),
+          (unsigned long long)pacer.SimSteps(), (unsigned long long)pacer.Presents(),
+          (unsigned long long)pacer.DroppedSteps(), simMs, renderMs, lastDraws, totalCuts,
+          (double)pacer.PresentLead() / 1.0e6);
+      }
+      perfSimNs = 0;
+      perfRenderNs = 0;
+      perfSubNs = 0;
+      perfSubFrames = 0;
+      perfFrames = 0;
+    }
 
     /*
      * Reported in borderless fullscreen when the panel's rate does not divide evenly into the emulated
@@ -3147,12 +5018,15 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
         "此时本条提示可忽略）。");
     }
 
+    // Read every frame: the in-game panel edits s_runtime_config while the session is running.
+    Inputs->SetGamepadSteeringSmoothing(
+      s_runtime_config["GamepadSteeringSmoothing"].ValueAsDefault<int>(0));
+
     // Poll the inputs
     if (!Inputs->Poll(&game, xOffset, yOffset, xRes, yRes))
       quit = true;
 
-    // Queue the crosshair for the overlay before the ImGui frame is built below.
-    UpdateOverlayCrosshair(Inputs, currentInputs, xOffset, yOffset, xRes, yRes);
+    const uint64_t timingPollDone = timing ? OSD::Platform::Now() : 0;
 
     /*
      * Build the in-game panel before the frame is rendered, so a value changed here reaches the
@@ -3161,8 +5035,24 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
      *
      * The statistics readout shares that frame and that draw pass; see OverlayNewFrame.
      */
+    const uint64_t timingUiStart = timing ? OSD::Platform::Now() : 0;
+    if (overlayOpenCountdown > 0)
+    {
+      --overlayOpenCountdown;
+    }
+    else if (overlayOpenCountdown == 0)
+    {
+      overlayOpenCountdown = -1;
+      if (!OverlayVisible())
+      {
+        OverlaySetVisible(s_runtime_config, true);
+        InfoLog("Overlay: panel opened by SM3D_OVERLAY_OPEN.");
+      }
+    }
     if (OverlayActive() && OverlayNewFrame(s_runtime_config))
       SaveOverlaySettings();
+    if (timing)
+      timingOverlayNs += OSD::Platform::Now() - timingUiStart;
 
     // The readout's on/off state is written back the moment it is toggled rather than on exit, so a
     // session that ends abnormally does not lose the setting. One-shot: the flag is consumed here.
@@ -3172,11 +5062,294 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
       SaveOverlaySettings();
     }
 
-    // Render if paused, otherwise run a frame
-    if (paused)
+    /*
+     * Late pointer sample, then the crosshair that depends on it.
+     *
+     * Inputs->Poll() ran at the top of the frame, but everything between it and this point - the
+     * menu bar's own state, the panel build - costs time, and for a light gun that time is lag.
+     * PollPointerLate() asks the OS for the pointer's position again and re-polls only the gun axes,
+     * so the emulated aim this frame uses is as fresh as the frame boundary allows.
+     *
+     * The crosshair is handed to the renderer here, after that fresh sample, so it describes the aim
+     * values the frame will actually use. On Vulkan this is a small native draw in the same frame;
+     * no ImGui frame is built for it. On OpenGL the CCrosshair object draws it during EndFrameVideo.
+     */
+    Inputs->PollPointerLate(&game);
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+    UpdateOverlayCrosshair(Inputs, currentInputs, xOffset, yOffset, xRes, yRes, overlayScale);
+#endif
+
+    const uint64_t timingRenderStart = timing ? OSD::Platform::Now() : 0;
+    const uint64_t presentSeqBefore = s_framePresentSeq;
+
+    // Render if paused, otherwise run a frame. The high-refresh path releases
+    // at most one simulation step per iteration, then presents it (and any
+    // interpolation frame) through the independent present clock.
+    const uint64_t timingRunStart = timing ? OSD::Platform::Now() : 0;
+    bool newSimulation = false;
+
+    if (highRefresh)
+    {
+      const uint64_t now = OSD::Platform::Now();
+      pacer.SetPaused(paused, now);
+
+      if (!paused)
+      {
+        const CDisplayPacer::TickResult tick = pacer.Tick(now);
+        newSimulation = tick.step;
+        if (tick.step)
+        {
+          const uint64_t simStart = OSD::Platform::Now();
+
+          /*
+           * Close the previous simulation before starting the next one. Its
+           * read-only snapshots become the scene this iteration presents, while
+           * the new frame's PPC/audio work runs in the background. At 240/480 Hz
+           * the simulation step (6-8 ms) is far longer than a present period, so
+           * doing it inline in front of the present would miss vblanks; this
+           * order keeps the present path to scene matching and draw submission.
+           */
+          Model3->EndSimulationFrame();
+          /*
+           * Traverse the finished step's scene database before the next one
+           * starts. This is the one instant at which Culling RAM holds a whole
+           * frame and nothing is writing to it: BeginSimulationFrame() posts the
+           * PPC thread, and everything after that - the sleep until the present
+           * deadline included - overlaps with the CPU rewriting the next frame's
+           * lists. Traversing later therefore blended a completed scene with a
+           * half-written one, which is invisible in a still frame and shows up
+           * as objects appearing a sub-frame early once interpolation is on.
+           *
+           * The cost is the traversal itself (well under a millisecond) added to
+           * the step, and the GPU half still happens at present time.
+           */
+          Model3->PrepareSceneSnapshot();
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+          /*
+           * A camera cut has to be handed to the pacer before the render, not
+           * inferred from the frame it already rendered: the interpolated
+           * presents of this step would otherwise blend the old and new camera.
+           */
+          pacer.NoteFrameCut(s_vk3dRenderer != nullptr &&
+            s_vk3dRenderer->LastMotionStats().cuts > 0);
+#endif
+          //
+          // Last moment to sample the controls: BeginSimulationFrame() posts the PPC thread, and
+          // everything before this point in the loop (panel, command recording) would otherwise
+          // have been sampled at the top of the frame.
+          Inputs->PollGameInputsLate(&game);
+          Model3->BeginSimulationFrame();
+#if defined(SUPERMODEL_PURE_VULKAN)
+          simFramesThisSession++;
+#endif
+          perfSimNs += OSD::Platform::Now() - simStart;
+        }
+      }
+
+      // The deadline this present is built against. Kept so the scan-out measurement below can
+      // relate the display time to the instant rendering started from.
+      const uint64_t presentDeadline = pacer.PresentDeadline(OSD::Platform::Now());
+
+      // Sleep to the display's cadence, then sample alpha at the deadline
+      // rather than at the top of the loop: the sleep is part of the interval
+      // the frame describes.
+      pacer.WaitForPresent(OSD::Platform::Now());
+
+      /*
+       * Whether the *previous* picture made it to the display, asked at the deadline rather than
+       * straight after the present. One period has passed since that present was submitted, so a
+       * confirmed scan-out is exactly what a correctly phased lead produces; a timeout means the
+       * frame was still queued and the phase has slipped. Non-blocking, so it costs nothing.
+       */
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+      if (s_vkContext && s_vkContext->PresentWaitAvailable() && s_vkContext->HasPresented())
+      {
+        displayAttempts++;
+        if (s_vkContext->WaitForPresentDisplay(0))
+          displayConfirms++;
+        else
+          displayLate++;
+      }
+#endif
+      const double alpha = paused ? 1.0 : pacer.AlphaAt(OSD::Platform::Now());
+      const uint64_t renderStart = OSD::Platform::Now();
+      Model3->RenderFrame(alpha, newSimulation);
+      const uint64_t renderNs = OSD::Platform::Now() - renderStart;
+      perfRenderNs += renderNs;
+      perfFrames++;
+      // Presents that carry no simulation are the ones a phase-locked mode adds,
+      // and they are the whole point of it: this figure is what has to fit in a
+      // 2 ms slot at 460 Hz.
+      if (!newSimulation && pacer.IsPhaseLocked())
+      {
+        perfSubNs += renderNs;
+        perfSubFrames++;
+      }
+      pacer.RecordPresent(OSD::Platform::Now(), alpha);
+
+      /*
+       * Scan-out feedback and the present-phase calibration (VK_KHR_present_wait).
+       *
+       * A present only reaches the display at a vblank. Submitted a fraction of a millisecond too
+       * late and the frame waits a whole period; submitted just before the vblank and it is shown
+       * there. The pacer's deadline has no fixed relationship to that grid, so which case a session
+       * lands in is luck - and on this hardware it lands in the bad one, reported as "0 of 121
+       * confirmed" and costing a full period (8.3 ms at 120 Hz) of latency.
+       *
+       * For the first few presents after the pacer is configured the wait is given two periods, so it
+       * blocks until the picture really is scanned. That one number is the whole calibration: the
+       * distance from the deadline to the display is one period minus how far past the vblank the
+       * deadline sits, so aiming that much earlier puts the present in front of the vblank instead of
+       * behind it. Afterwards the wait is given no time at all, so it only counts what made it.
+       *
+       * The lead is a phase shift, not a rate change: the cadence is untouched. In the phase-locked
+       * modes alpha is a constant per slot and does not move either; in the clock-driven modes it is
+       * sampled a little earlier, which is the price of the period gained.
+       */
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+      if (s_vkContext && s_vkContext->PresentWaitAvailable() && s_vkContext->HasPresented())
+      {
+        const int64_t presentPeriodNs = (int64_t)pacer.PresentPeriodNs();
+        /*
+         * The phase is a property of the display's scan-out grid, not of our present period. Those
+         * are the same at the panel's own rate and differ by a factor of two or more below it, where
+         * measuring against our period would aim the frame a whole panel period too early.
+         */
+        const double panelHz = pacer.PanelHz();
+        const int64_t vblankNs = panelHz > 1.0 ? (int64_t)(1.0e9 / panelHz) : presentPeriodNs;
+        const bool calibrating = presentCalibrationFrames > 0 && presentPeriodNs > 0 && vblankNs > 0;
+        const uint64_t timeout = calibrating ? (uint64_t)(2 * presentPeriodNs) : 0;
+        const bool onScreen = s_vkContext->WaitForPresentDisplay(timeout);
+        if (calibrating)
+        {
+          if (onScreen)
+          {
+            const int64_t latency = (int64_t)OSD::Platform::Now() - (int64_t)presentDeadline;
+            if (vblankNs > 0 && latency >= 0 && latency < 2 * vblankNs)
+            {
+              /*
+               * Only a display that took more than half a period to appear is evidence of a missed
+               * vblank. A short latency means the deadline already sits in front of one - or that the
+               * panel is following us (VRR), where a lead would only make the picture older without
+               * gaining a scan-out. Both of those want no correction at all.
+               */
+              int64_t past = 0;
+              if (latency > vblankNs / 2)
+              {
+                past = vblankNs - latency;
+                if (past < 0)
+                  past = 0;
+              }
+              presentLeadSum += past;
+              presentLeadSamples++;
+            }
+          }
+          presentCalibrationFrames--;
+          if (presentCalibrationFrames == 0)
+          {
+            if (presentLeadSamples > 4)
+            {
+              // Plus the render+submit cost, so the queue insertion lands before the vblank rather
+              // than exactly on it; one millisecond covers 0.8 ms of render and the jitter around it.
+              // Never more than one vblank, or the picture would move two of them instead of one.
+              // A mean of zero means the phase was already right, so nothing is added at all.
+              int64_t lead = presentLeadSum / presentLeadSamples;
+              if (lead > 0)
+              {
+                lead += 1000000;
+                if (vblankNs > 0 && lead > vblankNs - 500000)
+                  lead = vblankNs - 500000;
+              }
+              pacer.SetPresentLead(lead);
+              InfoLog("Pace: present phase calibrated - display was %.2f ms after the deadline, "
+                "lead %.2f ms.",
+                (double)(presentLeadSum / presentLeadSamples) / 1.0e6,
+                (double)pacer.PresentLead() / 1.0e6);
+            }
+            else
+            {
+              InfoLog("Pace: present phase calibration got no usable samples; lead left at 0.");
+            }
+          }
+        }
+      }
+#endif
+    }
+    else if (paused)
+    {
       Model3->RenderFrame();
+    }
     else
+    {
+      // Sampled at the step boundary rather than at the top of the frame; see PollGameInputsLate().
+      Inputs->PollGameInputsLate(&game);
       Model3->RunFrame();
+#if defined(SUPERMODEL_PURE_VULKAN)
+      // Counted here too: the deferred load waits on machine time, and a session running at the
+      // original 57.5 Hz never takes the high-refresh branch above.
+      simFramesThisSession++;
+#endif
+    }
+    if (timing)
+      timingRunNs += OSD::Platform::Now() - timingRunStart;
+
+    if (timing)
+    {
+      const uint64_t now = OSD::Platform::Now();
+      timingGapNs += timingRenderStart - timingPollDone;
+      timingFrames++;
+      if (s_framePresentSeq != presentSeqBefore)
+      {
+        timingPresentNs += s_framePresentNs - timingPollDone;
+        timingPresentFrames++;
+      }
+      if (now >= timingNextReport)
+      {
+        char displayText[96];
+        if (displayAttempts > 0)
+          std::snprintf(displayText, sizeof(displayText), "%llu/%llu confirmed by the display, %llu late",
+            (unsigned long long)displayConfirms, (unsigned long long)displayAttempts,
+            (unsigned long long)displayLate);
+        else
+          std::snprintf(displayText, sizeof(displayText), "n/a");
+        InfoLog("Timing: ui %.1f us/frame, run %.1f us/frame, poll-to-render %.1f us/frame, poll-to-present %.1f us/frame, display %s, frames %llu presents %llu",
+          (double)timingOverlayNs / 1000.0 / (double)timingFrames,
+          (double)timingRunNs / 1000.0 / (double)timingFrames,
+          (double)timingGapNs / 1000.0 / (double)timingFrames,
+          timingPresentFrames ? (double)timingPresentNs / 1000.0 / (double)timingPresentFrames : 0.0,
+          displayText,
+          (unsigned long long)timingFrames, (unsigned long long)timingPresentFrames);
+
+        std::vector<int64_t> late(sleepLate, sleepLate + sleepLateCount);
+        std::sort(late.begin(), late.end());
+        const auto pick = [&late](double percentile) -> int64_t
+        {
+          if (late.empty())
+            return 0;
+          size_t index = (size_t)((late.size() - 1) * percentile);
+          if (index >= late.size())
+            index = late.size() - 1;
+          return late[index];
+        };
+        const int64_t maxLate = late.empty() ? 0 : late.back();
+        unsigned audioUnder = 0, audioOver = 0;
+        GetAudioBufferStats(&audioUnder, &audioOver);
+        InfoLog("Sleep timing: p50 %.1f us, p99 %.1f us, max %.1f us, samples %llu, audio u%u/o%u",
+          (double)pick(0.50) / 1000.0, (double)pick(0.99) / 1000.0, (double)maxLate / 1000.0,
+          (unsigned long long)late.size(), audioUnder, audioOver);
+
+        timingFrames = 0;
+        timingOverlayNs = 0;
+        timingRunNs = 0;
+        timingGapNs = 0;
+        timingPresentNs = 0;
+        timingPresentFrames = 0;
+        displayAttempts = 0;
+        displayConfirms = 0;
+        displayLate = 0;
+        timingNextReport = now + OSD::Platform::kNanosecondsPerSecond;
+      }
+    }
 
 #ifdef SUPERMODEL_DEBUGGER
     bool processUI = true;
@@ -3206,7 +5379,12 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
       // Only meaningful where the overlay has a backend, which is now either renderer family - so the
       // test is whether one came up, not which one it is.
       if (OverlayActive())
+      {
         OverlayToggle(s_runtime_config);
+        // Logged because the panel is also closed by its own button and by Apply, so "I did not press
+        // anything and it opened" needs an answer: this line says whether the toggle switch fired.
+        InfoLog("Overlay: panel %s by the toggle key.", OverlayVisible() ? "opened" : "closed");
+      }
     }
     else if (Inputs->uiToggleStatsOsd->Pressed())
     {
@@ -3215,6 +5393,56 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
         StatsOsdToggle();
       else
         InfoLog("Statistics readout: no overlay backend is available in this session.");
+    }
+    else if (Inputs->uiToggleVrr->Pressed())
+    {
+      /*
+       * A/B between the arcade rate and twice it.
+       *
+       * This is the comparison the mode exists for, and having to leave the game
+       * to make it - restarting into a different ini - makes it impossible to
+       * judge: the two have to be seen back to back on the same scene. The switch
+       * writes the setting, so the choice survives the session, and the loop's
+       * own change detection reconfigures the pacer on the next frame.
+       *
+       * Only the pair is toggled. 3x/4x/8x stay in the settings panel: they are
+       * for a display that can actually scan that fast, and cycling through five
+       * modes on one key would make the A/B slower rather than faster.
+       */
+      const RefreshRateMode mode = GetConfiguredRefreshRateMode();
+      const double panelHz = GetEffectivePanelRefreshHz();
+      if (mode == RefreshRateMode::Vrr2x)
+      {
+        s_runtime_config.Get("RefreshRateMode").SetValue(0);
+        printf("Pace: VRR 1x (%.2f Hz)\n", kModel3StepHz);
+        InfoLog("Pace: hotkey switched to VRR 1x (%.2f Hz).", kModel3StepHz);
+      }
+      else if (!PanelSupportsPhaseMode(RefreshRateMode::Vrr2x, panelHz))
+      {
+        printf("Pace: VRR 2x needs a 120 Hz or faster display; this one reports %.1f Hz.\n", panelHz);
+        InfoLog("Pace: hotkey ignored - VRR 2x needs 120 Hz, display reports %.1f Hz.", panelHz);
+      }
+      else
+      {
+        s_runtime_config.Get("RefreshRateMode").SetValue(3);
+        printf("Pace: VRR 2x (%.2f Hz)\n", kModel3StepHz * 2.0);
+        InfoLog("Pace: hotkey switched to VRR 2x (%.2f Hz).", kModel3StepHz * 2.0);
+      }
+    }
+    else if (Inputs->uiReloadHDTextures->Pressed())
+    {
+      /*
+       * Rescan the running game's HD texture folder. The renderer applies it at the start of the
+       * next simulation frame, so while the in-game panel has the emulator paused this only takes
+       * effect once the panel is closed - the panel says as much next to its own reload button.
+       */
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+      Vulkan3D::RequestHDTextureReload();
+      printf("HD textures: reload requested.\n");
+      InfoLog("HD textures: reload requested with the F4 shortcut.");
+#else
+      InfoLog("HD textures: this build has no Vulkan renderer; the F4 shortcut does nothing.");
+#endif
     }
 
     /*
@@ -3236,6 +5464,40 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
         s_overlayWasVisible = overlayNow;
         Inputs->GetInputSystem()->SetMouseVisibility(overlayNow || !s_runtime_config["FullScreen"].ValueAs<bool>());
         Inputs->SetGameInputSuppressed(overlayNow);
+
+        /*
+         * Pause while the panel is open.
+         *
+         * The panel is for adjusting a settings value while watching the picture, and for
+         * saving/loading a state. With the game still running, a slider drag or a slot choice
+         * happened while the car kept moving - the player had to fight the game to read the
+         * menu. Pausing makes the picture stop on the frame the panel describes.
+         *
+         * Only the pause this code caused is undone on close: a game the player paused
+         * themselves with Alt+P stays paused, and Alt+P while the panel is open hands control
+         * back to the player (see the hotkey handler).
+         */
+        if (overlayNow && !paused)
+        {
+          paused = true;
+          overlayPausedEmulator = true;
+          Model3->PauseThreads();
+          SetAudioEnabled(false);
+          snprintf(titleStr, sizeof(titleStr), "%s (Paused)", baseTitleStr);
+          OSD::Platform::SetWindowTitle(s_platformWindow, titleStr);
+          if (Outputs != NULL)
+            Outputs->SetValue(OutputPause, paused);
+        }
+        else if (!overlayNow && overlayPausedEmulator)
+        {
+          overlayPausedEmulator = false;
+          paused = false;
+          Model3->ResumeThreads();
+          SetAudioEnabled(true);
+          OSD::Platform::SetWindowTitle(s_platformWindow, baseTitleStr);
+          if (Outputs != NULL)
+            Outputs->SetValue(OutputPause, paused);
+        }
       }
     }
 
@@ -3273,19 +5535,21 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
     {
       // Toggle emulator paused flag
       paused = !paused;
+      // The player has taken over the pause state: closing the panel must not decide it for them.
+      overlayPausedEmulator = false;
 
       if (paused)
       {
         Model3->PauseThreads();
         SetAudioEnabled(false);
         snprintf(titleStr, sizeof(titleStr), "%s (Paused)", baseTitleStr);
-        SDL_SetWindowTitle(s_window, titleStr);
+        OSD::Platform::SetWindowTitle(s_platformWindow, titleStr);
       }
       else
       {
         Model3->ResumeThreads();
         SetAudioEnabled(true);
-        SDL_SetWindowTitle(s_window, baseTitleStr);
+        OSD::Platform::SetWindowTitle(s_platformWindow, baseTitleStr);
       }
 
       // Send paused value as output
@@ -3299,32 +5563,49 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
 
       // OpenGL loses its context across a fullscreen toggle. The Vulkan
       // renderers own the swapchain through CVulkanContext and stay alive.
+#if defined(SUPERMODEL_OPENGL_ONLY)
+      delete Render2D;
+      Render2D = nullptr;
+#elif !defined(SUPERMODEL_PURE_VULKAN)
       if (!s_vkContext)
       {
         delete Render2D;
         Render2D = nullptr;
       }
+#endif
 
       // Resize screen
       totalXRes = xRes = s_runtime_config["XResolution"].ValueAs<unsigned>();
       totalYRes = yRes = s_runtime_config["YResolution"].ValueAs<unsigned>();
       bool stretchc = s_runtime_config["Stretch"].ValueAs<bool>();
       bool fullscreenc = s_runtime_config["FullScreen"].ValueAs<bool>();
+#if defined(SUPERMODEL_OPENGL_ONLY)
+      Result resized = ResizeGLScreen(&xOffset, &yOffset, &xRes, &yRes, &totalXRes, &totalYRes, !stretchc, fullscreenc);
+#elif defined(SUPERMODEL_PURE_VULKAN)
+      Result resized = ResizeVulkanScreen(&xOffset, &yOffset, &xRes, &yRes, &totalXRes, &totalYRes, !stretchc, fullscreenc);
+#else
       Result resized = s_vkContext
         ? ResizeVulkanScreen(&xOffset, &yOffset, &xRes, &yRes, &totalXRes, &totalYRes, !stretchc, fullscreenc)
         : ResizeGLScreen(&xOffset, &yOffset, &xRes, &yRes, &totalXRes, &totalYRes, !stretchc, fullscreenc);
+#endif
       if (Result::OKAY != resized)
         goto QuitError;
 
       // Recreate renderers and attach to the emulator
       unsigned aaTarget = 0;
+#if !defined(SUPERMODEL_PURE_VULKAN)
       if (superAA)
       {
         superAA->Init(totalXRes, totalYRes);
         aaTarget = superAA->GetTargetID();
       }
+#if defined(SUPERMODEL_OPENGL_ONLY)
+      Render2D = new CRender2D(s_runtime_config);
+#else
       if (!s_vkContext)
         Render2D = new CRender2D(s_runtime_config);
+#endif
+#endif
 
       if (Result::OKAY != Render2D->Init(xOffset * aaValue, yOffset * aaValue, xRes * aaValue, yRes * aaValue, totalXRes * aaValue, totalYRes * aaValue, aaTarget, upscaleMode))
         goto QuitError;
@@ -3335,7 +5616,7 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
 
       // The renderers were just re-initialised, possibly at a different size, so the readout's
       // Render line has to be told again - this is the resolution-change path.
-      ReportRenderInfo(aaValue, totalXRes, totalYRes);
+      ReportRenderInfo(aaValue, xRes, yRes, totalXRes, totalYRes);
 
       Inputs->GetInputSystem()->SetMouseVisibility(!s_runtime_config["FullScreen"].ValueAs<bool>());
     }
@@ -3358,10 +5639,13 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
     }
     else if (Inputs->uiChangeSlot->Pressed())
     {
-      // Change save slot
-      if (++s_saveSlot > 8)
-        s_saveSlot = 1;
+      // Change save slot. Skipping occupied slots here is what makes F6 "next new slot" rather
+      // than "next number"; F5 without F6 still writes back to the loaded slot. F7 handles the
+      // empty slot this selects by falling back to the newest save (see LoadState).
+      s_saveSlot = NextFreeSaveSlot(Model3->GetGame().name, s_saveSlot);
       printf("Save slot: %u\n", s_saveSlot);
+      InfoLog("Quick-save slot %u (%s).", s_saveSlot,
+        SaveSlotOccupied(Model3->GetGame().name, s_saveSlot) ? "occupied" : "empty");
     }
     else if (Inputs->uiLoadState->Pressed())
     {
@@ -3372,6 +5656,18 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
       }
 
       // Load game state
+#if defined(SUPERMODEL_PURE_VULKAN)
+      // A manual load wins over a Manage Saves load that is still waiting for the game to start.
+      deferredState.clear();
+#ifdef _WIN32
+      if (deferredLoadSplash)
+      {
+        deferredLoadSplash = false;
+        OSD::Windows::HideStartupSplash();
+      }
+#endif
+#endif
+      InfoLog("F7: loading save slot %u.", s_saveSlot);
       LoadState(Model3);
 
 #ifdef SUPERMODEL_DEBUGGER
@@ -3489,13 +5785,67 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
     }
 #endif // SUPERMODEL_DEBUGGER
 
-    // Refresh rate (frame limiting)
-    if (paused || s_runtime_config["Throttle"].ValueAs<bool>())
+    /*
+     * Frame-counted screenshot (SM3D_SCREENSHOT_FRAME). Vulkan only: the counter belongs to the
+     * deferred-load path, and the OpenGL build never increments it (see the warning at start-up).
+     */
+#if defined(SUPERMODEL_PURE_VULKAN)
+    if (!screenshotTaken && screenshotFrame != 0 && simFramesThisSession >= screenshotFrame &&
+      (!highRefresh || newSimulation))
     {
+      screenshotTaken = true;
+      InfoLog("Screenshot: SM3D_SCREENSHOT_FRAME fired at emulated frame %llu (requested %llu).",
+        (unsigned long long)simFramesThisSession, (unsigned long long)screenshotFrame);
+      Screenshot();
+    }
+#endif
+
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+    if (!saveStateFrameDone && saveStateFrame != 0 && simFramesThisSession >= saveStateFrame &&
+      (!highRefresh || newSimulation))
+    {
+      saveStateFrameDone = true;
+      InfoLog("Save state: SM3D_SAVE_STATE_FRAME fired at emulated frame %llu (requested %llu).",
+        (unsigned long long)simFramesThisSession, (unsigned long long)saveStateFrame);
+
+      const unsigned previousSlot = s_saveSlot;
+      if (saveStateSlot >= 0 && saveStateSlot <= 99)
+        s_saveSlot = (unsigned)saveStateSlot;
+      SaveState(Model3);
+      s_saveSlot = previousSlot;
+    }
+#endif
+
+    if (screenshotAt != nullptr && !screenshotTaken && *screenshotAt != '\0')
+    {
+      const double at = std::atof(screenshotAt);
+      const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - screenshotClock).count();
+      if (elapsed >= at)
+      {
+        screenshotTaken = true;
+        InfoLog("Screenshot: SM3D_SCREENSHOT_AT fired at %.3f s (requested %.3f s).", elapsed, at);
+        Screenshot();
+      }
+    }
+
+    // Refresh rate (frame limiting). The high-refresh path paces itself in
+    // DisplayPacer::WaitForPresent(), so running both would sleep twice.
+    if (!highRefresh && (paused || s_runtime_config["Throttle"].ValueAs<bool>()))
+    {
+        const uint64_t sleepDeadline = nextTime;
         SuperSleepUntil(nextTime);
 
+        if (timing)
+        {
+            const int64_t late = (int64_t)(OSD::Platform::Now() - sleepDeadline);
+            sleepLate[sleepLateNext] = late;
+            sleepLateNext = (sleepLateNext + 1) % kSleepLateSamples;
+            if (sleepLateCount < kSleepLateSamples)
+                sleepLateCount++;
+        }
+
         // Advance the target by exactly one frame period. The previous code rebased the
-        // target on SDL_GetPerformanceCounter() every frame, which folded the sleep
+        // target on OSD::Platform::Now() every frame, which folded the sleep
         // overshoot into the next deadline. That made each emulated frame slightly longer
         // than 1/60s, so audio was produced a little slower than the 44.1kHz device consumed
         // it and the sound buffer slowly drained until it under-ran (audible stutter).
@@ -3503,25 +5853,25 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
 
         // If a frame took longer than its budget we are already behind; resync to now
         // rather than sprinting to catch up.
-        uint64_t nowTicks = SDL_GetPerformanceCounter();
+        uint64_t nowTicks = OSD::Platform::Now();
         if (nextTime < nowTicks)
             nextTime = nowTicks;
     }
 
     // Measure frame rate
-    uint64_t currentFPSTicks = SDL_GetPerformanceCounter();
+    uint64_t currentFPSTicks = OSD::Platform::Now();
     if (s_runtime_config["ShowFrameRate"].ValueAs<bool>())
     {
       fpsFramesElapsed += 1;
       uint64_t measurementTicks = currentFPSTicks - prevFPSTicks;
-      if (measurementTicks >= s_perfCounterFrequency) // update FPS every 1 second (s_perfCounterFrequency is how many perf ticks in one second)
+      if (measurementTicks >= static_cast<uint64_t>(OSD::Platform::kNanosecondsPerSecond)) // update FPS every 1 second
       {
-        double fps = double(fpsFramesElapsed) / (double(measurementTicks) / double(s_perfCounterFrequency));
+        double fps = double(fpsFramesElapsed) / (double(measurementTicks) / double(OSD::Platform::kNanosecondsPerSecond));
         unsigned audioUnderruns = 0, audioOverruns = 0;
         GetAudioBufferStats(&audioUnderruns, &audioOverruns);
         snprintf(titleStr, sizeof(titleStr), "%s - %1.3f FPS%s [audio u%u/o%u]",
           baseTitleStr, fps, paused ? " (Paused)" : "", audioUnderruns, audioOverruns);
-        SDL_SetWindowTitle(s_window, titleStr);
+        OSD::Platform::SetWindowTitle(s_platformWindow, titleStr);
         prevFPSTicks = currentFPSTicks;   // reset tick count
         fpsFramesElapsed = 0;             // reset frame count
       }
@@ -3557,7 +5907,7 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
 
   // Uninstall before the emulator goes away: the hook holds a pointer to it, and a stray WM_TIMER
   // arriving afterwards would call into freed memory.
-  SetModalLoopHook(nullptr);
+  SetModalLoopHook(nullptr, nullptr);
 
   // Before the renderers: the overlay's ImGui backend waits for the device to go idle, and it has to
   // stop being referenced by the renderer before the renderer is destroyed.
@@ -3566,21 +5916,30 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
   // outlive the session, or the next one would find them already loaded and skip setting them up.
   StatsOsdShutdown();
   OverlayShutdown();
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+  s_overlayFrostRenderer = nullptr;
+#endif
   InfoLog("Session: overlay and statistics shut down; destroying the renderers.");
 
   // Shut down renderers
   delete Render2D;
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+  s_vk2dRenderer = nullptr;
+#endif
   InfoLog("Session: 2D renderer destroyed.");
   delete Render3D;
   InfoLog("Session: 3D renderer destroyed.");
+#if !defined(SUPERMODEL_PURE_VULKAN)
   delete superAA;
+#endif
   InfoLog("Session: released. Returning to the settings window.");
 
   return 0;
+  }
 
   // Quit with an error
 QuitError:
-  SetModalLoopHook(nullptr);
+  SetModalLoopHook(nullptr, nullptr);
 
   /*
    * Release the audio device before parking the process.
@@ -3596,9 +5955,17 @@ QuitError:
 
   StatsOsdShutdown();
   OverlayShutdown();
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+  s_overlayFrostRenderer = nullptr;
+#endif
   delete Render2D;
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+  s_vk2dRenderer = nullptr;
+#endif
   delete Render3D;
+#if !defined(SUPERMODEL_PURE_VULKAN)
   delete superAA;
+#endif
 
   return 1;
 }
@@ -3714,7 +6081,7 @@ static void MigrateLegacyDataLayout()
         const std::string to = (dir == std::string("Config/"))
             ? FileSystemPath::GetPath(FileSystemPath::Config)
             : (dir == std::string("NVRAM/") ? FileSystemPath::GetPath(FileSystemPath::NVRAM)
-                                            : FileSystemPath::GetPath(FileSystemPath::Saves));
+                                            : FileSystemPath::GetPath(FileSystemPath::SavePathType()));
 
         if (from == to || !FileSystemPath::PathExists(from))
             continue;
@@ -3792,7 +6159,7 @@ static Result ConfigureInputs(CInputs *Inputs, Util::Config::Node *fileConfig, U
       title.append("Configuring Default Inputs...");
     else
       title.append(Util::Format() << "Configuring Inputs for: " << game.title);
-    SDL_SetWindowTitle(s_window, title.c_str());
+    OSD::Platform::SetWindowTitle(s_platformWindow, title.c_str());
 
     // Extract the relevant INI section (which will be the global section if no
     // game was specified, otherwise the game's node) in the file config, which
@@ -3937,17 +6304,19 @@ Util::Config::Node DefaultConfig()
   // Run at above-normal process priority so that the once-per-frame audio production is not starved
   // when the window is in the background. See RaiseProcessPriority().
   config.Set("HighPriority", true, "Sound");
-  // Other sound options
-  config.Set("LegacySoundDSP", false, "Sound"); // New config option for games that do not play correctly with MAME's SCSP sound core.
   // CDriveBoard
   config.Set("ForceFeedback", false, "ForceFeedback");
   
   // Platform-specific/UI
   config.Set("New3DEngine", true, "Video");
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+  // Renderer selection and Vulkan device options.  This executable has a single
+  // renderer family, so the keys are neither defined nor written back.
   config.Set("Vulkan3DEngine", true, "Video");
   config.Set("VkValidation", false, "Video");
   // Name of the Vulkan physical device to render with. Empty picks the best available.
   config.Set<std::string>("VulkanDevice", "", "Video", "", "");
+#endif
   config.Set("QuadRendering", false, "Video");
   config.Set("XResolution", 1280, "Video");
   config.Set("YResolution", 960, "Video");
@@ -3956,6 +6325,25 @@ Util::Config::Node DefaultConfig()
   // this is the option to reach for when pixel-exact scaling matters more than screen coverage (the
   // 2D tile layer is a fixed 496x384 texture, so only whole-number scaling leaves it undistorted).
   config.Set("IntegerScale", false, "Video");
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+  /*
+   * Low-resolution rendering (Vulkan only).
+   *
+   * 0 leaves the 3D scene at the visible picture's resolution. 1 rasterises it at the Model 3's
+   * native 496x384 and upscales the result onto the picture rectangle: the 2D tile layers keep their
+   * own resolution, so the HUD stays as sharp as before while the 3D fill rate drops to a small
+   * fraction. At 1080p fullscreen that is 1395x1080 worth of scene pixels replaced by 496x384 - about
+   * 7.5 times less - which is what lets an integrated GPU hold 60 Hz. The second entry, 992x768, is
+   * the same path at twice the native size: a middle ground for a GPU that cannot fill the picture
+   * resolution but does not need the 1x image.
+   *
+   * Takes precedence over IntegerScale, which also decides how the picture is scaled; the settings
+   * window greys that option out while this is on. The allow-list has to match the settings window's
+   * combo, or the generic writer treats a value it offers as out of range.
+   */
+  config.Set("InternalResolution", 0, "Video", 0, 0, { 0,1,2 });
+#endif
+#if !defined(SUPERMODEL_OPENGL_ONLY)
   /*
    * Bezel backdrop.
    *
@@ -3976,24 +6364,95 @@ Util::Config::Node DefaultConfig()
   // undimmed picture is what the person who supplied it expects to see, and dimming is one drag
   // away for anyone who finds it distracting next to the game.
   config.Set("BezelBrightness", 100, "Video", 10, 200);
+#endif
   // Interface language: 0 English (default), 1 Chinese. The label texts are picked up by
   // Localization, so the interface can switch without restarting.
   config.Set("UiLanguage", 0, "Video", 0, 0, { 0,1 });
+  // Interface appearance: 0 warm eye-care light (default), 1 warm dark, 2 the interface as it was
+  // before the frosted-glass rework. All three avoid pure black and pure white except the classic
+  // theme, which is a faithful copy of what shipped before and is kept for exactly that reason.
+  config.Set("UITheme", 0, "Video", 0, 0, { 0,1,2 });
+  // Frosted-glass panels: the blurred backdrop behind the settings window's panes and the in-game
+  // panel. On by default; turning it off costs nothing visually beyond losing the blur, and is the
+  // first thing to try on a GPU that cannot keep up (the hardware-preset "fastest" tier sets it).
+  config.Set("UiFrostedGlass", true, "Video");
   config.SetEmpty("WindowXPosition");
   config.SetEmpty("WindowYPosition");
   config.Set("FullScreen", false, "Video");
   config.Set("BorderlessWindow", false, "Video");
   config.Set("Supersampling", 1, "Video", 1, 8);
+  // View cycling for the games with four VR camera buttons. With this on, one button steps through
+  // the views instead of needing one button each; VRDefaultView is the view the cycle starts on
+  // (2 is the default third-person view in Daytona 2).
+  //
+  // Input settings, so they are defined for both executables: the settings window draws them from
+  // the Controls tab regardless of renderer, and a key that exists in the defaults only for one
+  // build is a missing node - and a thrown exception - in the other.
+  config.Set("VRCycle", true, "Input");
+  config.Set("VRDefaultView", 2, "Input", 0, 3);
+#if !defined(SUPERMODEL_OPENGL_ONLY)
   // Hardware MSAA for the Vulkan backend. 0 disables it; 2, 4 and 8 select that many samples.
   // Smooths polygon edges at rasterisation time, leaving texture detail untouched. The list has to
   // match the settings window's combo - an option offered there but missing here is a setting the
   // generic writer treats as out of range.
   config.Set("MSAA", 0, "Video", 0, 0, { 0,2,4,8 });
-  // View cycling for the games with four VR camera buttons. With this on, one button steps through
-  // the views instead of needing one button each; VRDefaultView is the view the cycle starts on
-  // (2 is the default third-person view in Daytona 2).
-  config.Set("VRCycle", true, "Input");
-  config.Set("VRDefaultView", 2, "Input", 0, 3);  // Post-processing filters, applied to the finished frame by the Vulkan backend. FXAA smooths
+  /*
+   * Where the 3D scene gets its mip level.
+   *
+   * 0 is New3D's radial estimate, which is what the Real3D hardware does: the
+   * polygon's texture-NP factor divided by w squared, isotropic across the
+   * polygon. 1 takes the level from the derivatives of the interpolated uv
+   * instead, so a surface seen at a grazing angle keeps the detail its own pixel
+   * footprint supports; 2 also takes four taps along a stretched footprint.
+   *
+   * Both alternatives are sharper than the hardware rather than identical to it,
+   * so the faithful behaviour stays the default. Clamped to 0..2 in CVulkan3D::Init.
+   */
+  config.Set("TexFilter", 0, "Video", 0, 0, { 0,1,2 });
+  /*
+   * Exact quad interpolation for the Vulkan scene shader.
+   *
+   * On is the default: pulling four corners and solving the quad's own (s, t) is
+   * what removes the diagonal crease the two-triangle split would otherwise leave
+   * on a non-planar quad. Off takes the rasteriser's interpolated attributes
+   * instead, which skips four 64-byte storage reads and a quadratic solve per
+   * pixel - the ultra-low preset's choice for integrated GPUs. Read once, at
+   * session start, like TexFilter.
+   */
+  config.Set("QuadInterpolation", true, "Video");
+  /*
+   * Transparency ordering.
+   *
+   * 0 is New3D's two fixed transparency layers: each layer keeps one surface per pixel, both are
+   * composited at the end of the frame, and it is bit-for-bit the picture this backend has always
+   * produced. 1 replaces them with a per-pixel sorted list: every translucent fragment that passes
+   * the depth test against the current priority's opaque geometry is stored, sorted back to front
+   * and composited before the next priority begins. 2 reproduces the board itself: the two layers
+   * own opposite halves of a checkerboard, so half of the pixels keep the opaque surface behind a
+   * dense effect instead of the effect turning solid where both layers cover it.
+   *
+   * The sorted mode fixes two things the two-layer scheme cannot: more than two translucent surfaces
+   * at one pixel (smoke, spray, foliage, glass) and translucent polygons submitted in the wrong
+   * depth order. It costs one full-screen resolve per priority that contains transparency, plus a
+   * node pool of one node per scene pixel. Read once, at session start, like MSAA.
+   */
+  config.Set("AlphaSortMode", 0, "Video", 0, 0, { 0,1,2 });
+  /*
+   * HD texture packs.
+   *
+   * LoadHDTextures looks for replacements under Data/Assets/HDTextures/<romset>/.
+   * DumpHDTextures exports every base-level sub-texture that is drawn to
+   * Data/Assets/DumpTextures/<romset>/ as a PNG named after its content hash, so
+   * the same file can be dropped into an HD pack unchanged. Both are per-session
+   * switches: the renderer reads them every simulation frame, and the panel's
+   * Reload button (or F4) rescans the folder without restarting the game.
+   *
+   * The key is DumpHDTextures rather than DumpTextures: the older key already
+   * means "write the raw packed texture RAM on exit" and is still honoured.
+   */
+  config.Set("LoadHDTextures", false, "Core");
+  config.Set("DumpHDTextures", false, "Core");
+  // Post-processing filters, applied to the finished frame by the Vulkan backend. FXAA smooths
   // edges in a shader (cheap, works everywhere, slightly softens detail); the CRT stage adds
   // scanlines and an aperture-grille shadow mask, which needs a high-resolution display to read as
   // structure rather than noise.
@@ -4017,14 +6476,44 @@ Util::Config::Node DefaultConfig()
   // and stops broadly bright areas such as sports-field grass from being lifted along with them.
   config.Set("PostGlowThreshold", 40, "Video", 0, 100);
   config.Set("PostGain", 190, "Video", 100, 250);
+#endif
   config.Set("CRTcolors", int(0), "Video", 0, 0, { 0,1,2,3,4,5 });      // these might be more user friendly as strings
   config.Set("UpscaleMode", 2, "Video", 0, 0, { 0,1,2,3 });             // to do make strings
+  // Sinden light-gun border. Width is in output pixels (the Vulkan pass clamps it to half the
+  // smaller dimension); brightness is a percentage like the other picture controls.
+  config.Set("SindenBorder", false, "Video");
+  config.Set("SindenBorderWidth", 16, "Video", 0, 256);
+  config.Set("SindenBorderBrightness", 100, "Video", 0, 100);
   config.Set("WideScreen", false, "Video");
   config.Set("Stretch", false, "Video");
   config.Set("WideBackground", false, "Video");
   config.Set("VSync", true, "Video");
   config.Set("Throttle", true, "Video");
-  config.Set("RefreshRate", 60.0f, "Video", 0.0f, 0.0f, { 57.5f,60.f });
+  config.Set("RefreshRate", 60.0f, "Video", 0.0f, 0.0f, { 57.52416f,60.f });
+  // Presentation pacing. Original keeps the arcade rate (and needs a 57.5 Hz-capable display or
+  // VRR); Auto follows the display's current mode and interpolates; Fixed uses FixedRefreshRate.
+  // RefreshRate remains only as the legacy migration source and is no longer what paces the loop.
+  config.Set("RefreshRateMode", 1, "Video", 0, 6, { 0,1,2,3,4,5,6 });
+  config.Set("FixedRefreshRate", 120, "Video", 0, 0, { 60,75,90,120,144,165,240,480 });
+  // Test hook: pretend the display runs at this rate, for exercising the multiples
+  // a machine cannot actually reach. 0 uses the real display mode.
+  config.Set("PaceAssumePanelHz", 0.0f, "Video", 0.0f, 1000.0f);
+  // Motion interpolation is Vulkan-only. LowLatency disables it without changing the present rate;
+  // the default is smooth (one simulation step of latency).
+  config.Set("MotionInterpolation", true, "Video");
+  config.Set("LowLatency", false, "Video");
+  // 0 = auto (full-screen and moving viewports), 1 = all viewports, 2 = main viewport only.
+  config.Set("InterpolationScope", 0, "Video", 0, 2, { 0,1,2 });
+  config.Set("CameraCutAngleDegrees", 15.0f, "Video", 1.0f, 90.0f);
+  config.Set("InstanceCutAngleDegrees", 30.0f, "Video", 1.0f, 180.0f);
+  config.Set("CutDistanceScale", 8.0f, "Video", 1.0f, 64.0f);
+  // Interpolate meshes that move under their own matrix (cars, wheels) as well as the camera.
+  // Off by default: interpolating each instance independently opens sub-pixel seams between models
+  // that share an edge but not a matrix slot, which shows up as a white line or a fog-coloured
+  // triangle on the road. Pairs are still validated - same geometry, unambiguous in both frames,
+  // continuous motion - so turning it on can only fall back to the current matrix, never draw a tile
+  // somewhere it never was.
+  config.Set("InstanceInterpolation", false, "Video");
   // Opt-in arcade-exact refresh rate. 0 keeps the default, general-purpose path (borderless
   // fullscreen, FIFO or MAILBOX as the swapchain offers). A non-zero value asks for exclusive
   // fullscreen at the closest 57/58 Hz display mode and paces the emulator at that rate, which
@@ -4053,15 +6542,22 @@ Util::Config::Node DefaultConfig()
    * than something to notice and have to switch off.
    */
   config.Set("ShowStatsOsd", false, "Video");
+  /*
+   * Colour preset for the statistics readout. 0 is the two-colour amber scheme, 1 is slate labels
+   * with warm sand values, 2 is the high-contrast plate, 3 is the no-plate outline. An allow-list
+   * rather than a free integer: a hand-edited file cannot select a palette that does not exist.
+   */
+  config.Set("StatsOsdStyle", 0, "Video", 0, 0, { 0,1,2,3 });
   config.Set("Crosshairs", int(0), "Video", 0, 0, { 0,1,2,3 });
   config.Set<std::string>("CrosshairStyle", "vector", "Video", "", "", { "bmp","vector" });
   config.Set("NoWhiteFlash", false, "Video");
   config.Set("FlipStereo", false, "Sound");
-#ifdef SUPERMODEL_WIN32
+#if defined(SUPERMODEL_WIN32) && defined(SUPERMODEL_PLATFORM_SDL2)
   // XInput by default: nearly every pad on a modern PC presents itself as an Xbox controller, and on
   // XInput each trigger gets its own axis, so the brake binds without the pairing workaround
   // DirectInput needs (see the trigger notice on the Controllers tab). DirectInput is still there
-  // for older wheels and flight sticks that XInput cannot see at all.
+  // for older wheels and flight sticks that XInput cannot see at all. The SDL3 build has no such
+  // backend and gets its default below.
   config.Set<std::string>("InputSystem", "xinput", "Core", "", "", { "sdl","sdlgamepad","dinput","xinput","rawinput" });
   // DirectInput ForceFeedback
   config.Set("DirectInputConstForceLeftMax", 100, "ForceFeedback", 0, 100);
@@ -4074,29 +6570,33 @@ Util::Config::Node DefaultConfig()
   config.Set("XInputConstForceMax", 100, "ForceFeedback", 0, 100);
   config.Set("XInputVibrateMax", 100, "ForceFeedback", 0, 100);
   config.Set("XInputStereoVibration", true, "ForceFeedback");
-  // SDL ForceFeedback
-  config.Set("SDLConstForceMax", 100, "ForceFeedback", 0, 100);
-  config.Set("SDLSelfCenterMax", 100, "ForceFeedback", 0, 100);
-  config.Set("SDLFrictionMax", 100, "ForceFeedback", 0, 100);
-  config.Set("SDLVibrateMax", 100, "ForceFeedback", 0, 100);
-  config.Set("SDLConstForceThreshold", 30, "ForceFeedback", 0, 100);
 #else
+  // The SDL3 and non-Windows builds compile only the SDL input backends. Defaulting to "xinput"
+  // here made every session log a fallback to SDL Gamepad while the Controllers tab showed "SDL",
+  // because the stored value did not match any chooser entry.
+  #if defined(SUPERMODEL_PLATFORM_SDL3)
+  config.Set<std::string>("InputSystem", "sdlgamepad", "Core", "", "", { "sdl","sdlgamepad" });
+  #else
   config.Set<std::string>("InputSystem", "sdl", "Core", "", "", { "sdl","sdlgamepad" });
-  // SDL ForceFeedback
+  #endif
+#endif
+  // SDL ForceFeedback (the only backend shared by every build)
   config.Set("SDLConstForceMax", 100, "ForceFeedback", 0, 100);
   config.Set("SDLSelfCenterMax", 100, "ForceFeedback", 0, 100);
   config.Set("SDLFrictionMax", 100, "ForceFeedback", 0, 100);
   config.Set("SDLVibrateMax", 100, "ForceFeedback", 0, 100);
   config.Set("SDLConstForceThreshold", 30, "ForceFeedback", 0, 100);
-#endif
   // NetBoard
   //
   // On by default, and PortIn == PortOut on the loopback address. That pairing is what lets a single
-  // machine satisfy its own link check: TCPSend connects to 127.0.0.1:PortOut while TCPReceive
-  // listens on PortIn, so with one shared port the two meet and the board reports connected.
+  // machine satisfy its own link check: CSimNetBoard recognises it as a self-link and loops the
+  // shared segment back in process, so no socket, listener or network stack is involved. That also
+  // covers the SDL3 executable, which is built without SDL3_net.
   //
   // Daytona 2, Scud Race, Sega Rally 2, Le Mans 24, Von 2, Dirt Devils and the Harley and Spikeout
-  // boards will not boot past the network self-test without this, so leaving Network off is not a
+  // boards will not boot past the network self-test without this, so leaving Network off is not an
+  // option; do NOT give the two ports different values to "fix" anything: that is exactly what
+  // breaks it.
   // safe default - it looks like a hang on a black screen. Games without a network board ignore
   // these settings entirely.
   //
@@ -4129,6 +6629,11 @@ Util::Config::Node DefaultConfig()
   config.Set<unsigned>("InputDigitalDecaySpeed", DEFAULT_DIGITAL_DECAYSPEED, "Sensitivity", 0, 100);
   config.Set<unsigned>("InputKeySensitivity", DEFAULT_DIGITAL_SENSITIVITY, "Sensitivity", 0, 100);
   config.Set<unsigned>("InputKeyDecaySpeed", DEFAULT_DIGITAL_DECAYSPEED, "Sensitivity", 0, 100);
+
+  // Steering smoothing for gamepad players. The arcade cabinet has a 270-degree wheel with
+  // physical damping; a thumbstick is a step input and the driving games' chase cameras react to
+  // it. 0 = off, 1 = light, 2 = medium, 3 = strong.
+  config.Set("GamepadSteeringSmoothing", 0, "Sensitivity", 0, 3, { 0,1,2,3 });
 
   config.Set<unsigned>("InputMouseXDeadZone", DEFAULT_MSE_DEADZONE, "Sensitivity", 0, 100);
   config.Set<unsigned>("InputMouseYDeadZone", DEFAULT_MSE_DEADZONE, "Sensitivity", 0, 100);
@@ -4554,8 +7059,14 @@ namespace
 		{ "InputAnalogJoyDown",        "KEY_DOWN" },
 		{ "InputAnalogJoyX",           "JOY1_XAXIS,MOUSE_XAXIS" },
 		{ "InputAnalogJoyY",           "JOY1_YAXIS,MOUSE_YAXIS" },
-		{ "InputAnalogJoyTrigger",     "KEY_A,JOY1_RZAXIS,MOUSE_LEFT_BUTTON" },
-		{ "InputAnalogJoyEvent",       "KEY_S,JOY1_ZAXIS,MOUSE_RIGHT_BUTTON" },
+		/*
+		 * The four gun/conversion triggers below are switch inputs, and a switch source only accepts
+		 * one half of an axis. "JOY1_RZAXIS" parses as a full axis and is rejected - for P1 that was
+		 * invisible because the keyboard and mouse alternatives in the same list survived, but P2 had
+		 * nothing else and became NONE (with an "Unable to map" line in the log).
+		 */
+		{ "InputAnalogJoyTrigger",     "KEY_A,JOY1_RZAXIS_POS,MOUSE_LEFT_BUTTON" },
+		{ "InputAnalogJoyEvent",       "KEY_S,JOY1_ZAXIS_POS,MOUSE_RIGHT_BUTTON" },
 		{ "InputAnalogJoyTrigger2",    "JOY2_BUTTON1" },
 
 		// Light guns (Lost World): aimed with the left stick
@@ -4565,12 +7076,12 @@ namespace
 		{ "InputGunDown",              "KEY_DOWN" },
 		{ "InputGunX",                 "MOUSE_XAXIS,JOY1_XAXIS" },
 		{ "InputGunY",                 "MOUSE_YAXIS,JOY1_YAXIS" },
-		{ "InputTrigger",              "KEY_A,JOY1_RZAXIS,MOUSE_LEFT_BUTTON" },
-		{ "InputOffscreen",            "KEY_S,JOY1_ZAXIS,MOUSE_RIGHT_BUTTON" },
+		{ "InputTrigger",              "KEY_A,JOY1_RZAXIS_POS,MOUSE_LEFT_BUTTON" },
+		{ "InputOffscreen",            "KEY_S,JOY1_ZAXIS_POS,MOUSE_RIGHT_BUTTON" },
 		{ "InputGunX2",                "JOY2_XAXIS" },
 		{ "InputGunY2",                "JOY2_YAXIS" },
-		{ "InputTrigger2",             "JOY2_RZAXIS" },
-		{ "InputOffscreen2",           "JOY2_ZAXIS" },
+		{ "InputTrigger2",             "JOY2_RZAXIS_POS" },
+		{ "InputOffscreen2",           "JOY2_ZAXIS_POS" },
 
 		// Analog guns (Ocean Hunter, LA Machineguns)
 		{ "InputAnalogGunLeft",        "KEY_LEFT" },
@@ -4579,8 +7090,8 @@ namespace
 		{ "InputAnalogGunDown",        "KEY_DOWN" },
 		{ "InputAnalogGunX",           "MOUSE_XAXIS,JOY1_XAXIS" },
 		{ "InputAnalogGunY",           "MOUSE_YAXIS,JOY1_YAXIS" },
-		{ "InputAnalogTriggerLeft",    "KEY_A,JOY1_ZAXIS,MOUSE_LEFT_BUTTON" },
-		{ "InputAnalogTriggerRight",   "KEY_S,JOY1_RZAXIS,MOUSE_RIGHT_BUTTON" },
+		{ "InputAnalogTriggerLeft",    "KEY_A,JOY1_ZAXIS_POS,MOUSE_LEFT_BUTTON" },
+		{ "InputAnalogTriggerRight",   "KEY_S,JOY1_RZAXIS_POS,MOUSE_RIGHT_BUTTON" },
 
 		// Ski Champ
 		{ "InputSkiLeft",              "KEY_LEFT" },
@@ -4827,19 +7338,20 @@ ControllerInfo DetectController()
 {
 	ControllerInfo info;
 
-	if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0)
+	if (!OSD::Platform::Initialize(OSD::Platform::Subsystem_Gamepad))
 		return info;
 
-	const int count = SDL_NumJoysticks();
+	const int count = OSD::Platform::GetGamepadCount();
 	if (count <= 0)
 		return info;
 
-	// Prefer a pad SDL recognises as a standard game controller, otherwise take the first
+	// Prefer a pad the platform recognises as a standard game controller, otherwise take the first
 	// joystick, so that wheels and other odd devices still get an answer.
 	int chosen = -1;
 	for (int i = 0; i < count; i++)
 	{
-		if (SDL_IsGameController(i))
+		OSD::Platform::GamepadInfo pad{};
+		if (OSD::Platform::GetGamepadInfo(i, &pad) && pad.isGamepad)
 		{
 			chosen = i;
 			break;
@@ -4848,11 +7360,13 @@ ControllerInfo DetectController()
 	if (chosen < 0)
 		chosen = 0;
 
-	info.sdlKnowsDevice = SDL_IsGameController(chosen) != SDL_FALSE;
-
-	const char* name = SDL_IsGameController(chosen) ? SDL_GameControllerNameForIndex(chosen) : SDL_JoystickNameForIndex(chosen);
-	if (name != nullptr)
-		info.name = name;
+	OSD::Platform::GamepadInfo pad{};
+	if (OSD::Platform::GetGamepadInfo(chosen, &pad))
+	{
+		info.sdlKnowsDevice = pad.isGamepad;
+		if (pad.name[0] != '\0')
+			info.name = pad.name;
+	}
 
 	// Classify by name. SDL reports the product string, which is enough to tell the
 	// families apart for the purpose of picking an input system.
@@ -4874,6 +7388,12 @@ ControllerInfo DetectController()
 		else
 			info.family = "xbox360";
 	}
+	// SDL's XInput backend names every wired Xbox 360-class pad "XInput Controller #N": the product
+	// string lives on the XInput device, not on the HID interface SDL can read. Being on that backend
+	// is itself proof that the pad is XInput-compatible (a Razer Onza reports exactly this name), and
+	// the generation cannot be told apart from it, so it lands on 360.
+	else if (contains("xinput controller"))
+		info.family = "xbox360";
 	else if (contains("dualsense") || contains("ps5") || contains("playstation 5"))
 		info.family = "ps5";
 	else if (contains("dualshock 4") || contains("ps4") || contains("playstation 4") || contains("wireless controller"))
@@ -4903,39 +7423,61 @@ ControllerInfo DetectController()
 	/*
 	 * Which input system to recommend.
 	 *
-	 * Xbox pads are best driven through XInput: that is where force feedback and the separate
-	 * triggers come from. 8BitDo pads are the opposite case - XInput does not see them in their
-	 * Bluetooth modes at all, and SDL has explicit mapping entries for the whole family including
-	 * the SN30 Pro+ (three GUIDs, plus the Switch Pro Controller entries it uses in Switch mode),
-	 * which is what normalises their buttons to the standard numbering the "standard" preset is
-	 * written against. So they go to sdlgamepad even though they are not Sony hardware.
+	 * On the SDL2 build Xbox pads are best driven through XInput: that is where force feedback and
+	 * the separate triggers come from. The SDL3 build has no such backend, so it must recommend a
+	 * value the Controllers tab can actually select - otherwise the detection line proposes "xinput"
+	 * while the dropdown offers only "SDL" and "SDL Gamepad".
 	 *
-	 * Everything else goes to the GameController API when SDL recognises it, and falls back to
-	 * DirectInput when it does not - a raw joystick has no normalised button numbering, so the
+	 * 8BitDo pads are the opposite case - XInput does not see them in their Bluetooth modes at all,
+	 * and SDL has explicit mapping entries for the whole family including the SN30 Pro+ (three
+	 * GUIDs, plus the Switch Pro Controller entries it uses in Switch mode), which is what
+	 * normalises their buttons to the standard numbering the "standard" preset is written against.
+	 * So they go to sdlgamepad even though they are not Sony hardware.
+	 *
+	 * Everything else goes to the GameController API when SDL recognises it, and falls back to the
+	 * raw joystick path when it does not - a raw joystick has no normalised button numbering, so the
 	 * preset's JOY1_BUTTONn bindings cannot be trusted there.
 	 */
 	const bool xboxFamily = (info.family == "xbox360" || info.family == "xboxone" || info.family == "xboxseries");
+#if defined(SUPERMODEL_PLATFORM_SDL2)
 	if (xboxFamily)
 		info.inputSystem = "xinput";
 	else if (info.sdlKnowsDevice)
 		info.inputSystem = "sdlgamepad";
 	else
 		info.inputSystem = "dinput";
+#else
+	// Only the SDL backends exist here. An Xbox pad is still read through SDL's XInput backing
+	// (separate triggers, rumble); "sdlgamepad" is the name of that path in this build.
+	(void)xboxFamily;
+	info.inputSystem = info.sdlKnowsDevice ? "sdlgamepad" : "sdl";
+#endif
 
 	return info;
 }
 
 static void Title(void)
 {
+#if defined(SUPERMODEL_PURE_VULKAN)
+  // Deliberately one line: this is the banner users see in the console window. The version stays in
+  // the string because this line is the quickest way to identify a build from a pasted console log;
+  // the former project name is kept in parentheses so the rename is unambiguous.
+  puts("Model 3-Vulkan v" SUPERMODEL_FORK_VERSION "(formerly Supermodel-VK) - Igloo-Garage");
+#else
   puts(SUPERMODEL_TITLE_FULL " - a Sega Model 3 arcade emulator.");
   puts("Based on Supermodel " SUPERMODEL_BASE_RELEASE " (core version " SUPERMODEL_VERSION ").");
   puts("Copyright 2003-2026 by The Supermodel Team");
+#endif
 }
 
 static void Help(void)
 {
   Util::Config::Node defaultConfig = DefaultConfig();
+#if defined(SUPERMODEL_PURE_VULKAN)
+  puts("Usage: Model3-Vulkan <romset> [options]");
+#else
   puts("Usage: Supermodel <romset> [options]");
+#endif
   puts("ROM set must be a valid ZIP file containing a single game.");
   puts("");
   puts("General Options:");
@@ -4983,9 +7525,11 @@ static void Help(void)
   puts("  -multi-texture          Use 8 texture maps for decoding (legacy engine)");
   puts("  -no-multi-texture       Decode to single texture (legacy engine) [Default]");
 #endif
+#if !defined(SUPERMODEL_OPENGL_ONLY)
   puts("  -vulkan3d               Vulkan 1.3 Real3D backend (bindless textures)");
   puts("  -vulkan-device=<name>   Vulkan device name to render with (see the settings window)");
   puts("  -vk-validation          Enable Vulkan validation layers with -vulkan3d");
+#endif
   puts("  -no-white-flash         Disables white flash when games disable 3D rendering");
 #ifndef SUPERMODEL_OSX
   puts("  -vert-shader=<file>     Load Real3D vertex shader for 3D rendering (legacy");
@@ -5089,7 +7633,9 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
     { "-display",               "DisplayNumber"           },
     { "-input-system",          "InputSystem"             },
     { "-preset",                "ControlPresetCLI"        },
+#if !defined(SUPERMODEL_OPENGL_ONLY)
     { "-vulkan-device",         "VulkanDevice"            },
+#endif
     { "-audio-device",          "AudioDevice"             },
     { "-outputs",               "Outputs"                 },
     { "-log-output",            "LogOutput"               },
@@ -5129,8 +7675,10 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
 #ifndef SUPERMODEL_OSX
     { "-legacy3d",            { "New3DEngine",      false } },
 #endif
+#if !defined(SUPERMODEL_OPENGL_ONLY)
     { "-vulkan3d",            { "Vulkan3DEngine",   true } },
     { "-vk-validation",       { "VkValidation",     true } },
+#endif
     { "-no-flip-stereo",      { "FlipStereo",       false } },
     { "-flip-stereo",         { "FlipStereo",       true } },
     { "-sound",               { "EmulateSound",     true } },
@@ -5155,6 +7703,37 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
     std::string arg(argv[i]);
     if (arg[0] == '-')
     {
+#if defined(SUPERMODEL_OPENGL_ONLY)
+      /*
+       * Options retired with the Vulkan renderer.
+       *
+       * Swallowed with one explanatory line instead of falling through to
+       * "Unrecognized option" and exiting: command lines are copied between the
+       * two executables, and a launch script written for the Vulkan build must
+       * still start a game here.  The option's value is ignored; the renderer is
+       * always OpenGL.
+       */
+      {
+        const std::string option = arg.substr(0, arg.find_first_of('='));
+        static const char* const retired[] = {
+          "-vulkan3d", "-vulkan", "-vk-validation", "-vulkan-device"
+        };
+        bool swallowed = false;
+        for (const char* candidate : retired)
+        {
+          if (option == candidate)
+          {
+            std::cout << "Note: " << candidate
+                      << " is not available in this build (OpenGL only); "
+                         "continuing with the OpenGL renderer." << std::endl;
+            swallowed = true;
+            break;
+          }
+        }
+        if (swallowed)
+          continue;
+      }
+#endif
       // First, check maps
       size_t idx_equals = arg.find_first_of('=');
       if (idx_equals != std::string::npos)
@@ -5197,6 +7776,39 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
         cmd_line.print_help = true;
       else if (arg == "-gui")
         cmd_line.open_gui = true;
+      /*
+       * Presentation multiples, spelled the way they are talked about.
+       *
+       * These are switches rather than valued options because the value is the
+       * spelling itself: "-refresh-rate-mode 4" is the storage format, but nobody
+       * remembers which number is 4x. The numeric form still works - it is what
+       * the ini and the settings window use.
+       */
+      else if (arg == "-vrr-1x" || arg == "-vrr-2x" || arg == "-vrr-3x" ||
+               arg == "-vrr-4x" || arg == "-vrr-8x")
+      {
+        int mode = 0;
+        if (arg == "-vrr-2x") mode = 3;
+        else if (arg == "-vrr-3x") mode = 4;
+        else if (arg == "-vrr-4x") mode = 5;
+        else if (arg == "-vrr-8x") mode = 6;
+        cmd_line.config.Set("RefreshRateMode", mode);
+      }
+      else if (arg == "-refresh-rate-mode" || arg.find("-refresh-rate-mode=") == 0)
+      {
+        // Parsed as an integer rather than through valued_options, which stores
+        // strings: RefreshRateMode is read as an int everywhere, and a string
+        // node would not answer ValueAs<int>().
+        const std::string::size_type eq = arg.find('=');
+        const int mode = eq == std::string::npos ? -1 : atoi(arg.c_str() + eq + 1);
+        if (mode < 0 || mode > 6)
+        {
+          ErrorLog("'-refresh-rate-mode' takes 0-6 (0=arcade, 1=auto, 2=fixed, 3..6 = 2x/3x/4x/8x).");
+          cmd_line.error = true;
+        }
+        else
+          cmd_line.config.Set("RefreshRateMode", mode);
+      }
       else if (arg == "-print-games")
         cmd_line.print_games = true;
       else if (arg == "-res" || arg.find("-res=") == 0)
@@ -5316,7 +7928,7 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
           }
       }
       else if (arg == "-true-hz")
-        cmd_line.config.Set("RefreshRate", 57.524f);
+        cmd_line.config.Set("RefreshRate", 57.52416f);
       else if (arg == "-print-gl-info")
         cmd_line.print_gl_info = true;
       else if (arg == "-config-inputs")
@@ -5359,6 +7971,266 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
  *
  * Program entry point.
  */
+#if defined(SUPERMODEL_OPENGL_ONLY)
+/*
+ * Settings that belonged to the Vulkan renderer, removed from every section of
+ * a configuration file this build reads.
+ *
+ * Neither the default configuration nor the settings window creates these keys
+ * any more; this covers an existing Supermodel.ini written by the previous
+ * dual-renderer build.  MergeINISections() keeps unknown keys from the file, so
+ * without this they would stay in the file (and in a game section they would be
+ * merged back into the run-time configuration) forever, describing a renderer
+ * this executable does not contain.
+ *
+ * Bezel* and Post* are Vulkan2D's compositor and post-processing chain; MSAA is
+ * created with the Vulkan render targets.  Supersampling and CRTcolors are not
+ * in the list: those are the OpenGL anti-aliasing and colour paths and remain.
+ */
+static void RemoveRetiredVulkanSettings(Util::Config::Node &config)
+{
+  Util::Config::StripRetiredVulkanSettings(config);
+}
+#endif
+
+/*
+ * Switch inputs the old standard preset bound to a whole joystick axis.
+ *
+ * A switch source takes one half of an axis ("JOY1_RZAXIS_POS"); a bare "JOY1_RZAXIS" parses as a
+ * full axis and is rejected. Player 1's gun trigger only looked fine because the keyboard and mouse
+ * alternatives in the same list still parsed - the pad half was silently dropped. Player 2's entries
+ * had no alternative at all, so they became NONE and the log carried
+ * "Unable to map input Trigger2 ...". The preset itself is fixed; this repairs an .ini written by an
+ * older build, which the settings window would otherwise write back unchanged.
+ */
+static bool IsBareJoyAxisName(const std::string &name)
+{
+  std::string upper;
+  upper.reserve(name.size());
+  for (char c : name)
+    upper.push_back((char)toupper((unsigned char)c));
+
+  if (upper.rfind("JOY", 0) != 0)
+    return false;
+
+  const size_t underscore = upper.find('_');
+  if (underscore == std::string::npos)
+    return false;
+
+  const std::string part = upper.substr(underscore + 1);
+  static const char *axes[] = {
+    "XAXIS", "YAXIS", "ZAXIS", "RXAXIS", "RYAXIS", "RZAXIS",
+    "AXIS1", "AXIS2", "AXIS3", "AXIS4", "AXIS5", "AXIS6", "AXIS7", "AXIS8",
+    "SLIDER1", "SLIDER2",
+  };
+  for (const char *axis : axes)
+    if (part == axis)
+      return true;
+  return false;
+}
+
+// Rewrites only the joystick tokens of an and/or list, preserving separators and key/mouse tokens.
+static std::string RepairSwitchAxisMapping(const std::string &mapping, bool *changed)
+{
+  std::string result;
+  size_t i = 0;
+  while (i < mapping.size())
+  {
+    size_t end = mapping.find_first_of("+,", i);
+    if (end == std::string::npos)
+      end = mapping.size();
+
+    const std::string token = mapping.substr(i, end - i);
+    const size_t begin = token.find_first_not_of(" \t");
+    const size_t last = token.find_last_not_of(" \t");
+    std::string core = (begin == std::string::npos) ? std::string()
+                       : token.substr(begin, last - begin + 1);
+
+    if (IsBareJoyAxisName(core))
+    {
+      core += "_POS";
+      *changed = true;
+    }
+
+    result += core;
+    if (end < mapping.size())
+      result += mapping[end];
+    i = end + 1;
+  }
+  return result;
+}
+
+static void RepairSwitchAxisMappings(Util::Config::Node &config)
+{
+  static const char *keys[] = {
+    "InputTrigger", "InputOffscreen", "InputTrigger2", "InputOffscreen2",
+    "InputAnalogTriggerLeft", "InputAnalogTriggerRight",
+    "InputAnalogTriggerLeft2", "InputAnalogTriggerRight2",
+    "InputAnalogJoyTrigger", "InputAnalogJoyTrigger2",
+  };
+
+  for (const char *key : keys)
+  {
+    Util::Config::Node *node = config.TryGet(key);
+    if (node == nullptr || node->Empty())
+      continue;
+
+    const std::string mapping = node->ValueAs<std::string>();
+    bool changed = false;
+    const std::string repaired = RepairSwitchAxisMapping(mapping, &changed);
+    if (!changed)
+      continue;
+
+    node->SetValue(repaired);
+    InfoLog("Input: '%s' was '%s' - a switch input cannot use a whole axis; using '%s'.",
+      key, mapping.c_str(), repaired.c_str());
+  }
+}
+
+/*
+ * The "arcade" RefreshRate preset used to store 57.5 Hz.
+ *
+ * The old OpenGL loop paces itself from this key, so 57.5 made every presented frame 17,391,304 ns
+ * long while the emulator advances 17,384,000 ns of emulated time per frame (see kModel3StepNs).
+ * The game therefore ran 0.04% slow against the wall clock, and - because the audio board also
+ * produces one frame's worth of samples per frame - the output ring drained at about 19 samples per
+ * second. That is invisible for a single lap and turns into a periodic under-run on a long session.
+ *
+ * The preset now stores the arcade rate itself, and GetDesiredFramePeriodNs() turns it back into
+ * 17,384,000 ns without rounding to whole millihertz. An ini written by an older build still says
+ * 57.5, so it is rewritten here
+ * in memory (and saved the next time the settings window writes the file). Anything else the user
+ * chose is left alone.
+ */
+static void AlignLegacyArcadeRefreshRate(Util::Config::Node &config, bool report)
+{
+  Util::Config::Node *node = config.TryGet("RefreshRate");
+  if (node == nullptr || node->Empty())
+    return;
+
+  const float hz = node->ValueAs<float>();
+  if (std::fabs(hz - 57.5f) > 0.01f)
+    return;
+
+  node->SetValue(57.52416f);
+  if (report)
+  {
+    InfoLog("Pace: RefreshRate %.2f -> 57.52416 Hz (the old arcade preset stored an approximation; "
+      "the loop ran 0.04%% slow and slowly drained the audio buffer).", hz);
+  }
+}
+
+/*
+ * The SDL3 build compiles only the SDL input backends. An ini written by the SDL2 build can name
+ * DirectInput/XInput/Raw Input; GetInputSystem() already falls back to SDL Gamepad, but leaving the
+ * stored value alone made the Controllers tab show "SDL" (the combo had no matching entry) while
+ * the file said something else. Rewrite it once, in memory, and let the next settings save persist
+ * it. A per-game section can still name an old backend, so GetInputSystem() keeps its own fallback.
+ */
+static void AlignLegacyInputSystem(Util::Config::Node &config, bool report)
+{
+#if !defined(SUPERMODEL_PLATFORM_SDL2)
+  Util::Config::Node *node = config.TryGet("InputSystem");
+  if (node == nullptr || node->Empty())
+    return;
+
+  const std::string system = node->ValueAs<std::string>();
+  if (system == "sdl" || system == "sdlgamepad")
+    return;
+
+  node->SetValue(std::string("sdlgamepad"));
+  if (report)
+    InfoLog("Input: '%s' is not available in the SDL3 build; using 'sdlgamepad'.", system.c_str());
+#else
+  (void)config;
+  (void)report;
+#endif
+}
+
+/*
+ * Per-game default audio balance.
+ *
+ * On the real cabinet the DSB sub-board's output is attenuated before it reaches the mixer, so the
+ * flat 100/100 split the emulator has always used is wrong for the games whose sound ROM expects
+ * that divider: engine effects sit far too loud against the music in Scud Race and Daytona 2, and
+ * the opposite in Star Wars Trilogy.
+ *
+ * These are defaults only. Anything the user has chosen wins, per key: a value in the global .ini
+ * section, a value in the game's own section, or -sound-volume / -music-volume on the command line.
+ * That is why the check reads the raw sources rather than the resolved configuration: DefaultConfig()
+ * always puts SoundVolume and MusicVolume there, so their presence proves nothing.
+ *
+ * The global section is only an override when it differs from the stock default. The settings window
+ * writes the whole merged global section back when it saves, so after one save from the GUI an
+ * untouched 100 appears in the file and would otherwise silently disable every preset. A game that
+ * really should keep 100 can say so in its own [game] section, which is always taken literally.
+ */
+struct PerGameAudioBalance
+{
+  const char *set;
+  int soundVolume;
+  int musicVolume;
+};
+
+static constexpr PerGameAudioBalance s_perGameAudioBalance[] =
+{
+  { "scud",      65, 100 },
+  { "scudplus",  65, 100 },
+  { "daytona2",  70, 100 },
+  { "dayto2pe",  70, 100 },
+  { "swtrilgy", 100,  70 },
+  { "spikeout",  75, 100 },
+  { "spikeofe",  75, 100 },
+};
+
+static const PerGameAudioBalance *FindPerGameAudioBalance(const Game &game)
+{
+  for (const PerGameAudioBalance &entry : s_perGameAudioBalance)
+  {
+    if (game.name == entry.set || (!game.parent.empty() && game.parent == entry.set))
+      return &entry;
+  }
+  return nullptr;
+}
+
+static constexpr int kStockVolume = 100;   // DefaultConfig()'s value for both volume keys
+
+static bool HasExplicitAudioVolume(const Util::Config::Node &ini, const std::string &gameName,
+                                   const Util::Config::Node &cmdLine, const char *key)
+{
+  if (cmdLine.TryGet(key) != nullptr)
+    return true;                                                  // -sound-volume / -music-volume
+  if (const Util::Config::Node *section = ini.TryGet(gameName); section != nullptr &&
+      section->TryGet(key) != nullptr)
+    return true;                                                  // [game] section of the .ini
+  if (const Util::Config::Node *global = ini.TryGet(key); global != nullptr)
+    return global->ValueAsDefault<int>(kStockVolume) != kStockVolume;   // global section, changed
+  return false;
+}
+
+static void ApplyPerGameAudioBalance(Util::Config::Node &config, const Game &game,
+                                     const Util::Config::Node &ini, const Util::Config::Node &cmdLine)
+{
+  const PerGameAudioBalance *balance = FindPerGameAudioBalance(game);
+  if (balance == nullptr)
+    return;
+
+  const bool soundSet = HasExplicitAudioVolume(ini, game.name, cmdLine, "SoundVolume");
+  const bool musicSet = HasExplicitAudioVolume(ini, game.name, cmdLine, "MusicVolume");
+  if (soundSet && musicSet)
+    return;
+
+  if (!soundSet)
+    config.Set("SoundVolume", balance->soundVolume);
+  if (!musicSet)
+    config.Set("MusicVolume", balance->musicVolume);
+
+  InfoLog("Sound: per-game balance for %s (SoundVolume=%d%%, MusicVolume=%d%%).",
+      game.name.c_str(),
+      soundSet ? config["SoundVolume"].ValueAs<int>() : balance->soundVolume,
+      musicSet ? config["MusicVolume"].ValueAs<int>() : balance->musicVolume);
+}
+
 /*
  * RunGameSession(cmd_line, logger):
  *
@@ -5378,12 +8250,19 @@ static int RunGameSession(const ParsedCommandLine& cmd_line, std::shared_ptr<CLo
   }
   if (cmd_line.print_gl_info)
   {
+#if defined(SUPERMODEL_PURE_VULKAN)
+    // This executable has no OpenGL renderer to query.  Say so rather than
+    // failing inside a screen-creation path that was compiled out.
+    puts("This build has no OpenGL renderer. Use -vulkan3d for the Vulkan backend.");
+    return 0;
+#else
     // Use command line options so we can select the 3D engine for which to print GL info 
     Util::Config::MergeINISections(&s_runtime_config, DefaultConfig(), cmd_line.config);
 
     // We must exit after this because CreateGLScreen() is used
     PrintGLInfo(true, false, false);
     return 0;
+#endif
   }
 
 #ifdef DEBUG
@@ -5407,6 +8286,10 @@ static int RunGameSession(const ParsedCommandLine& cmd_line, std::shared_ptr<CLo
     Util::Config::Node config3("Global");
     Util::Config::Node config4("Global");
     Util::Config::FromINIFile(&fileConfig, s_configFilePath);
+    // This is a second read of the same file (the settings window keeps its own copy from main()),
+    // so the repair has to run here too - otherwise this merged configuration still carries the
+    // rejected mappings.
+    RepairSwitchAxisMappings(fileConfig);
     Util::Config::MergeINISections(&fileConfigWithDefaults, DefaultConfig(), fileConfig); // apply .ini file's global section over defaults
     Util::Config::MergeINISections(&config3, fileConfigWithDefaults, cmd_line.config);    // apply command line overrides
     if (rom_specified || print_games)
@@ -5420,27 +8303,129 @@ static int RunGameSession(const ParsedCommandLine& cmd_line, std::shared_ptr<CLo
       }
       if (loader.Load(&game, &rom_set, *cmd_line.rom_files.begin()))
         return 1;
+      // The set comes from the archive's contents, not its file name, so a zip named after one
+      // revision can run another. Saves and NVRAM are named after the set that actually runs, which
+      // looks like a save under an unrelated name unless the resolution is stated somewhere.
+      InfoLog("Game: '%s' resolves to set '%s' (%s, %s).", cmd_line.rom_files.begin()->c_str(),
+          game.name.c_str(), game.title.c_str(), game.version.c_str());
       Util::Config::MergeINISections(&config4, config3, fileConfig[game.name]);   // apply game-specific config
+      ApplyPerGameAudioBalance(config4, game, fileConfig, cmd_line.config);       // per-game default balance
     }
     else
       config4 = config3;
     Util::Config::MergeINISections(&s_runtime_config, config4, cmd_line.config);  // apply command line overrides once more
+    // Same repair as the settings window's copy: a legacy 57.5 must not pace this session either.
+    AlignLegacyArcadeRefreshRate(s_runtime_config, true);
+    AlignLegacyInputSystem(s_runtime_config, true);
   }
+
+  /*
+   * Migrate the two-value RefreshRate preference into the new pacing model.
+   *
+   * RefreshRateMode is a new key, so an ini written by an older build does not
+   * have it and the merged configuration shows the default (Auto). That would
+   * silently change a 57.5 Hz user's presentation rate to wherever their panel
+   * happens to run. If none of the three sources named the key, derive it from
+   * what the old build would have done:
+   *
+   *   - exclusive arcade timing, or RefreshRate at/below the arcade rate -> Original;
+   *   - otherwise the old loop was presenting at that rate -> Fixed at that rate.
+   *
+   * The simulation rate is 57.524 Hz in every case; only presentation changes.
+   */
+  {
+    bool modeSpecified = false;
+    if (fileConfig.TryGet("RefreshRateMode") != nullptr)
+      modeSpecified = true;
+    if (const Util::Config::Node* gameNode = fileConfig.TryGet(game.name); gameNode != nullptr && gameNode->TryGet("RefreshRateMode") != nullptr)
+      modeSpecified = true;
+    if (cmd_line.config.TryGet("RefreshRateMode") != nullptr)
+      modeSpecified = true;
+
+    // Remembered for the session: a mode nobody chose may still be replaced by Original once the
+    // window exists and the display can be asked what it can actually present at.
+    s_refreshModeExplicit = modeSpecified;
+
+    if (!modeSpecified)
+    {
+      const float legacyHz = s_runtime_config["RefreshRate"].ValueAsDefault<float>(60.0f);
+      const float exclusiveHz = s_runtime_config["ExclusiveRefreshRate"].ValueAsDefault<float>(0.0f);
+      if (exclusiveHz > 0.0f || legacyHz <= 57.6f)
+      {
+        s_runtime_config.Set("RefreshRateMode", 0);
+        InfoLog("Pace: migrated legacy RefreshRate %.4f to Original (arcade 57.524 Hz presentation).", legacyHz);
+      }
+      else
+      {
+        int hz = (int)std::lround(legacyHz);
+        if (hz <= 60)
+          hz = 60;
+        else
+        {
+          static const int kRates[] = { 60, 120, 144, 165, 240, 480 };
+          int best = kRates[0];
+          int bestDelta = std::abs(hz - best);
+          for (int candidate : kRates)
+          {
+            const int delta = std::abs(hz - candidate);
+            if (delta < bestDelta)
+            {
+              best = candidate;
+              bestDelta = delta;
+            }
+          }
+          hz = best;
+        }
+        s_runtime_config.Set("RefreshRateMode", 2);
+        s_runtime_config.Set("FixedRefreshRate", hz);
+        InfoLog("Pace: migrated legacy RefreshRate %.4f to Fixed %d Hz presentation (logic stays 57.524 Hz).",
+          legacyHz, hz);
+      }
+    }
+  }
+
+  // There is only one SCSP DSP implementation now: the reserved 0x7C0-0x7FF hole is discarded on
+  // every write path (see devdocs/DSP.md), which is the behaviour that made Fighting Vipers 2 work on the
+  // old path. The option and its -new-scsp/-legacy-scsp spellings are still parsed so existing
+  // shortcuts, front-ends and .ini files keep working, but they no longer select anything.
+  if (const Util::Config::Node *legacySoundDSP = s_runtime_config.TryGet("LegacySoundDSP");
+      legacySoundDSP != nullptr && legacySoundDSP->ValueAsDefault<bool>(false))
+    InfoLog("Sound: LegacySoundDSP is retired and ignored; the corrected SCSP DSP path is always used.");
+
+#if defined(SUPERMODEL_OPENGL_ONLY)
+  RemoveRetiredVulkanSettings(s_runtime_config);
+#endif
+
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+  /*
+   * The SDL3 executable is locked to Vulkan: its settings surface is the Vulkan 1.3 backend, which
+   * the startup check has already verified.  A -legacy3d, New3DEngine=0 or Vulkan3DEngine=0 from the
+   * command line, the .ini or a game section is ignored here rather than being allowed to reach
+   * CreateGLScreen().  The explicit log line matters because the setting still exists in the legacy
+   * .ini files users will copy over.
+   */
+  if (!s_runtime_config["Vulkan3DEngine"].ValueAsDefault<bool>(true))
+  {
+    InfoLog("SDL3 build: OpenGL renderers are not part of this executable; forcing the Vulkan 1.3 renderer.");
+  }
+  s_runtime_config.Set("Vulkan3DEngine", true);
+#endif
 
   // A control preset named on the command line overrides the individual input settings.
   ApplyPresetFromCommandLine(s_runtime_config, cmd_line.config["ControlPresetCLI"].ValueAsDefault<std::string>(""));
 
   LogConfig(s_runtime_config);
 
-  // Initialize SDL (individual subsystems get initialized later)
-  if (SDL_Init(0) != 0)
+  // Flag as DPI-aware, otherwise the window content might be scaled by some graphics drivers. This
+  // has to be set before the video subsystem comes up.
+  OSD::Platform::SetDPIAwareness();
+
+  // Initialize the platform layer with no subsystems; individual ones are brought up later.
+  if (!OSD::Platform::Initialize(0))
   {
-    ErrorLog("Unable to initialize SDL: %s\n", SDL_GetError());
+    ErrorLog("Unable to initialize SDL: %s\n", OSD::Platform::GetError());
     return 1;
   }
-
-  // Flag as DPI-aware, otherwise the window content might be scaled by some graphics drivers
-  SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "system");
 
   // Begin initializing various subsystems...
   int exitCode = 0;
@@ -5455,21 +8440,56 @@ static int RunGameSession(const ParsedCommandLine& cmd_line, std::shared_ptr<CLo
 
   aaValue = s_runtime_config["Supersampling"].ValueAs<int>();
   CRTcolors = (CRTcolor)s_runtime_config["CRTcolors"].ValueAs<int>();
+#if !defined(SUPERMODEL_OPENGL_ONLY)
   if (s_runtime_config["Vulkan3DEngine"].ValueAsDefault<bool>(false) && aaValue != 1)
   {
     InfoLog("Vulkan: supersampling is not available in this backend; using 1x.");
     aaValue = 1;
   }
+#endif
 
   // Create a window
   xRes = s_runtime_config["XResolution"].ValueAsDefault<unsigned>(496);
   yRes = s_runtime_config["YResolution"].ValueAsDefault<unsigned>(384);
 
+#if defined(SUPERMODEL_OPENGL_ONLY)
+  // One renderer family, no run-time choice.  Any Vulkan3DEngine value left in
+  // a hand-edited file is ignored.
+  Result screen = CreateGLScreen(s_runtime_config["New3DEngine"].ValueAs<bool>(),
+    SUPERMODEL_TITLE_FULL, false, &xOffset, &yOffset, &xRes, &yRes,
+    &totalXRes, &totalYRes, false, false);
+#elif defined(SUPERMODEL_PURE_VULKAN)
+  const bool vulkanRequested = true;
+  // The renderer is forced to Vulkan above; there is no GL path to select.
+  (void)vulkanRequested;
+  Result screen = CreateVulkanScreen(SUPERMODEL_TITLE_FULL, false, &xOffset, &yOffset, &xRes, &yRes, &totalXRes, &totalYRes, false, false);
+#else
   const bool vulkanRequested = s_runtime_config["Vulkan3DEngine"].ValueAsDefault<bool>(false);
   Result screen = vulkanRequested
     ? CreateVulkanScreen(SUPERMODEL_TITLE_FULL, false, &xOffset, &yOffset, &xRes, &yRes, &totalXRes, &totalYRes, false, false)
     : CreateGLScreen(s_runtime_config["New3DEngine"].ValueAs<bool>(), SUPERMODEL_TITLE_FULL, false, &xOffset, &yOffset, &xRes, &yRes, &totalXRes, &totalYRes, false, false);
+#endif
 
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+  /*
+   * No OpenGL fallback exists in this executable.  The startup probe accepted the machine, so a
+   * failure here is a session-level problem (surface, swapchain, or a device the renderer refused
+   * for another reason).  Say so and end cleanly instead of pretending to fall back to a renderer
+   * that was not compiled into this binary.
+   */
+  if (Result::OKAY != screen && vulkanRequested)
+  {
+    const std::string message = std::format(
+      "Vulkan 1.3 passed the startup check, but the game window could not be created.\n\n"
+      "{}\n\n"
+      "See Supermodel.log for the Vulkan device details. The OpenGL-compatible build "
+      "(Supermodel-LegacyOG.exe) can be used if the problem persists.",
+      OSD::Platform::GetError());
+    ErrorLog("Vulkan: the session could not create its window or swapchain: %s", OSD::Platform::GetError());
+    OSD::SDL3App::StartupPrint("Model3-Vulkan: {}", message);
+    OSD::SDL3App::ShowFatalError("Model3-Vulkan - Vulkan session failed", message);
+  }
+#elif !defined(SUPERMODEL_OPENGL_ONLY)
   /*
    * Vulkan was selected and could not start - the GPU or its driver does not meet what the backend
    * needs. Falling back to OpenGL rather than ending the session, because the alternative is a user
@@ -5520,6 +8540,7 @@ static int RunGameSession(const ParsedCommandLine& cmd_line, std::shared_ptr<CLo
 
     screen = CreateGLScreen(s_runtime_config["New3DEngine"].ValueAs<bool>(), SUPERMODEL_TITLE_FULL, false, &xOffset, &yOffset, &xRes, &yRes, &totalXRes, &totalYRes, false, false);
   }
+#endif
 
   if (Result::OKAY != screen)
   {
@@ -5527,8 +8548,11 @@ static int RunGameSession(const ParsedCommandLine& cmd_line, std::shared_ptr<CLo
     goto Exit;
   }
 
-  // Create Crosshair (OpenGL only; the Vulkan backend does not draw it yet)
+  // Create Crosshair (OpenGL only; the Vulkan backend draws its own)
+#if !defined(SUPERMODEL_PURE_VULKAN)
+#if !defined(SUPERMODEL_OPENGL_ONLY)
   if (!s_vkContext)
+#endif
   {
     s_crosshair = new CCrosshair(s_runtime_config);
     if (s_crosshair->Init() != Result::OKAY)
@@ -5538,6 +8562,7 @@ static int RunGameSession(const ParsedCommandLine& cmd_line, std::shared_ptr<CLo
         goto Exit;
     }
   }
+#endif
 
   // Create Model 3 emulator
 #ifdef DEBUG
@@ -5547,18 +8572,28 @@ static int RunGameSession(const ParsedCommandLine& cmd_line, std::shared_ptr<CLo
 #endif
 
   // Create input system
+#if !defined(SUPERMODEL_PLATFORM_SDL2)
+  // The SDL3 binary has no DirectInput/Raw Input backend, but both executables share one
+  // Data/Config tree, so a configuration written for the SDL2 build may name one of them.
+  if (selectedInputSystem != "sdl" && selectedInputSystem != "sdlgamepad")
+  {
+    InfoLog("Input: '%s' is not available in the SDL3 build; using 'sdlgamepad'.", selectedInputSystem.c_str());
+    selectedInputSystem = "sdlgamepad";
+  }
+#endif
+
   if (selectedInputSystem == "sdl")
     InputSystem = std::shared_ptr<CInputSystem>(new CSDLInputSystem(s_runtime_config, false));
   else if (selectedInputSystem == "sdlgamepad")
     InputSystem = std::shared_ptr<CInputSystem>(new CSDLInputSystem(s_runtime_config, true));
-#ifdef SUPERMODEL_WIN32
+#if defined(SUPERMODEL_WIN32) && defined(SUPERMODEL_PLATFORM_SDL2)
   else if (selectedInputSystem == "dinput")
-    InputSystem = std::shared_ptr<CInputSystem>(new CDirectInputSystem(s_runtime_config, s_window, false, false));
+    InputSystem = std::shared_ptr<CInputSystem>(new CDirectInputSystem(s_runtime_config, s_platformWindow, false, false));
   else if (selectedInputSystem == "xinput")
-    InputSystem = std::shared_ptr<CInputSystem>(new CDirectInputSystem(s_runtime_config, s_window, false, true));
+    InputSystem = std::shared_ptr<CInputSystem>(new CDirectInputSystem(s_runtime_config, s_platformWindow, false, true));
   else if (selectedInputSystem == "rawinput")
-    InputSystem = std::shared_ptr<CInputSystem>(new CDirectInputSystem(s_runtime_config, s_window, true, false));
-#endif // SUPERMODEL_WIN32
+    InputSystem = std::shared_ptr<CInputSystem>(new CDirectInputSystem(s_runtime_config, s_platformWindow, true, false));
+#endif // SUPERMODEL_WIN32 && SUPERMODEL_PLATFORM_SDL2
   else
   {
     ErrorLog("Unknown input system: %s\n", selectedInputSystem.c_str());
@@ -5645,8 +8680,8 @@ static int RunGameSession(const ParsedCommandLine& cmd_line, std::shared_ptr<CLo
   delete Model3;
 
 Exit:
-  if (s_window != nullptr)
-    SDL_SetWindowMouseGrab(s_window, SDL_FALSE);
+  if (s_platformWindow != nullptr)
+    OSD::Platform::SetWindowMouseGrab(s_platformWindow, false);
 
   // Give the pointer back to the settings window.
   //
@@ -5691,17 +8726,141 @@ Exit:
   InfoLog("Session: input system released.");
   delete Outputs;
   InfoLog("Session: outputs released.");
+#if !defined(SUPERMODEL_PURE_VULKAN)
   delete s_crosshair;
   s_crosshair = nullptr;
+#endif
   InfoLog("Session: crosshair released.");
 
   // Note: SDL_Quit() is deliberately not called here. The settings GUI keeps its own window and
   // GL context alive across sessions, so SDL is shut down once in main() instead.
   DestroyGLScreen();
+#if defined(SUPERMODEL_PURE_VULKAN)
+  InfoLog("Session: game window and Vulkan context released.");
+#else
   InfoLog("Session: game window and GL context released.");
+#endif
 
   return exitCode;
 }
+
+/*
+ * SDL3 startup gate.
+ *
+ * Runs before a ROM is loaded and before the main window is created:
+ *
+ *   1. resolve the per-executable settings file (Model3-Vulkan.ini),
+ *   2. verify that the machine can run the Vulkan 1.3 pipeline at all.
+ *
+ * Both failures are fatal and reported with a modal message box.  The SDL2
+ * build has neither step: it keeps Supermodel.ini and the Vulkan 1.2
+ * extension fallback inside CVulkanContext.
+ */
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+static bool InitializeSDL3Startup()
+{
+  const auto startupClock = std::chrono::steady_clock::now();
+  const auto startupMs = [&startupClock]()
+  {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - startupClock).count();
+  };
+
+  auto paths = OSD::SDL3App::DeriveRuntimePaths();
+  if (!paths)
+  {
+    const std::string message = std::format(
+      "The settings file for this build could not be resolved.\n\n{}\n\n"
+      "The OpenGL-compatible build (Supermodel-LegacyOG.exe) is not affected.",
+      paths.error().detail);
+    OSD::SDL3App::StartupPrint("Model3-Vulkan: {}", message);
+    OSD::SDL3App::ShowFatalError("Model3-Vulkan - settings path error", message);
+    return false;
+  }
+
+  s_configFilePath = paths->configFile.string();
+
+  /*
+   * First run of this executable on an existing installation: seed its own settings file from an
+   * older configuration so the ROM path, control mappings and display preferences carry over.
+   * The previous fork settings file is preferred over the shared Supermodel.ini because it is the
+   * one that holds the Vulkan-only options this build understands; Supermodel.ini is the fallback
+   * for an installation that never ran the SDL3 build.  The OpenGL-only keys in a shared copy are
+   * ignored by this build (Vulkan is forced at session start), but losing every setting on upgrade
+   * would look exactly like a factory reset.
+   */
+  {
+    std::error_code existsError;
+    const bool haveOwnSettings = std::filesystem::exists(paths->configFile, existsError) && !existsError;
+    if (!haveOwnSettings)
+    {
+      const std::filesystem::path configDirectory = paths->configFile.parent_path();
+      const char* const previousNames[] = { "Supermodel-VK-SDL3.ini", "Supermodel.ini" };
+      for (const char* name : previousNames)
+      {
+        const std::filesystem::path source = configDirectory / name;
+        std::error_code sourceError;
+        if (!std::filesystem::is_regular_file(source, sourceError) || sourceError)
+          continue;
+
+        std::error_code copyError;
+        std::filesystem::copy_file(source, paths->configFile,
+          std::filesystem::copy_options::none, copyError);
+        if (copyError)
+        {
+          OSD::SDL3App::StartupPrint("Model3-Vulkan: could not seed settings from '{}': {}",
+            source.string(), copyError.message());
+          break;
+        }
+        OSD::SDL3App::StartupPrint("Model3-Vulkan: seeded settings from '{}'.", source.string());
+        break;
+      }
+    }
+  }
+
+  OSD::SDL3App::StartupPrint("Model3-Vulkan: settings file: {}", s_configFilePath);
+  OSD::SDL3App::StartupPrint("Model3-Vulkan: settings resolved ({:.0f} ms).", startupMs());
+
+#if defined(SUPERMODEL_PURE_VULKAN)
+  /*
+   * Cold-path module check.  The C++ configuration system remains the source of truth in this stage;
+   * this call verifies that the native module loads and can parse the same file, and records what it
+   * saw.  Moving individual settings over to HostCoreConfig is the next migration step and can be
+   * done one setting at a time without touching the engine.
+   */
+  if (auto host = OSD::HostCore::Shared(); !host)
+  {
+    OSD::SDL3App::StartupPrint("Model3-Vulkan: host core unavailable: {}", host.error().message);
+  }
+  else
+  {
+    OSD::SDL3App::StartupPrint("Model3-Vulkan: host core: {}", (*host)->Version());
+    auto hostConfig = (*host)->LoadIni(paths->configFile);
+    if (hostConfig)
+    {
+      OSD::SDL3App::StartupPrint(
+        "Model3-Vulkan: host core ini: {}x{}, MSAA {}, mouse {} Hz",
+        hostConfig->XResolution, hostConfig->YResolution, hostConfig->Msaa, hostConfig->MousePollingHz);
+    }
+    else
+    {
+      OSD::SDL3App::StartupPrint("Model3-Vulkan: host core ini failed: {}",
+        hostConfig.error().message);
+    }
+  }
+#endif
+  OSD::SDL3App::StartupPrint("Model3-Vulkan: startup layer ready ({:.0f} ms).", startupMs());
+
+  auto probe = OSD::SDL3App::ProbeVulkan13();
+  if (!probe)
+  {
+    OSD::SDL3App::ReportVulkanRequirementFailure(probe.error());
+    return false;
+  }
+
+  OSD::SDL3App::StartupPrint("Model3-Vulkan: startup checks done ({:.0f} ms).", startupMs());
+  return true;
+}
+#endif
 
 /*
  * main(argc, argv):
@@ -5716,6 +8875,26 @@ int main(int argc, char **argv)
   // command-line output such as -print-games appears where the user is looking. Does nothing when
   // started from Explorer, which is how the flash-free default is kept.
   AttachParentConsole();
+
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+  // The executable-specific .ini and the Vulkan 1.3 requirement are both decided here, while there
+  // is still nothing to tear down and no window the user could mistake for a working session.
+  //
+  // Caught as a last line of defence: a diagnostic write must never be able to take the process down
+  // before the message box (see StartupLog.h).
+  try
+  {
+    if (!InitializeSDL3Startup())
+      return 1;
+  }
+  catch (const std::exception& error)
+  {
+    const std::string message = std::format(
+      "Model3-Vulkan could not complete its startup checks.\n\n{}", error.what());
+    OSD::SDL3App::ShowFatalError("Model3-Vulkan - startup error", message);
+    return 1;
+  }
+#endif
 
   Title();
   WriteDefaultConfigurationFileIfNotPresent();
@@ -5759,6 +8938,17 @@ int main(int argc, char **argv)
   // sections themselves is not supported atm but we can look at this later.
   Util::Config::Node fileConfig("Global");
   Util::Config::FromINIFile(&fileConfig, s_configFilePath);
+  // Before the copy is handed to the settings window (which writes it back) and before it is merged
+  // into the run-time configuration, so both the session and the next save see the repaired values.
+  RepairSwitchAxisMappings(fileConfig);
+  AlignLegacyArcadeRefreshRate(fileConfig, false);
+  AlignLegacyInputSystem(fileConfig, false);
+#if defined(SUPERMODEL_OPENGL_ONLY)
+  // Must happen before the file is handed to the settings window: that copy is
+  // what gets written back, so cleaning it here is what keeps retired Vulkan
+  // keys out of the file instead of merely ignoring them at run time.
+  RemoveRetiredVulkanSettings(fileConfig);
+#endif
 
   // Settings that apply to the whole run rather than to a session, so they are handled once here.
   // The console window is only relevant in GUI mode; priority matters in both.
@@ -5824,7 +9014,7 @@ int main(int argc, char **argv)
   if (gui != nullptr)
     GuiDestroy(gui);
 
-  SDL_Quit();
+  OSD::Platform::Shutdown();
 
   if (exitCode)
     InfoLog("Program terminated due to an error.");

@@ -430,9 +430,24 @@ void CReal3D::BeginFrame(void)
   Render3D->BeginFrame();
 }
 
+void CReal3D::PrepareFrame(void)
+{
+  Render3D->PrepareFrame();
+}
+
+void CReal3D::ResetInterpolation(void)
+{
+  Render3D->ResetInterpolation();
+}
+
 void CReal3D::RenderFrame(void)
 {
     Render3D->RenderFrame();
+}
+
+void CReal3D::RenderFrame(double alpha, bool newSimulation)
+{
+  Render3D->RenderFrame(alpha, newSimulation);
 }
 
 void CReal3D::EndFrame(void)

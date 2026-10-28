@@ -21,6 +21,8 @@
  **/
 
 #include <thread>
+#include <iomanip>
+#include <sstream>
 #include "Supermodel.h"
 #include "SimNetBoard.h"
 #include <OSD/Thread.h>
@@ -30,6 +32,39 @@
 #define CommRAM16 *(uint16_t*)&CommRAM
 
 static const uint64_t netGUID = 0x5bf177da34872;
+
+static const char *LoadDebugNetStateName(State state)
+{
+	switch (state)
+	{
+	case State::start:   return "start";
+	case State::init:    return "init";
+	case State::testing: return "testing";
+	case State::ready:   return "ready";
+	case State::error:   return "error";
+	default:             return "?";
+	}
+}
+
+static uint32_t LoadDebugChecksum(const uint8_t *data, size_t size)
+{
+	uint32_t hash = 2166136261u;
+	for (size_t i = 0; i < size; ++i)
+	{
+		hash ^= data[i];
+		hash *= 16777619u;
+	}
+	return hash;
+}
+
+static std::string LoadDebugHex(const uint8_t *data, size_t size)
+{
+	std::ostringstream s;
+	s << std::hex << std::setfill('0');
+	for (size_t i = 0; i < size; ++i)
+		s << std::setw(2) << (unsigned)data[i];
+	return s.str();
+}
 
 inline bool CSimNetBoard::IsGame(const char* gameName)
 {
@@ -56,6 +91,32 @@ void CSimNetBoard::SaveState(CBlockFile* SaveState)
 void CSimNetBoard::LoadState(CBlockFile* SaveState)
 {
 
+}
+
+std::string CSimNetBoard::DebugState(void) const
+{
+	std::ostringstream s;
+	s << "net state=" << LoadDebugNetStateName(m_state)
+		<< " running=" << (m_running ? 1 : 0)
+		<< " connected=" << (m_connected.load() ? 1 : 0)
+		<< " localLoop=" << (m_localLoop ? 1 : 0)
+		<< " machines=" << (unsigned)m_numMachines
+		<< " counter=" << (unsigned)m_counter
+		<< " segment=" << (unsigned)m_segmentSize
+		<< " bank=" << (m_commbank ? 1 : 0)
+		<< " irq2ack=" << std::hex << m_IRQ2ack
+		<< " status0=" << m_status0
+		<< " status1=" << m_status1
+		<< std::dec;
+	if (RAM != nullptr)
+		s << " ramSum=" << std::hex << LoadDebugChecksum(RAM, 0x10000) << std::dec;
+	if (Buffer != nullptr)
+		s << " bufSum=" << std::hex << LoadDebugChecksum(Buffer, 0x20000) << std::dec;
+	if (CommRAM != nullptr)
+		s << " comm=" << LoadDebugHex(CommRAM, 16);
+	if (externalCommRAM != nullptr)
+		s << " ext=" << LoadDebugHex(externalCommRAM, 16);
+	return s.str();
 }
 
 Result CSimNetBoard::Init(uint8_t* netRAMPtr, uint8_t* netBufferPtr)
@@ -86,6 +147,19 @@ Result CSimNetBoard::Init(uint8_t* netRAMPtr, uint8_t* netBufferPtr)
 	port_out = m_config["PortOut"].ValueAs<unsigned>();
 	addr_out = m_config["AddressOut"].ValueAs<std::string>();
 
+	// Link to itself: the master's packets are its own. Doing that through real sockets only
+	// works when the platform has a network stack, and even then it costs a listener, a connect
+	// thread and a port that another instance can collide with. Treat it for what it is - a
+	// single machine - and skip the socket layer entirely (see the testing/ready states).
+	m_localLoop = (port_in == port_out && addr_out == "127.0.0.1");
+
+	if (m_localLoop)
+	{
+		InfoLog("Net board: local loopback (single machine, port %u).", (unsigned)port_in);
+		m_connected = true;
+		return Result::OKAY;
+	}
+
 	nets = std::make_unique<TCPSend>(addr_out, port_out);
 	netr = std::make_unique<TCPReceive>(port_in);
 
@@ -100,7 +174,7 @@ void CSimNetBoard::RunFrame(void)
 	switch (m_state)
 	{
 	case State::start:
-		if (!m_connected && !m_connectThread.joinable())
+		if (!m_localLoop && !m_connected && !m_connectThread.joinable())
 			m_connectThread = std::thread(&CSimNetBoard::ConnectProc, this);
 		m_status0 = 0;
 		m_status1 = IsGame("dirtdvls") ? 0x4004 : 0xe000;
@@ -138,12 +212,19 @@ void CSimNetBoard::RunFrame(void)
 		{
 			m_status0 += 1; // type 1 games require this to be incremented every frame
 
-			if (!m_connected)
+			if (!m_connected && !m_localLoop)
 				break;
 
 			uint8_t numMachines, machineIndex;
 
-			if (RAM16[0x400] == 0)	// master
+			if (m_localLoop)
+			{
+				// Linked to itself: no GUID exchange, one machine, index 0. This is the same
+				// result the socket handshake below reaches when the loopback is the only peer.
+				numMachines = 0;
+				machineIndex = 0;
+			}
+			else if (RAM16[0x400] == 0)	// master
 			{
 				// flush receive buffer
 				while (netr->CheckDataAvailable())
@@ -258,11 +339,12 @@ void CSimNetBoard::RunFrame(void)
 			CommRAM16[0xc] = FLIPENDIAN16(0x100);
 			CommRAM16[0xe] = FLIPENDIAN16(RAM16[0x402] - m_segmentSize + 0x200);
 
+			InfoLog("Net board: link ready (%u machine(s)).", (unsigned)m_numMachines);
 			m_state = State::ready;
 		}
 		else
 		{
-			if (!m_connected)
+			if (!m_connected && !m_localLoop)
 				break;
 
 			// we have to track both playable and non-playable machines for type 2
@@ -272,7 +354,12 @@ void CSimNetBoard::RunFrame(void)
 				uint8_t playable;
 			} numMachines, machineIndex;
 
-			if (RAM16[0x200] == 0)	// master
+			if (m_localLoop)
+			{
+				numMachines.total = numMachines.playable = 0;
+				machineIndex.total = machineIndex.playable = 0;
+			}
+			else if (RAM16[0x200] == 0)	// master
 			{
 				// flush receive buffer
 				while (netr->CheckDataAvailable())
@@ -449,6 +536,7 @@ void CSimNetBoard::RunFrame(void)
 			CommRAM16[0xc] = FLIPENDIAN16(0x100);
 			CommRAM16[0xe] = FLIPENDIAN16(RAM16[0x206] + 0x80);
 
+			InfoLog("Net board: link ready (%u machine(s)).", (unsigned)m_numMachines);
 			m_state = State::ready;
 		}
 		break;
@@ -456,23 +544,37 @@ void CSimNetBoard::RunFrame(void)
 	case State::ready:
 		m_counter++;
 		CommRAM16[0x6] = FLIPENDIAN16(m_counter);
-		
-		// we only send what we need to; helps cut down on bandwidth
-		// each machine has to receive back its own data (TODO: copy this data manually?)
-		for (int i = 0; i < m_numMachines; i++)
+
+		if (m_localLoop)
 		{
-			nets->Send(CommRAM + 0x100 + i * m_segmentSize, m_segmentSize);
-			auto& recv_data = netr->Receive();
-			if (recv_data.empty())
+			// The only peer is ourselves, so the packet the loop would have sent comes straight
+			// back: copy our own segment into the peer slot. memmove because the two slots are
+			// adjacent when a machine only exchanges one segment.
+			for (int i = 0; i < m_numMachines; i++)
 			{
-				// link broken - send an "empty" packet to alert other machines
-				nets->Send(nullptr, 0);
-				m_state = State::error;
-				if (m_gameType == GameType::one)
-					m_status1 = 0x40;			// send "link broken" message to mainboard
-				break;
+				memmove(CommRAM + 0x100 + (i + 1) * m_segmentSize,
+					CommRAM + 0x100 + i * m_segmentSize, m_segmentSize);
 			}
-			memcpy(CommRAM + 0x100 + (i + 1) * m_segmentSize, recv_data.data(), recv_data.size());
+		}
+		else
+		{
+			// we only send what we need to; helps cut down on bandwidth
+			// each machine has to receive back its own data (TODO: copy this data manually?)
+			for (int i = 0; i < m_numMachines; i++)
+			{
+				nets->Send(CommRAM + 0x100 + i * m_segmentSize, m_segmentSize);
+				auto& recv_data = netr->Receive();
+				if (recv_data.empty())
+				{
+					// link broken - send an "empty" packet to alert other machines
+					nets->Send(nullptr, 0);
+					m_state = State::error;
+					if (m_gameType == GameType::one)
+						m_status1 = 0x40;			// send "link broken" message to mainboard
+					break;
+				}
+				memcpy(CommRAM + 0x100 + (i + 1) * m_segmentSize, recv_data.data(), recv_data.size());
+			}
 		}
 
 		// swap CommRAM banks
@@ -500,7 +602,7 @@ void CSimNetBoard::RunFrame(void)
 void CSimNetBoard::Reset(void)
 {
 	// if netboard was active, send an "empty" packet so the other machines don't get stuck waiting for data
-	if (m_state == State::ready)
+	if (!m_localLoop && m_state == State::ready)
 	{
 		nets->Send(nullptr, 0);
 		netr->Receive();

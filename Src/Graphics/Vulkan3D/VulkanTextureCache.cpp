@@ -20,6 +20,7 @@
  ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
  **/
 #include "VulkanTextureCache.h"
+#include "TextureDecode.h"
 #include "OSD/Logger.h"
 #include "Shaders/texdecode_comp.spv.h"
 
@@ -42,64 +43,6 @@ static uint32_t MipCount(int width, int height)
 		mips++;
 	}
 	return mips;
-}
-
-static void ExtractColour(int type, uint32_t value, uint8_t out[4])
-{
-	auto u8 = [](float c) { return (uint8_t)std::min(255, std::max(0, (int)(c * 255.0f + 0.5f))); };
-	float r = 0, g = 0, b = 0, a = 0;
-	switch (type)
-	{
-	case 0:
-		r = ((value >> 10) & 0x1F) / 31.0f;
-		g = ((value >> 5) & 0x1F) / 31.0f;
-		b = (value & 0x1F) / 31.0f;
-		a = 1.0f - (float)((value >> 15) & 1u);
-		break;
-	case 1:
-		r = g = b = (value & 0xF) / 15.0f;
-		a = ((value >> 4) & 0xF) / 15.0f;
-		break;
-	case 2:
-		a = (value & 0xF) / 15.0f;
-		r = g = b = ((value >> 4) & 0xF) / 15.0f;
-		break;
-	case 3:
-		r = g = b = ((value >> 8) & 0xF) / 15.0f;
-		a = ((value >> 12) & 0xF) / 15.0f;
-		break;
-	case 4:
-		a = ((value >> 8) & 0xF) / 15.0f;
-		r = g = b = ((value >> 12) & 0xF) / 15.0f;
-		break;
-	case 5:
-		r = g = b = (value & 0xFF) / 255.0f;
-		a = (r >= 1.0f) ? 0.0f : 1.0f;
-		break;
-	case 6:
-		r = g = b = ((value >> 8) & 0xFF) / 255.0f;
-		a = (r >= 1.0f) ? 0.0f : 1.0f;
-		break;
-	case 7:
-		r = ((value >> 12) & 0xF) / 15.0f;
-		g = ((value >> 8) & 0xF) / 15.0f;
-		b = ((value >> 4) & 0xF) / 15.0f;
-		a = (value & 0xF) / 15.0f;
-		break;
-	case 8: case 9: case 10: case 11:
-	{
-		int shift = (type - 8) * 4;
-		r = g = b = ((value >> shift) & 0xF) / 15.0f;
-		a = (r >= 1.0f) ? 0.0f : 1.0f;
-		break;
-	}
-	default:
-		break;
-	}
-	out[0] = u8(r);
-	out[1] = u8(g);
-	out[2] = u8(b);
-	out[3] = u8(a);
 }
 
 uint64_t CVulkanTextureCache::MakeKey(int page, int x, int y, int width, int height, int format, bool inverted)
@@ -134,15 +77,32 @@ bool CVulkanTextureCache::Init(CVulkanContext& context)
 		return false;
 	white.image.view = context.CreateView(white.image.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1);
 	white.mipViews.push_back(white.image.view);
+
+	// One counter per 32x32 tile and page. Bumped by UploadTextures() and read by TextureHash() to
+	// decide whether a cached sub-texture hash is still describing the texels it was computed from.
+	for (int page = 0; page < 2; ++page)
+		m_tileRevision[page].assign((size_t)kTilesX * kTilesY, 0);
+	m_hashCache.clear();
+
+	if (!m_hdPack.Init(context, m_gameName, m_hdSet))
+	{
+		ErrorLog("Vulkan: HD texture pack could not be initialised; replacement textures are unavailable.");
+		return false;
+	}
 	return true;
 }
 
 void CVulkanTextureCache::Shutdown()
 {
+	// Unconditional: if Init() failed partway the pack may already have a loader thread, and a
+	// missing device must not turn that into a joinable thread leaked at exit.
+	m_hdPack.Shutdown();
 	if (!m_context || !m_context->Device())
 		return;
 	VkDevice device = m_context->Device();
 	vkDeviceWaitIdle(device);
+	m_hashCache.clear();
+	m_dumpedHashes.clear();
 	for (auto& slot : m_slots)
 		DestroySlot(slot);
 	m_slots.clear();
@@ -157,6 +117,8 @@ void CVulkanTextureCache::Shutdown()
 		vkDestroyPipeline(device, m_computePipeline, nullptr);
 	if (m_computeLayout)
 		vkDestroyPipelineLayout(device, m_computeLayout, nullptr);
+	if (m_computeSetLayout)
+		vkDestroyDescriptorSetLayout(device, m_computeSetLayout, nullptr);
 	if (m_computeModule)
 		vkDestroyShaderModule(device, m_computeModule, nullptr);
 	for (auto sampler : m_samplers)
@@ -168,11 +130,19 @@ void CVulkanTextureCache::Shutdown()
 		vkDestroyDescriptorPool(device, m_pool, nullptr);
 	if (m_layout)
 		vkDestroyDescriptorSetLayout(device, m_layout, nullptr);
+	if (m_hdPool)
+		vkDestroyDescriptorPool(device, m_hdPool, nullptr);
+	if (m_hdLayout)
+		vkDestroyDescriptorSetLayout(device, m_hdLayout, nullptr);
 	m_computePipeline = VK_NULL_HANDLE;
 	m_computeLayout = VK_NULL_HANDLE;
+	m_computeSetLayout = VK_NULL_HANDLE;
 	m_computeModule = VK_NULL_HANDLE;
 	m_pool = VK_NULL_HANDLE;
 	m_layout = VK_NULL_HANDLE;
+	m_hdPool = VK_NULL_HANDLE;
+	m_hdLayout = VK_NULL_HANDLE;
+	m_hdSet = VK_NULL_HANDLE;
 	m_context = nullptr;
 }
 
@@ -201,6 +171,10 @@ void CVulkanTextureCache::UploadTextures(unsigned level, unsigned x, unsigned y,
 		m_dirty[1].set();
 		m_everDirty[0].set();
 		m_everDirty[1].set();
+		// Every sub-texture hash on both pages is now stale.
+		for (int page = 0; page < 2; ++page)
+			for (uint32_t& revision : m_tileRevision[page])
+				++revision;
 		m_bulkUploads++;
 		return;
 	}
@@ -229,13 +203,15 @@ void CVulkanTextureCache::UploadTextures(unsigned level, unsigned x, unsigned y,
 			// This is the record of what the game has ever written, and it is what tells a region the
 			// game never filled from one whose upload was lost.
 			m_everDirty[page].set((size_t)ty * kTilesX + tx);
+			if (page < 2 && !m_tileRevision[page].empty())
+				++m_tileRevision[page][(size_t)ty * kTilesX + tx];
 		}
 }
 
 bool CVulkanTextureCache::CreateDescriptors()
 {
 	VkDevice device = m_context->Device();
-	VkDescriptorSetLayoutBinding bindings[4] = {};
+	VkDescriptorSetLayoutBinding bindings[6] = {};
 	bindings[0].binding = 0;
 	bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
 	bindings[0].descriptorCount = 16;
@@ -255,17 +231,23 @@ bool CVulkanTextureCache::CreateDescriptors()
 	bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 	bindings[3].descriptorCount = 2;
 	bindings[3].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-
-	VkDescriptorSetLayoutBindingFlagsCreateInfo flagInfo = {};
-	flagInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-	flagInfo.bindingCount = 0;
-	flagInfo.pBindingFlags = nullptr;
+	// Scene geometry, pulled by both shaders rather than fed as vertex attributes:
+	// binding 4 is the ROM vertex array, binding 5 the polygon-RAM one. See
+	// GpuQuadVertex and CVulkan3D::CreatePipeline.
+	bindings[4].binding = 4;
+	bindings[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[4].descriptorCount = 1;
+	bindings[4].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+	// Dynamic offset, because the polygon-RAM vertices are double buffered: the
+	// slot a present reads is chosen when the draws are recorded.
+	bindings[5].binding = 5;
+	bindings[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+	bindings[5].descriptorCount = 1;
+	bindings[5].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
 	VkDescriptorSetLayoutCreateInfo layoutInfo = {};
 	layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-	layoutInfo.pNext = nullptr;
-	layoutInfo.flags = 0;
-	layoutInfo.bindingCount = 4;
+	layoutInfo.bindingCount = 6;
 	layoutInfo.pBindings = bindings;
 	if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &m_layout) != VK_SUCCESS)
 	{
@@ -273,19 +255,21 @@ bool CVulkanTextureCache::CreateDescriptors()
 		return false;
 	}
 
-	VkDescriptorPoolSize sizes[4] = {};
+	VkDescriptorPoolSize sizes[5] = {};
 	sizes[0].type = VK_DESCRIPTOR_TYPE_SAMPLER;
 	sizes[0].descriptorCount = 16;
 	sizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
 	sizes[1].descriptorCount = 1;
 	sizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
-	sizes[2].descriptorCount = 1;
+	sizes[2].descriptorCount = 2;
 	sizes[3].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 	sizes[3].descriptorCount = 2;
+	sizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	sizes[4].descriptorCount = 1;
 	VkDescriptorPoolCreateInfo poolInfo = {};
 	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 	poolInfo.maxSets = 1;
-	poolInfo.poolSizeCount = 4;
+	poolInfo.poolSizeCount = 5;
 	poolInfo.pPoolSizes = sizes;
 	if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &m_pool) != VK_SUCCESS)
 	{
@@ -304,6 +288,10 @@ bool CVulkanTextureCache::CreateDescriptors()
 		return false;
 	}
 
+	// The bindless replacement array lives in a set of its own; see CreateHDDescriptors().
+	if (!CreateHDDescriptors())
+		return false;
+
 	VkSamplerCreateInfo sampler = {};
 	sampler.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
 	sampler.magFilter = VK_FILTER_LINEAR;
@@ -314,7 +302,10 @@ bool CVulkanTextureCache::CreateDescriptors()
 		VK_SAMPLER_ADDRESS_MODE_REPEAT,
 		VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
 		VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT,
-		VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE
+		// The 3D shader does its own mirror+clamp arithmetic, so CLAMP_TO_EDGE is a safe fallback on
+		// a device that does not expose samplerMirrorClampToEdge.
+		m_context->SamplerMirrorClampSupported() ? VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE
+			: VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE
 	};
 	for (int v = 0; v < 4; v++)
 	{
@@ -345,6 +336,66 @@ bool CVulkanTextureCache::CreateDescriptors()
 	sampler.addressModeU = sampler.addressModeV = sampler.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
 	sampler.unnormalizedCoordinates = VK_FALSE;
 	return vkCreateSampler(device, &sampler, nullptr, &m_rawSampler) == VK_SUCCESS;
+}
+
+bool CVulkanTextureCache::CreateHDDescriptors()
+{
+	VkDevice device = m_context->Device();
+
+	VkDescriptorSetLayoutBinding binding = {};
+	binding.binding = 0;
+	binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	binding.descriptorCount = kMaxHDTextures;
+	binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+	// Partially bound: a pack normally covers only part of a scene, and the slots it does not fill
+	// are never indexed. Update-after-bind: a replacement that finishes loading mid-session is
+	// published while frames that bind this set are still in flight.
+	VkDescriptorBindingFlags bindingFlags = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
+		VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
+	VkDescriptorSetLayoutBindingFlagsCreateInfo flagInfo = {};
+	flagInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+	flagInfo.bindingCount = 1;
+	flagInfo.pBindingFlags = &bindingFlags;
+
+	VkDescriptorSetLayoutCreateInfo layoutInfo = {};
+	layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+	layoutInfo.pNext = &flagInfo;
+	layoutInfo.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+	layoutInfo.bindingCount = 1;
+	layoutInfo.pBindings = &binding;
+	if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &m_hdLayout) != VK_SUCCESS)
+	{
+		ErrorLog("Vulkan: HD texture descriptor layout creation failed.");
+		return false;
+	}
+
+	VkDescriptorPoolSize size = {};
+	size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	size.descriptorCount = kMaxHDTextures;
+	VkDescriptorPoolCreateInfo poolInfo = {};
+	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+	poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
+	poolInfo.maxSets = 1;
+	poolInfo.poolSizeCount = 1;
+	poolInfo.pPoolSizes = &size;
+	if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &m_hdPool) != VK_SUCCESS)
+	{
+		ErrorLog("Vulkan: HD texture descriptor pool creation failed.");
+		return false;
+	}
+
+	VkDescriptorSetAllocateInfo alloc = {};
+	alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+	alloc.descriptorPool = m_hdPool;
+	alloc.descriptorSetCount = 1;
+	alloc.pSetLayouts = &m_hdLayout;
+	if (vkAllocateDescriptorSets(device, &alloc, &m_hdSet) != VK_SUCCESS)
+	{
+		ErrorLog("Vulkan: HD texture descriptor set allocation failed.");
+		return false;
+	}
+	return true;
 }
 
 bool CVulkanTextureCache::CreateRawPages()
@@ -423,6 +474,10 @@ bool CVulkanTextureCache::CreateComputePipeline()
 	VkDescriptorSetLayout computeSet = VK_NULL_HANDLE;
 	if (vkCreateDescriptorSetLayout(device, &setInfo, nullptr, &computeSet) != VK_SUCCESS)
 		return false;
+	// Kept for the lifetime of m_computeLayout rather than destroyed below: a pipeline layout does not
+	// own its descriptor set layouts, and creating the compute pipeline against a destroyed one is a
+	// validation error (and undefined behaviour, even if the driver happens to accept it).
+	m_computeSetLayout = computeSet;
 
 	VkPushConstantRange range = {};
 	range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -434,9 +489,12 @@ bool CVulkanTextureCache::CreateComputePipeline()
 	layoutInfo.pushConstantRangeCount = 1;
 	layoutInfo.pPushConstantRanges = &range;
 	VkResult layoutResult = vkCreatePipelineLayout(device, &layoutInfo, nullptr, &m_computeLayout);
-	vkDestroyDescriptorSetLayout(device, computeSet, nullptr);
 	if (layoutResult != VK_SUCCESS)
+	{
+		vkDestroyDescriptorSetLayout(device, m_computeSetLayout, nullptr);
+		m_computeSetLayout = VK_NULL_HANDLE;
 		return false;
+	}
 
 	VkPipelineShaderStageCreateInfo stage = {};
 	stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -447,7 +505,7 @@ bool CVulkanTextureCache::CreateComputePipeline()
 	pipe.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
 	pipe.stage = stage;
 	pipe.layout = m_computeLayout;
-	return vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipe, nullptr, &m_computePipeline) == VK_SUCCESS;
+	return vkCreateComputePipelines(device, m_context->PipelineCache(), 1, &pipe, nullptr, &m_computePipeline) == VK_SUCCESS;
 }
 
 void CVulkanTextureCache::WriteDynamicBuffers(VkBuffer viewportBuffer, VkDeviceSize viewportRange, VkBuffer materialBuffer, VkDeviceSize materialRange)
@@ -469,6 +527,34 @@ void CVulkanTextureCache::WriteDynamicBuffers(VkBuffer viewportBuffer, VkDeviceS
 	writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 	writes[1].dstSet = m_set;
 	writes[1].dstBinding = 2;
+	writes[1].descriptorCount = 1;
+	writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+	writes[1].pBufferInfo = &buffers[1];
+	vkUpdateDescriptorSets(m_context->Device(), 2, writes, 0, nullptr);
+}
+
+void CVulkanTextureCache::WriteVertexBuffers(VkBuffer rom, VkBuffer ram, VkDeviceSize ramRange)
+{
+	VkDescriptorBufferInfo buffers[2] = {};
+	buffers[0].buffer = rom;
+	buffers[0].offset = 0;
+	buffers[0].range = VK_WHOLE_SIZE;
+	buffers[1].buffer = ram;
+	buffers[1].offset = 0;
+	// Not VK_WHOLE_SIZE: this binding takes a dynamic offset, and the spec requires
+	// a bounded range for those (VUID-vkCmdBindDescriptorSets-pDescriptorSets-06715).
+	buffers[1].range = ramRange;
+
+	VkWriteDescriptorSet writes[2] = {};
+	writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	writes[0].dstSet = m_set;
+	writes[0].dstBinding = 4;
+	writes[0].descriptorCount = 1;
+	writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	writes[0].pBufferInfo = &buffers[0];
+	writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	writes[1].dstSet = m_set;
+	writes[1].dstBinding = 5;
 	writes[1].descriptorCount = 1;
 	writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
 	writes[1].pBufferInfo = &buffers[1];
@@ -620,7 +706,7 @@ void CVulkanTextureCache::MarkUsed(uint32_t slot, uint64_t frameSerial)
 		m_slots[slot].lastUsed = frameSerial;
 }
 
-CVulkanTextureCache::Coverage CVulkanTextureCache::RegionCoverage(int page, int x, int y, int width, int height) const
+CVulkanTextureCache::Coverage CVulkanTextureCache::RegionCoverage(int page, int x, int y, int width, int height)
 {
 	// A degenerate or out-of-range region has nothing to sample, so reporting it as fine keeps the
 	// diagnostic free of false positives that would bury a real one.
@@ -634,18 +720,29 @@ CVulkanTextureCache::Coverage CVulkanTextureCache::RegionCoverage(int page, int 
 	if (x1 < x0 || y1 < y0)
 		return Coverage::Full;
 
+	// Writes that are still waiting for this frame's upload pass are not missing.
+	std::bitset<kTilesX * kTilesY> queued;
+	{
+		std::lock_guard<std::mutex> guard(m_dirtyMutex);
+		queued = m_dirty[page];
+	}
+
 	unsigned tiles = 0;
 	unsigned present = 0;
+	unsigned pending = 0;
 	for (int ty = y0; ty <= y1; ty++)
 	{
 		for (int tx = x0; tx <= x1; tx++)
 		{
 			++tiles;
-			if (m_everUploaded[page].test((size_t)ty * kTilesX + tx))
+			const size_t index = (size_t)ty * kTilesX + tx;
+			if (m_everUploaded[page].test(index))
 				++present;
+			else if (queued.test(index))
+				++pending;
 		}
 	}
-	if (present == 0)
+	if (present + pending == 0)
 		return Coverage::None;
 	return present == tiles ? Coverage::Full : Coverage::Partial;
 }
@@ -888,6 +985,14 @@ void CVulkanTextureCache::RecordSync(VkCommandBuffer cmd, CVulkanRingBuffer& rin
 		}
 	}
 
+	// TEMP diagnostic: how many tiles the game wrote vs. what reached the GPU.
+	if (++m_frames % 300 == 0)
+	{
+		InfoLog("Vulkan: texture tiles - page0 written %zu uploaded %zu; page1 written %zu uploaded %zu",
+			m_everDirty[0].count(), m_everUploaded[0].count(),
+			m_everDirty[1].count(), m_everUploaded[1].count());
+	}
+
 	// Deliberately outside the dirty check below. The case this guard exists to catch is a change with
 	// nothing marked dirty, and on a frame like that the block below is skipped entirely - so leaving
 	// the call inside it would make the guard blind to exactly the fault it is looking for.
@@ -926,6 +1031,11 @@ void CVulkanTextureCache::RecordSync(VkCommandBuffer cmd, CVulkanRingBuffer& rin
 
 	if (!m_slots.empty() && m_slots[0].live && !m_slots[0].inShaderRead)
 		CpuDecode(cmd, ring, m_slots[0]);
+
+	// Replacement textures: finish any uploads that were waiting for ring space and publish the
+	// descriptors of those that completed this frame. Runs whether or not the packed pages were
+	// dirty, because a pack can be reloaded while no game texture was written.
+	m_hdPack.RecordUploads(cmd, ring);
 
 	if (m_gpuDecode && m_computePipeline)
 		RecordDecode(cmd, frameSerial);
@@ -1146,7 +1256,7 @@ void CVulkanTextureCache::CpuDecode(VkCommandBuffer cmd, CVulkanRingBuffer& ring
 					int sy = std::min(kPageHeight - 1, rect.y + row);
 					uint32_t value = page[sy * kPageWidth + sx];
 					uint8_t colour[4];
-					ExtractColour(slot.format, value, colour);
+					DecodeTexel(slot.format, value, colour);
 					if (slot.inverted)
 					{
 						colour[0] = (uint8_t)(255 - colour[0]);
@@ -1168,6 +1278,94 @@ void CVulkanTextureCache::CpuDecode(VkCommandBuffer cmd, CVulkanRingBuffer& ring
 	CmdTransition(cmd, slot.image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT, 0, slot.image.mipLevels);
 	slot.inShaderRead = true;
 	slot.stale = false;
+}
+
+void CVulkanTextureCache::TickHDTextures(bool load, bool dump)
+{
+	m_hdLoad = load;
+	m_hdDump = dump;
+	m_hdPack.Tick(load, dump);
+}
+
+void CVulkanTextureCache::SetHDTextureOptions(bool load, bool dump)
+{
+	m_hdLoad = load;
+	m_hdDump = dump;
+}
+
+uint64_t CVulkanTextureCache::TextureHash(int page, int x, int y, int width, int height, int format)
+{
+	if (m_textureRam == nullptr || width <= 0 || height <= 0 ||
+		width > kPageWidth || height > kPageHeight)
+		return 0;
+
+	page &= 1;
+
+	// Which tiles the rectangle covers, and therefore which upload counters decide whether a cached
+	// hash is still valid. Truncating division is wrong for a negative origin (a mesh can carry a
+	// negative texture offset), so floor it explicitly.
+	auto floorDiv = [](int value, int divisor)
+	{
+		return (value >= 0) ? value / divisor : -((-value + divisor - 1) / divisor);
+	};
+	const int x0 = std::clamp(floorDiv(x, kTile), 0, kTilesX - 1);
+	const int y0 = std::clamp(floorDiv(y, kTile), 0, kTilesY - 1);
+	const int x1 = std::clamp(floorDiv(x + width - 1, kTile), 0, kTilesX - 1);
+	const int y1 = std::clamp(floorDiv(y + height - 1, kTile), 0, kTilesY - 1);
+
+	uint64_t revision = 0;
+	if (page < 2 && !m_tileRevision[page].empty())
+	{
+		for (int ty = y0; ty <= y1; ++ty)
+			for (int tx = x0; tx <= x1; ++tx)
+				revision = (std::max)(revision,
+					(uint64_t)m_tileRevision[page][(size_t)ty * kTilesX + tx]);
+	}
+
+	const uint64_t key = MakeKey(page, x, y, width, height, format, false);
+	auto found = m_hashCache.find(key);
+	if (found != m_hashCache.end() && found->second.revision == revision)
+		return found->second.hash;
+
+	const uint64_t hash = HashTextureRegion(
+		m_textureRam + (size_t)page * (kPageWidth * kPageHeight),
+		x, y, width, height, format, kPageWidth, kPageHeight);
+
+	// A scene with many animated textures can churn through rectangles quickly. The table is a
+	// memo, not state: dropping it costs one rehash per live rectangle and nothing else.
+	if (m_hashCache.size() > 65536)
+		m_hashCache.clear();
+	m_hashCache[key] = HashEntry{ revision, hash };
+	return hash;
+}
+
+void CVulkanTextureCache::DumpTexture(uint64_t hash, int page, int x, int y, int width, int height, int format)
+{
+	if (!m_hdDump || m_textureRam == nullptr || hash == 0)
+		return;
+	if (m_dumpedHashes.find(hash) != m_dumpedHashes.end())
+		return;
+	if (m_dumpedHashes.size() >= 50000)
+	{
+		if (!m_dumpLimitReported)
+		{
+			m_dumpLimitReported = true;
+			ErrorLog("HD textures: 50000 textures dumped this session; stopping. Reload the game to start a fresh set.");
+		}
+		return;
+	}
+
+	page &= 1;
+	m_dumpedHashes.insert(hash);
+	m_hdPack.QueueDump(hash, page, x, y, width, height, format,
+		m_textureRam + (size_t)page * (kPageWidth * kPageHeight), kPageWidth, kPageHeight);
+}
+
+int CVulkanTextureCache::ResolveHDTexture(uint64_t hash, int wrapX, int wrapY)
+{
+	if (!m_hdLoad || hash == 0)
+		return -1;
+	return m_hdPack.Resolve(hash, wrapX, wrapY);
 }
 
 } // Vulkan3D

@@ -46,6 +46,8 @@
 #include "53C810.h"
 
 #include <cstring>
+#include <iomanip>
+#include <sstream>
 #include "Supermodel.h"
 #include "CPU/PowerPC/ppc.h"
 
@@ -88,6 +90,20 @@ void C53C810::LoadState(CBlockFile *SaveState)
   SaveState->Read(&Ctx.regDSTAT, sizeof(Ctx.regDSTAT));
   SaveState->Read(&Ctx.regDIEN, sizeof(Ctx.regDIEN));
   SaveState->Read(&Ctx.regISTAT, sizeof(Ctx.regISTAT));
+}
+
+std::string C53C810::DebugState(void) const
+{
+  std::ostringstream s;
+  s << "scsi halt=" << (Ctx.halt ? 1 : 0)
+    << " DSP=" << std::hex << std::setw(8) << std::setfill('0') << Ctx.regDSP
+    << " DSPS=" << std::setw(8) << Ctx.regDSPS
+    << " DBC=" << std::setw(6) << (Ctx.regDBC & 0xFFFFFF)
+    << " DCMD=" << std::setw(2) << (unsigned)Ctx.regDCMD
+    << " DSTAT=" << std::setw(2) << (unsigned)Ctx.regDSTAT
+    << " DIEN=" << std::setw(2) << (unsigned)Ctx.regDIEN
+    << " ISTAT=" << std::setw(2) << (unsigned)Ctx.regISTAT;
+  return s.str();
 }
 
 

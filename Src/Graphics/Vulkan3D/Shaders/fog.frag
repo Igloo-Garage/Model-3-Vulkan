@@ -46,5 +46,11 @@ void main()
 
 	// Final colour. The alpha carries the fog amount so the 2D layer underneath
 	// is dimmed by the ambient fog exactly like New3D does.
-	outColour = vec4(lFogColor + lSpotFogColor, pc.fogColour.a);
+	//
+	// Stored premultiplied: the scene target is a premultiplied colour from here on (geometry forces
+	// alpha to 1, so only this quad is affected), which is what lets the subpass composite blend the
+	// transparency layers with ONE / ONE_MINUS_SRC_ALPHA and lets the 2D layer composite the scene
+	// with the same equation. Straight alpha here would show the sky at full fog brightness.
+	float fogAmount = pc.fogColour.a;
+	outColour = vec4((lFogColor + lSpotFogColor) * fogAmount, fogAmount);
 }

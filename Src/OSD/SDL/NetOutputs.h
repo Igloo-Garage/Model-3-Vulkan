@@ -29,7 +29,6 @@
 
 #include "Logger.h"
 #include "Outputs.h"
-#include "SDLIncludes.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -53,7 +52,7 @@ const unsigned int NET_OUTPUTS_MAX_CLIENTS = 10;
 // Struct that represents a client (eg MAMEHooker) currently registered with the emulator.
 struct RegisteredClientTcp
 {
-	TCPsocket ClientSocket;
+	void* ClientSocket;
 };
 
 
@@ -106,8 +105,8 @@ private:
 	unsigned int m_maxClients = NET_OUTPUTS_MAX_CLIENTS;
 	std::atomic<bool> m_running = false;
 	std::vector<RegisteredClientTcp> m_clients;
-	TCPsocket m_serverSocket{};
-	SDLNet_SocketSet m_tcpSocketSet{};
+	void* m_serverSocket{};
+	void* m_tcpSocketSet{};
 	std::thread m_tcpServerThread;
 
 	/*
@@ -144,7 +143,7 @@ private:
 	 *
 	 * Registers a client (eg MAMEHooker) with the emulator.
 	 */
-	bool RegisterClient(TCPsocket socket);
+	bool RegisterClient(void* socket);
 
 	/*
 	 * SendAllToClient(client):
@@ -159,7 +158,7 @@ private:
 	 *
 	 * Unregisters a client from the emulator.
 	 */
-	bool UnregisterClient(TCPsocket socket);
+	bool UnregisterClient(void* socket);
 
 	/*
 	 * UnregisterAllClients():

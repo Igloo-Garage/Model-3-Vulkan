@@ -4,6 +4,14 @@
 #include <string>
 #include <vector>
 
+namespace OSD
+{
+namespace Platform
+{
+struct Window;
+}
+}
+
 Util::Config::Node DefaultConfig();
 
 /*
@@ -202,7 +210,7 @@ IntegerScaleInfo GetIntegerScaleInfo();
  * Windows only, and a no-op elsewhere: other platforms get their icon from the bundle or the
  * desktop entry, and SDL's generic path needs the surface form described above.
  */
-void SetWindowIcon(SDL_Window* window);
+void SetWindowIcon(OSD::Platform::Window* window);
 
 /*
  * Shows or hides the console window.

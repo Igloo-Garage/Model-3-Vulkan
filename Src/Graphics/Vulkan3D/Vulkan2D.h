@@ -23,12 +23,35 @@
 #define INCLUDED_VULKAN3D_2D_H
 
 #include "Graphics/IRender2D.h"
+#include "UiBlur.h"
 #include "VulkanMemory.h"
 #include "Util/NewConfig.h"
 
 namespace Vulkan3D {
 
 class CVulkanContext;
+
+/*
+ * A light-gun crosshair, in window pixels.
+ *
+ * Feeds a pipeline of its own rather than the ImGui overlay. A crosshair is present on every frame of
+ * a light-gun game, so drawing it through ImGui meant building a complete ImGui frame - new frame,
+ * input, render, then a draw-data traversal on the GPU - for a shape made of two dozen vertices. The
+ * native path costs one small draw call and leaves the ImGui frame to the panel and the statistics
+ * readout, which are the things that actually need it.
+ *
+ * Coordinates already include the game viewport's offset; the renderer maps them straight onto the
+ * swapchain. uiScale is the display scale the overlay would have applied, so the on-screen size does
+ * not change from what the ImGui version drew.
+ */
+struct CrosshairState
+{
+	bool visible = false;
+	unsigned players = 0;       // Bit 0 = player 1, bit 1 = player 2
+	float x[2] = {};
+	float y[2] = {};
+	float uiScale = 1.0f;
+};
 
 class CVulkan2D final : public IRender2D
 {
@@ -49,6 +72,30 @@ public:
 	Result Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned yRes, unsigned totalXRes, unsigned totalYRes, unsigned aaTarget, UpscaleMode upscaleMode) override;
 
 	void SetSceneColor(VkImageView view);
+	// The two transparency targets (slots 4 and 5), combined with the scene layer in composite.frag
+	// using New3D's two-layer formula.
+	void SetTransColor(VkImageView trans1, VkImageView trans2);
+	/*
+	 * Set when the 3D pass already folded the transparency layers into the scene target (see
+	 * scene_composite.frag). The scene target is premultiplied either way; this only tells the
+	 * compositor not to apply the two-layer block a second time.
+	 */
+	void SetScenePrecomposited(bool precomposited) { m_scenePrecomposited = precomposited; }
+	/*
+	 * Set for AlphaSortMode = 2. The two transparency targets then hold a checkerboard (trans1 on the
+	 * even cells, trans2 on the odd ones) and the compositor reconstructs them accordingly instead of
+	 * treating both as full-resolution coverage.
+	 */
+	void SetArcadeCheckerboard(bool checkerboard) { m_arcadeCheckerboard = checkerboard; }
+	/*
+	 * Test hook for the checkerboard mode: skip the 2x2 reconstruction so the one-pixel pattern stays
+	 * visible instead of resolving into a half-strength blend (SM3D_CHECKER_RAW).
+	 */
+	void SetCheckerRaw(bool raw) { m_checkerRaw = raw; }
+
+	// Replaces the crosshair drawn on the next frame. Safe to call every frame; an invisible state
+	// simply skips the pass.
+	void SetCrosshair(const CrosshairState& state) { m_crosshair = state; }
 
 	// Re-reads the post-processing parameters so an edit applies on the next frame. Safe to call
 	// every frame; see the comment on the implementation.
@@ -66,17 +113,49 @@ public:
 	 */
 	void SetOverlayPass(void (*pass)(VkCommandBuffer)) { m_overlayPass = pass; }
 
+	/*
+	 * Frosted-glass backdrop for whatever the overlay draws.
+	 *
+	 * The gate is asked once per frame, after the picture and the backdrop are finished and before
+	 * the overlay is recorded, and answers "will something over this frame sample a blurred copy of
+	 * it?". When it is null or returns false the whole blur chain is skipped: no passes, no barriers,
+	 * no bandwidth. That is what keeps a closed in-game panel at exactly zero cost, which is the only
+	 * way a purely cosmetic effect belongs in the present path at all.
+	 *
+	 * It has to be asked per frame rather than set on open/close because the panel can also be closed
+	 * by its own button, and because the statistics readout is drawn whether or not the panel is.
+	 */
+	void SetUiFrostGate(bool (*gate)()) { m_uiFrostGate = gate; }
+
+	/*
+	 * The half-resolution blurred copy of the last frame the chain ran, for ImGui to sample.
+	 *
+	 * VK_NULL_HANDLE until the first frame has run the chain, and again for a frame after a resize
+	 * (the old view is retired for a few frames so a descriptor that still names it stays valid).
+	 * Callers register it with ImGui_ImplVulkan_AddTexture and re-register when the handle changes.
+	 */
+	VkImageView UiFrostView() const { return m_uiBlur.View(); }
+	VkSampler UiFrostSampler() const { return m_uiBlur.Sampler(); }
+	// Changes whenever the images are replaced, so a cached descriptor can be spotted as stale. A
+	// resize can hand back the same view handle for different memory, so the handle alone is not a
+	// safe identity for the image.
+	uint32_t UiFrostGeneration() const { return m_uiBlur.Generation(); }
+
 private:
 	bool CreatePipeline();
 	bool CreatePostPipeline();
+	bool CreateCrosshairPipeline();
+	bool CreateBorderPipeline();
 	bool EnsureComposite();
 	void DestroyPost();
 	void ReadPostSettingsFromConfig();
 	void UploadLayer(int index);
-	void DrawLayer(uint32_t layer, int x, int y, int w, int h);
+	void DrawLayer(uint32_t layer, int x, int y, int w, int h, int upscaleMode);
 	void DrawCompositePass(VkCommandBuffer cmd, VkImageView targetView);
 	void DrawPostPass(VkCommandBuffer cmd);
 	void DrawOverlayPass(VkCommandBuffer cmd);
+	void DrawCrosshairPass(VkCommandBuffer cmd);
+	void DrawBorderPass(VkCommandBuffer cmd);
 	void GenerateCompositeMips(VkCommandBuffer cmd);
 
 	// Bezel backdrop.
@@ -93,11 +172,30 @@ private:
 	unsigned m_correction = 0;
 	bool m_wideBg = false;
 
+	/*
+	 * Low-resolution rendering.
+	 *
+	 * When set, the 3D renderer owns a fixed 496x384 scene target instead of a swapchain-sized one,
+	 * so the scene layer has to be upscaled onto the picture rectangle rather than drawn 1:1 across
+	 * the frame. Read once, in Init: it also decides the size of the scene targets, and those cannot
+	 * change under a recording command buffer - same lifetime as MSAA.
+	 *
+	 * Widescreen is disabled while it is on: a widened frustum needs a scene target the width of the
+	 * output, which is exactly what this option removes. The settings window greys it out so the
+	 * precedence is visible rather than silent.
+	 */
+	bool m_lowRes = false;
+
 	// The widescreen option, read here because the compositor needs it as well as the 3D renderer:
 	// it decides how much of the output the picture is allowed to occupy, and therefore what the
 	// scissor clips every layer to. Kept in step with CVulkan3D's copy of the same setting - both read
 	// it from the same configuration at setup, so they cannot disagree.
 	bool m_wide = false;
+	// How the tile layers are magnified. Init() seeds it and forces Nearest at the native resolution,
+	// matching CRender2D so a 1:1 image is not softened by a linear filter. RefreshPostSettings()
+	// re-reads it every frame so the in-game panel can change it live.
+	UpscaleMode m_upscaleMode = UpscaleMode::Bilinear;
+	bool m_native2D = false;
 	bool m_drawBottom = false;
 	bool m_drawTop = false;
 	bool m_uploaded[2] = {};
@@ -105,6 +203,8 @@ private:
 
 	AllocatedImage m_layers[2];
 	VkImageView m_sceneView = VK_NULL_HANDLE;
+	VkImageView m_trans1View = VK_NULL_HANDLE;
+	VkImageView m_trans2View = VK_NULL_HANDLE;
 
 	/*
 	 * Bezel backdrop.
@@ -127,11 +227,21 @@ private:
 	bool m_bezelVisible = false;                // false when disabled or the file could not be read
 	float m_bezelBrightness = 1.0f;
 	VkSampler m_sampler = VK_NULL_HANDLE;
+	// Nearest filtering for UpscaleMode::Nearest. Both samplers are bound to the composite set, so
+	// the mode can change per layer from one draw to the next without rebuilding anything.
+	VkSampler m_nearestSampler = VK_NULL_HANDLE;
 	VkDescriptorSetLayout m_layout = VK_NULL_HANDLE;
 	VkDescriptorPool m_pool = VK_NULL_HANDLE;
 	VkDescriptorSet m_set = VK_NULL_HANDLE;
 	VkPipelineLayout m_pipeLayout = VK_NULL_HANDLE;
 	VkPipeline m_pipeline = VK_NULL_HANDLE;
+	// Same shader and state, different colour blend: ONE / ONE_MINUS_SRC_ALPHA instead of
+	// SRC_ALPHA / ONE_MINUS_SRC_ALPHA. Used only for layer 1, whose 3D scene is stored
+	// premultiplied (the tile layers and the backdrop are straight-alpha and keep the other one).
+	VkPipeline m_pipelineScene = VK_NULL_HANDLE;
+	bool m_scenePrecomposited = false;
+	bool m_arcadeCheckerboard = false;
+	bool m_checkerRaw = false;
 	VkShaderModule m_vert = VK_NULL_HANDLE;
 	VkShaderModule m_frag = VK_NULL_HANDLE;
 	std::vector<char> m_swapSeen;
@@ -171,10 +281,40 @@ private:
 	int m_glowLevels = 4;
 	int m_glowThreshold = 40;
 	float m_crtGain = 1.0f;
+	// Regional CRT colour adaptation (SuperAA's 0..5 presets), applied in post.frag in the linear
+	// domain before the scanline and mask stages.
+	int m_crtColors = 0;
 
 	// Drawn over the finished frame, after the backdrop and before the screenshot copy. Null when the
 	// overlay is not in use.
 	void (*m_overlayPass)(VkCommandBuffer) = nullptr;
+
+	// Frosted-glass backdrop. Owned here because this is the class that has the finished frame in
+	// hand; the overlay only reads the result. See UiBlur.h.
+	CUiBlur m_uiBlur;
+	bool (*m_uiFrostGate)() = nullptr;
+	// UiFrostedGlass from the configuration, re-read every frame so the in-game panel can turn the
+	// effect off. Off is a plain tinted panel, which is what a GPU that cannot afford the passes
+	// wants - and what the OpenGL renderer draws anyway.
+	bool m_uiFrostEnabled = true;
+
+	// The light-gun crosshair. Its own pipeline because it has no texture, no descriptor set and no
+	// dependency on the overlay: it must still work when the in-game panel is not available.
+	CrosshairState m_crosshair;
+	VkPipelineLayout m_crosshairLayout = VK_NULL_HANDLE;
+	VkPipeline m_crosshairPipeline = VK_NULL_HANDLE;
+	VkShaderModule m_crosshairVert = VK_NULL_HANDLE;
+	VkShaderModule m_crosshairFrag = VK_NULL_HANDLE;
+
+	// Sinden light-gun border. Drawn in swapchain coordinates after the picture and the backdrop,
+	// so neither the CRT filter nor the cabinet picture can move or soften it.
+	bool m_sindenBorder = false;
+	int m_sindenBorderWidth = 16;
+	float m_sindenBorderBrightness = 1.0f;
+	VkPipelineLayout m_borderLayout = VK_NULL_HANDLE;
+	VkPipeline m_borderPipeline = VK_NULL_HANDLE;
+	VkShaderModule m_borderVert = VK_NULL_HANDLE;
+	VkShaderModule m_borderFrag = VK_NULL_HANDLE;
 };
 
 } // Vulkan3D

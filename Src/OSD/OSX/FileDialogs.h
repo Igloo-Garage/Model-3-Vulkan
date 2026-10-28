@@ -40,14 +40,15 @@ struct SDL_Window;
 namespace OSXFileDialogs
 {
     /*
-     * Forces the Aqua appearance for the application.
+     * Forces the application appearance to match the interface theme.
      *
-     * The interface is a fixed light theme, so on a Mac set to Dark Mode the native title bar and
-     * the panels above would otherwise be dark while the window content is warm paper. Setting the
-     * application appearance once keeps the title bar, the file pickers and the menus consistent
-     * with the interface, without changing any system-wide preference.
+     * The interface has its own palette, so on a Mac set to the other mode the native title bar and
+     * the panels above would otherwise disagree with the window content. Setting the application
+     * appearance once keeps the title bar, the file pickers and the menus consistent with the
+     * interface, without changing any system-wide preference.
      */
     void ApplyLightAppearance();
+    void ApplyDarkAppearance();
 
     bool BrowseFolder(SDL_Window* window, std::string& path);
     bool BrowseSettingsFile(SDL_Window* window, std::string& path);

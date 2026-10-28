@@ -23,6 +23,7 @@
 #include "Supermodel.h"
 #include "Graphics/New3D/New3D.h"
 #include "OSD/FileSystemPath.h"
+#include "OSD/Platform/Platform.h"
 #include "SDLIncludes.h"
 #include <GL/glew.h>
 #include <vector>
@@ -69,11 +70,18 @@ Result CCrosshair::Init()
 
   glBindTexture(GL_TEXTURE_2D, 0);
 
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+  // SDL3 renamed SDL_FreeSurface to SDL_DestroySurface.
+  SDL_DestroySurface(surfaceCrosshairP1);
+  SDL_DestroySurface(surfaceCrosshairP2);
+#else
   SDL_FreeSurface(surfaceCrosshairP1);
   SDL_FreeSurface(surfaceCrosshairP2);
+#endif
 
-  // Get DPI
-  SDL_GetDisplayDPI(0, &m_diagDpi, &m_hDpi, &m_vDpi);
+  // Get DPI. SDL2 reports it directly; SDL3 has no DPI query, and the platform layer derives the
+  // figure from the display's content scale instead.
+  OSD::Platform::GetDisplayDPI(OSD::Platform::kPrimaryDisplay, &m_diagDpi, &m_hDpi, &m_vDpi);
   m_dpiMultiplicator = m_hDpi / m_standardDpi;  // note : on linux VM diagdpi returns 0
 
   // 3d obj

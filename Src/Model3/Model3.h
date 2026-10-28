@@ -43,8 +43,12 @@
 #include "CPU/PowerPC/ppc.h"
 #include "Network/INetBoard.h"
 #include "Util/NewConfig.h"
-#include "Graphics/SuperAA.h"
 #include "OSD/Thread.h"
+
+// SuperAA is only used through a pointer here.  The definition lives in a
+// renderer header that pulls in <GL/glew.h>, so keeping it out of this header
+// is what lets the Pure-Vulkan core compile without any OpenGL headers.
+class SuperAA;
 
 /*
  * FrameTimings
@@ -83,11 +87,32 @@ public:
   bool ResumeThreads(void);
   void SaveState(CBlockFile *SaveState);
   void LoadState(CBlockFile *SaveState);
+  std::string DebugSnapshot(const char *tag) override;
   void SaveNVRAM(CBlockFile *NVRAM);
   void LoadNVRAM(CBlockFile *NVRAM);
   void ClearNVRAM(void);
   void RunFrame(void);
+  void RunSimulationFrame(void);
+  void BeginSimulationFrame(void);
+  void EndSimulationFrame(void);
+
+  /*
+   * Traverses the Real3D scene database into the renderer's current snapshot.
+   *
+   * Called from the loop at a point where no simulation is running - between
+   * EndSimulationFrame() and BeginSimulationFrame() - so that the Culling RAM it
+   * reads is the frame that just completed rather than one the PPC is already
+   * half way through rewriting. RenderFrame() calls it too, so the combined
+   * (non-pipelined) path and a present that could not be serviced still get a
+   * snapshot; it is a no-op when the scene is already prepared.
+   *
+   * Only CPU-side work: no command buffer, no upload. The GPU half happens in
+   * whichever present follows, and that present is what needs the new geometry.
+   */
+  void PrepareSceneSnapshot(void) override;
+
   void RenderFrame(void);
+  void RenderFrame(double alpha, bool newSimulation);
   void Reset(void);
   const Game &GetGame(void) const;
   void AttachRenderers(IRender2D *Render2DPtr, IRender3D *Render3DPtr, SuperAA *superAA);
@@ -192,6 +217,7 @@ public:
    */
 private:
   // Private member functions
+  void      RunFrameInternal(bool render);
   UINT8     ReadInputs(unsigned reg);
   void      WriteInputs(unsigned reg, UINT8 data);
   uint16_t  ReadSecurityRAM(uint32_t addr);
@@ -275,6 +301,17 @@ private:
 
   // Multiple threading
   bool        gpusReady;           // True if GPUs are ready to render
+  // Set when a simulation step completed and the renderer has not yet built
+  // its scene for it. Kept across a failed present (minimised window), so the
+  // scene is built on the next present rather than lost.
+  bool        m_sceneDirty = true;
+  // Set once the snapshot has been traversed, cleared by the next present that
+  // actually uploads it. A present is what needs the new geometry, and a present
+  // that fails must not lose it.
+  bool        m_scenePrepared = false;
+  // True between BeginSimulationFrame() and EndSimulationFrame().
+  bool        m_simInFlight = false;
+  UINT32      m_simStartTicks;
   bool        startedThreads;      // True if threads have been created and started
   bool        pauseThreads;        // True if threads should pause
   bool        stopThreads;         // True if threads should stop

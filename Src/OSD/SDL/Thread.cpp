@@ -23,12 +23,57 @@
  * Thread.cpp
  *
  * SDL-based implementation of threading primitives.
+ *
+ * SDL3 renamed most of the synchronisation entry points (SDL_cond became
+ * SDL_Condition, SDL_SemWait became SDL_WaitSemaphore, ...) and changed some
+ * return types.  The thin inline adapters below let the class bodies below
+ * stay identical for both backends without any per-call branching.
  */
 
 #include "Thread.h"
 
 #include "Supermodel.h"
 #include "SDLIncludes.h"
+
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+
+namespace
+{
+	using MutexHandle = SDL_Mutex;
+	using SemaphoreHandle = SDL_Semaphore;
+	using ConditionHandle = SDL_Condition;
+
+	inline int LockMutex(MutexHandle *m) { SDL_LockMutex(m); return 0; }
+	inline int UnlockMutex(MutexHandle *m) { SDL_UnlockMutex(m); return 0; }
+	inline int WaitCond(ConditionHandle *c, MutexHandle *m) { SDL_WaitCondition(c, m); return 0; }
+	inline int SignalCond(ConditionHandle *c) { SDL_SignalCondition(c); return 0; }
+	inline int BroadcastCond(ConditionHandle *c) { SDL_BroadcastCondition(c); return 0; }
+	inline void DestroyCond(ConditionHandle *c) { SDL_DestroyCondition(c); }
+	inline UINT32 SemValue(SemaphoreHandle *s) { return (UINT32) SDL_GetSemaphoreValue(s); }
+	inline int SemWait(SemaphoreHandle *s) { SDL_WaitSemaphore(s); return 0; }
+	inline int SemPost(SemaphoreHandle *s) { SDL_SignalSemaphore(s); return 0; }
+}
+
+#else
+
+namespace
+{
+	using MutexHandle = SDL_mutex;
+	using SemaphoreHandle = SDL_sem;
+	using ConditionHandle = SDL_cond;
+
+	inline int LockMutex(MutexHandle *m) { return SDL_mutexP(m); }
+	inline int UnlockMutex(MutexHandle *m) { return SDL_mutexV(m); }
+	inline int WaitCond(ConditionHandle *c, MutexHandle *m) { return SDL_CondWait(c, m); }
+	inline int SignalCond(ConditionHandle *c) { return SDL_CondSignal(c); }
+	inline int BroadcastCond(ConditionHandle *c) { return SDL_CondBroadcast(c); }
+	inline void DestroyCond(ConditionHandle *c) { SDL_DestroyCond(c); }
+	inline UINT32 SemValue(SemaphoreHandle *s) { return SDL_SemValue(s); }
+	inline int SemWait(SemaphoreHandle *s) { return SDL_SemWait(s); }
+	inline int SemPost(SemaphoreHandle *s) { return SDL_SemPost(s); }
+}
+
+#endif
 
 void CThread::Sleep(UINT32 ms)
 {
@@ -37,12 +82,16 @@ void CThread::Sleep(UINT32 ms)
 
 UINT32 CThread::GetTicks()
 {
-	return SDL_GetTicks();
+	return (UINT32) SDL_GetTicks();
 }
 
 CThread *CThread::CreateThread(const std::string &name, ThreadStart start, void *startParam)
 {
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+	SDL_Thread *impl = SDL_CreateThread((SDL_ThreadFunction) start, name.c_str(), startParam);
+#else
 	SDL_Thread *impl = SDL_CreateThread(start, name.c_str(), startParam);
+#endif
 	if (impl == NULL)
 		return NULL;
 	return new CThread(name, impl);
@@ -50,7 +99,7 @@ CThread *CThread::CreateThread(const std::string &name, ThreadStart start, void 
 
 CSemaphore *CThread::CreateSemaphore(UINT32 initVal)
 {
-	SDL_sem *impl = SDL_CreateSemaphore(initVal);
+	SemaphoreHandle *impl = SDL_CreateSemaphore(initVal);
 	if (impl == NULL)
 		return NULL;
 	return new CSemaphore(impl);
@@ -58,7 +107,11 @@ CSemaphore *CThread::CreateSemaphore(UINT32 initVal)
 
 CCondVar *CThread::CreateCondVar()
 {
-	SDL_cond *impl = SDL_CreateCond();
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+	ConditionHandle *impl = SDL_CreateCondition();
+#else
+	ConditionHandle *impl = SDL_CreateCond();
+#endif
 	if (impl == NULL)
 		return NULL;
 	return new CCondVar(impl);
@@ -66,7 +119,7 @@ CCondVar *CThread::CreateCondVar()
 
 CMutex *CThread::CreateMutex()
 {
-	SDL_mutex *impl = SDL_CreateMutex();
+	MutexHandle *impl = SDL_CreateMutex();
 	if (impl == NULL)
 		return NULL;
 	return new CMutex(impl);
@@ -101,7 +154,7 @@ const std::string &CThread::GetName() const
 
 UINT32 CThread::GetId()
 {
-	return SDL_GetThreadID((SDL_Thread*)m_impl);
+	return (UINT32) SDL_GetThreadID((SDL_Thread*)m_impl);
 }
 
 int CThread::Wait()
@@ -121,22 +174,22 @@ CSemaphore::CSemaphore(void *impl) : m_impl(impl)
 
 CSemaphore::~CSemaphore()
 {
-	SDL_DestroySemaphore((SDL_sem*)m_impl);
+	SDL_DestroySemaphore((SemaphoreHandle*)m_impl);
 }
 
 UINT32 CSemaphore::GetValue()
 {
-	return SDL_SemValue((SDL_sem*)m_impl);
+	return SemValue((SemaphoreHandle*)m_impl);
 }
 
 bool CSemaphore::Wait()
 {
-	return SDL_SemWait((SDL_sem*)m_impl) == 0;
+	return SemWait((SemaphoreHandle*)m_impl) == 0;
 }
 
 bool CSemaphore::Post()
 {
-	return SDL_SemPost((SDL_sem*)m_impl) == 0;
+	return SemPost((SemaphoreHandle*)m_impl) == 0;
 }
 
 CCondVar::CCondVar(void *impl) : m_impl(impl)
@@ -146,22 +199,22 @@ CCondVar::CCondVar(void *impl) : m_impl(impl)
 
 CCondVar::~CCondVar()
 {
-	SDL_DestroyCond((SDL_cond*)m_impl);
+	DestroyCond((ConditionHandle*)m_impl);
 }
 
 bool CCondVar::Wait(CMutex *mutex)
 {
-	return SDL_CondWait((SDL_cond*)m_impl, (SDL_mutex*)mutex->m_impl) == 0;
+	return WaitCond((ConditionHandle*)m_impl, (MutexHandle*)mutex->m_impl) == 0;
 }
 
 bool CCondVar::Signal()
 {
-	return SDL_CondSignal((SDL_cond*)m_impl) == 0;
+	return SignalCond((ConditionHandle*)m_impl) == 0;
 }
 
 bool CCondVar::SignalAll()
 {
-	return SDL_CondBroadcast((SDL_cond*)m_impl) == 0;
+	return BroadcastCond((ConditionHandle*)m_impl) == 0;
 }
 
 CMutex::CMutex(void *impl) : m_impl(impl)
@@ -171,15 +224,15 @@ CMutex::CMutex(void *impl) : m_impl(impl)
 
 CMutex::~CMutex()
 {
-	SDL_DestroyMutex((SDL_mutex*)m_impl);
+	SDL_DestroyMutex((MutexHandle*)m_impl);
 }
 
 bool CMutex::Lock()
 {
-	return SDL_mutexP((SDL_mutex*)m_impl) == 0;
+	return LockMutex((MutexHandle*)m_impl) == 0;
 }
 
 bool CMutex::Unlock()
 {
-	return SDL_mutexV((SDL_mutex*)m_impl) == 0;
+	return UnlockMutex((MutexHandle*)m_impl) == 0;
 }

@@ -1,31 +1,73 @@
-#include "SDLIncludes.h"
+#if defined(SUPERMODEL_PURE_VULKAN) && defined(SUPERMODEL_OPENGL_ONLY)
+#error "A target cannot be both Pure-Vulkan and OpenGL-only."
+#endif
+
+#if defined(SUPERMODEL_OPENGL_ONLY)
+// Named in the tooltip that tells the user how to pick a GPU for OpenGL.
+#define SUPERMODEL_EXE_NAME "Supermodel-LegacyOG.exe"
+#elif defined(SUPERMODEL_PURE_VULKAN)
+#define SUPERMODEL_EXE_NAME "Model3-Vulkan.exe"
+#else
+#define SUPERMODEL_EXE_NAME "Supermodel-VK.exe"
+#endif
+
+#if defined(SUPERMODEL_PURE_VULKAN)
+#include "OSD/SDL3/UiVulkanBackend.h"
+#else
 #include <GL/glew.h>
+#endif
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+#include "OSD/SDL3/VulkanRequirement.h"
+#endif
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
+#include <ctime>
 #include <iostream>
 #include <map>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <thread>
+#if defined(_WIN32)
+// Vendored libwebp decoder: the fallback when WIC has no WebP codec (see DecodeBoxartWIC).
+#include <webp/decode.h>
+#endif
 #include "GameLoader.h"
 #include "../Pkgs/imgui/imgui.h"
-#include "../Pkgs/imgui/imgui_impl_sdl2.h"
+#if defined(SUPERMODEL_PURE_VULKAN)
+#include "../Pkgs/imgui/imgui_impl_vulkan.h"
+#else
 #include "../Pkgs/imgui/imgui_impl_opengl3.h"
+#endif
+#include "OSD/Platform/Platform.h"
+#include "OSD/DisplayPacer.h"
+#include "OSD/Platform/ImguiPlatform.h"
 #include "../Src/Util/NewConfig.h"
 #include "Util/ConfigBuilders.h"
+#include "Util/PNGFile.h"
 #include "../Src/OSD/SDL/SDLInputSystem.h"
 #include "../Src/Inputs/Inputs.h"
 #include "OSD/ConfigFile.h"
 #include "OSD/FileSystemPath.h"
 #include "OSD/Logger.h"
+#include "OSD/SDL/FontProbe.h"
+#if !defined(SUPERMODEL_OPENGL_ONLY)
 #include "Graphics/Vulkan3D/VulkanContext.h"
+#include "Graphics/Vulkan3D/HDTextures.h"
+#endif
+#if defined(SUPERMODEL_PURE_VULKAN)
+#include "OSD/SDL3/HostCoreBridge.h"
+#endif
 #include "Main.h"
 #include "Gui.h"
 #include "Localization.h"
@@ -36,10 +78,15 @@
 #include <windows.h>
 #include <shlobj.h>
 #include <shobjidl.h>
-#include <SDL_syswm.h>
 #include <wincodec.h>
 #pragma comment(lib, "windowscodecs.lib")
+#include "OSD/Windows/SplashScreen.h"
+#if defined(_WIN32) && defined(SUPERMODEL_PLATFORM_SDL2)
+// DirectInput / Raw Input / XInput device handling is SDL2-only: it pumps Win32 messages itself
+// and exists for the legacy peripheral ecosystem. The SDL3 target reaches the same devices through
+// PlatformInput instead.
 #include "../Src/OSD/Windows/DirectInputSystem.h"
+#endif
 #endif
 
 #ifdef __APPLE__
@@ -174,11 +221,140 @@ static void UiText(const char* label)
 	ImGui::TextUnformatted(Tr(label));
 	PopHelpWrap();
 }
-static bool UiButton(const char* label, const ImVec2& size = ImVec2(0, 0)) { return ImGui::Button(Tr(label), size); }
-static bool UiSmallButton(const char* label) { return ImGui::SmallButton(Tr(label)); }
-static bool UiCheckbox(const char* label, bool* value) { return ImGui::Checkbox(Tr(label), value); }
-static bool UiRadioButton(const char* label, bool active) { return ImGui::RadioButton(Tr(label), active); }
-static bool UiTabItem(const char* label) { return ImGui::BeginTabItem(Tr(label)); }
+/*
+ * Clickable controls ask for the hand pointer themselves.
+ *
+ * ImGui only sets a cursor when a widget asks for one - buttons, checkboxes, radios and combos all
+ * keep the arrow - so the platform layer's ToSystemCursor() mapping never sees a Hand request.
+ * Call this immediately after submitting the item. IsItemHovered() is false for disabled items,
+ * which is what we want: a greyed-out control should not invite a click.
+ */
+static void HandOver()
+{
+	if (ImGui::IsItemHovered())
+		ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+}
+
+static bool UiButton(const char* label, const ImVec2& size = ImVec2(0, 0))
+{
+	// Hover colour interpolated over ~120 ms instead of switched instantly. Pushing the same colour
+	// for both the idle and the hovered state is what makes that possible: ImGui picks one of the
+	// two depending on whether the pointer is over the button, and both are the *same* lerped colour,
+	// so the transition is ours to drive rather than something we have to fight ImGui for.
+	const ImGuiStyle& style = ImGui::GetStyle();
+	const ImVec4 mixed = UiHoverBlend(style.Colors[ImGuiCol_Button],
+		style.Colors[ImGuiCol_ButtonHovered], UiHoverBegin(label));
+	ImGui::PushStyleColor(ImGuiCol_Button, mixed);
+	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, mixed);
+	const bool pressed = ImGui::Button(Tr(label), size);
+	ImGui::PopStyleColor(2);
+	UiHoverEnd(label, ImGui::IsItemHovered());
+	HandOver();
+	return pressed;
+}
+static bool UiSmallButton(const char* label)
+{
+	const bool pressed = ImGui::SmallButton(Tr(label));
+	HandOver();
+	return pressed;
+}
+static bool UiCheckbox(const char* label, bool* value)
+{
+	const ImGuiStyle& style = ImGui::GetStyle();
+	const ImVec4 mixed = UiHoverBlend(style.Colors[ImGuiCol_FrameBg],
+		style.Colors[ImGuiCol_FrameBgHovered], UiHoverBegin(label));
+	ImGui::PushStyleColor(ImGuiCol_FrameBg, mixed);
+	ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, mixed);
+	const bool changed = ImGui::Checkbox(Tr(label), value);
+	ImGui::PopStyleColor(2);
+	UiHoverEnd(label, ImGui::IsItemHovered());
+	HandOver();
+	return changed;
+}
+static bool UiRadioButton(const char* label, bool active)
+{
+	const bool changed = ImGui::RadioButton(Tr(label), active);
+	HandOver();
+	return changed;
+}
+
+/*
+ * The Ko-fi badge in the footer.
+ *
+ * Drawn rather than shipped as an image: it is a handful of primitives, it follows the interface
+ * scale automatically, and a badge that is a texture would need the box-art decoder and another
+ * cache for one picture.  The cup is deliberately simple - body, handle, saucer, two steam marks -
+ * because it has to read at 16 pixels next to "Ko-fi".
+ *
+ * The click is handed to the platform layer (SDL_OpenURL), so Windows, Linux and macOS all open
+ * their default browser rather than this code growing three platform branches.
+ */
+static constexpr const char* kKofiUrl = "https://ko-fi.com/igloogarage";
+
+static float KofiBadgeWidth()
+{
+	const float scale = ImGui::GetFontSize() / 18.0f;
+	const float icon = 18.0f * scale;
+	return 7.0f * scale + icon + 6.0f * scale + ImGui::CalcTextSize("Ko-fi").x + 9.0f * scale;
+}
+
+static void DrawKofiBadge(float width, float height)
+{
+	ImGui::InvisibleButton("##kofi", ImVec2(width, height));
+	const bool hovered = ImGui::IsItemHovered();
+	if (hovered)
+	{
+		HandOver();
+		DrawWrappedTooltip(Tr("在 Ko-fi 上支持开发"));
+	}
+	if (ImGui::IsItemClicked())
+	{
+		if (!OSD::Platform::OpenURL(kKofiUrl))
+			InfoLog("GUI: could not open the Ko-fi page '%s'.", kKofiUrl);
+	}
+
+	const ImVec2 pMin = ImGui::GetItemRectMin();
+	const ImVec2 pMax = ImGui::GetItemRectMax();
+	ImDrawList* draw = ImGui::GetWindowDrawList();
+	const float scale = ImGui::GetFontSize() / 18.0f;
+	const ImU32 background = hovered ? IM_COL32(255, 122, 119, 255) : IM_COL32(255, 94, 91, 240);
+	const ImU32 white = IM_COL32(255, 255, 255, 255);
+	const ImU32 steam = IM_COL32(255, 255, 255, 170);
+
+	draw->AddRectFilled(pMin, pMax, background, 6.0f * scale);
+	draw->AddRect(pMin, pMax, IM_COL32(255, 255, 255, 70), 6.0f * scale, 0, 1.0f * scale);
+
+	const float pad = 7.0f * scale;
+	const float icon = height - pad * 2.0f;
+	const float left = pMin.x + pad;
+	const float top = pMin.y + pad;
+
+	// Handle first, body over it: only the right half of the ring stays visible, which reads as a
+	// cup handle without needing a clipped path.
+	draw->AddCircle(ImVec2(left + icon * 0.60f, top + icon * 0.54f), icon * 0.20f,
+		white, 10, 1.6f * scale);
+	draw->AddRectFilled(ImVec2(left, top + icon * 0.28f), ImVec2(left + icon * 0.64f, top + icon * 0.86f),
+		white, 2.0f * scale, ImDrawFlags_RoundCornersBottom);
+	draw->AddLine(ImVec2(left - icon * 0.05f, top + icon * 0.94f),
+		ImVec2(left + icon * 0.74f, top + icon * 0.94f), white, 1.4f * scale);
+	draw->AddLine(ImVec2(left + icon * 0.18f, top + icon * 0.20f),
+		ImVec2(left + icon * 0.23f, top + icon * 0.06f), steam, 1.3f * scale);
+	draw->AddLine(ImVec2(left + icon * 0.40f, top + icon * 0.20f),
+		ImVec2(left + icon * 0.35f, top + icon * 0.06f), steam, 1.3f * scale);
+
+	const char* label = "Ko-fi";
+	const ImVec2 textSize = ImGui::CalcTextSize(label);
+	const ImVec2 textPos(pMin.x + pad + icon + 6.0f * scale,
+		pMin.y + (height - textSize.y) * 0.5f);
+	draw->AddText(textPos, white, label);
+}
+
+static bool UiTabItem(const char* label)
+{
+	const bool open = ImGui::BeginTabItem(Tr(label));
+	HandOver();
+	return open;
+}
 static void UiColumn(const char* label, ImGuiTableColumnFlags flags = 0, float width = 0.0f)
 {
 	ImGui::TableSetupColumn(Tr(label), flags, width);
@@ -188,9 +364,102 @@ static bool UiSliderInt(const char* label, int* value, int min, int max, const c
 {
 	return ImGui::SliderInt(Tr(label), value, min, max, Tr(format));
 }
+static bool UiCombo(const char* label, int* current, const char* const items[], int count);
+
+/*
+ * Natural width of a combo showing `items`: the longest entry plus frame padding and the
+ * drop-down arrow's square. Callers that place a combo after SameLine() use this to decide
+ * whether it fits, before ComboRow() has to clamp it to the remaining space.
+ */
+static const float kComboFloorWidth = 120.0f;
+
+static float ComboWidth(const char* const items[], int count)
+{
+	const ImGuiStyle& style = ImGui::GetStyle();
+	const float chrome = style.FramePadding.x * 2.0f + ImGui::GetFrameHeight();
+
+	float width = kComboFloorWidth;
+	for (int i = 0; i < count; i++)
+	{
+		const float w = ImGui::CalcTextSize(items[i]).x + chrome;
+		if (w > width)
+			width = w;
+	}
+	return width;
+}
+
+/*
+ * A combo in a settings row.
+ *
+ * The width comes from the longest entry rather than a fixed 220 px: "Off" does not need a 220 px
+ * box, and "Sharp + 4x anisotropic" was being clipped to "Sharp + 4x anis..." at that width. The
+ * floor keeps a one-word list from becoming a target too small to hit; the ceiling is the row.
+ *
+ * Label placement follows ImGui's default (to the right of the widget), but it is drawn by hand so
+ * the visible part can move above the widget when the row is too narrow for both. "Label##id" is
+ * split: ImGui takes the widget's identity from the part after "##", which has to survive the
+ * label moving.
+ *
+ * `label` is already translated and `items` are the strings actually shown, so this can be used from
+ * both the hand-written pages and the generic CreateControls() renderer. The item pointers must
+ * outlive the frame - ImGui keeps them while the popup is open - which is why callers translate into
+ * a static array via UiItems().
+ */
+static bool ComboRow(const char* label, int* current, const char* const items[], int count)
+{
+	if (count <= 0)
+		return false;
+
+	const ImGuiStyle& style = ImGui::GetStyle();
+	const char* idPos = std::strstr(label, "##");
+	const std::string display = idPos != nullptr ? std::string(label, idPos - label) : std::string(label);
+	const std::string id = idPos != nullptr ? std::string(idPos) : ("##" + display);
+
+	const float avail = ImGui::GetContentRegionAvail().x;
+	const float labelWidth = ImGui::CalcTextSize(display.c_str()).x;
+	const float gap = style.ItemInnerSpacing.x;
+
+	float width = ComboWidth(items, count);
+
+	// Two attempts at keeping the label on the same line: shrink the widget to fit it, and if even
+	// the floor width leaves no room, give the label its own line above a full-width widget.
+	bool stacked = false;
+	if (display.empty())
+	{
+		// No visible label ("##id" only): the widget may use the whole row.
+	}
+	else if (width + gap + labelWidth > avail)
+	{
+		width = avail - gap - labelWidth;
+		if (width < kComboFloorWidth)
+		{
+			stacked = true;
+			width = avail;
+		}
+	}
+	if (width > avail)
+		width = avail;
+	if (width < 1.0f)
+		width = 1.0f;
+
+	if (stacked)
+		ImGui::TextWrapped("%s", display.c_str());
+
+	ImGui::SetNextItemWidth(width);
+	const bool changed = ImGui::Combo(id.c_str(), current, items, count);
+	HandOver();
+
+	if (!stacked && !display.empty())
+	{
+		ImGui::SameLine();
+		ImGui::TextUnformatted(display.c_str());
+	}
+	return changed;
+}
+
 static bool UiCombo(const char* label, int* current, const char* const items[], int count)
 {
-	return ImGui::Combo(Tr(label), current, items, count);
+	return ComboRow(Tr(label), current, items, count);
 }
 static void UiTextColored(const ImVec4& colour, const char* label)
 {
@@ -233,7 +502,16 @@ static void UiTextDim(const char* format, ...)
  * means a future change to how warnings look cannot silently repaint a status readout, which is what
  * would happen if each caller had its own copy of the value.
  */
-static const ImVec4 kAttentionColour(0.620f, 0.360f, 0.000f, 1.00f); // #9E5C00 on warm paper
+static const ImVec4 kAttentionLight(0.620f, 0.360f, 0.000f, 1.00f); // #9E5C00 on warm paper
+static const ImVec4 kAttentionDark(0.925f, 0.639f, 0.290f, 1.00f);  // #EC A3 4A on dark glass
+
+// Warnings and attention lines. The colour is a guide, not decoration, so it must not rely on the
+// palette's own text colour: #9E5C00 is legible on paper and nearly invisible on rock grey, so the
+// two themes need two values.
+static ImVec4 AttentionColour()
+{
+	return UiThemeIsDark() ? kAttentionDark : kAttentionLight;
+}
 
 /*
  * Warning-coloured line. Kept apart from UiTextDim so that a real problem does not read as one more
@@ -252,7 +530,7 @@ static void UiTextWarn(const char* format, ...)
 	va_end(args);
 
 	PushHelpWrap();
-	ImGui::TextColored(kAttentionColour, "%s", buffer);
+	ImGui::TextColored(AttentionColour(), "%s", buffer);
 	PopHelpWrap();
 }
 
@@ -279,7 +557,7 @@ static void UiTextHighlight(const char* format, ...)
 	va_end(args);
 
 	PushHelpWrap();
-	ImGui::TextColored(kAttentionColour, "%s", buffer);
+	ImGui::TextColored(AttentionColour(), "%s", buffer);
 	PopHelpWrap();
 }
 
@@ -323,22 +601,63 @@ static const char** UiItems(const char* const* items, int count, const char** st
 static bool HasDedicatedUI(const std::string& key)
 {
     static const char* keys[] = {
-        "Vulkan3DEngine", "New3DEngine", "VkValidation", "VulkanDevice",
-        "XResolution", "YResolution", "FullScreen", "Stretch", "WideScreen", "VSync", "ShowFrameRate", "ShowStatsOsd",
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+        "Vulkan3DEngine", "VkValidation", "VulkanDevice",
+#endif
+        "New3DEngine",
+        "XResolution", "YResolution", "FullScreen", "Stretch", "WideScreen", "VSync", "ShowFrameRate", "ShowStatsOsd", "StatsOsdStyle",
         "IntegerScale", "UiLanguage",
+        // Interface appearance. Drawn by hand at the top of the 常用 page, together with the
+        // language: they are both about the window rather than about the emulator.
+        "UITheme", "UiFrostedGlass",
         // Fullscreen refresh mode. The radio group on the 常用 page writes both keys together,
         // because they are one three-way choice and not two independent switches - the generic
         // list showed them as a bare 0.000000 float and a checkbox beside it, which invites setting
         // them to a combination the resolver then has to silently reinterpret.
         "ExclusiveFullscreen", "ExclusiveRefreshRate",
+        // Presentation cadence, drawn by hand on the 常用 page. RefreshRateMode/FixedRefreshRate are
+        // one three-way choice plus a rate, and the interpolation keys are a single decision with a
+        // scope - the generic renderer would show them as raw numbers and unlabelled checkboxes.
+        "RefreshRateMode", "FixedRefreshRate",
+        "MotionInterpolation", "LowLatency", "InterpolationScope",
+        "CameraCutAngleDegrees", "InstanceCutAngleDegrees", "CutDistanceScale",
+        // Gamepad steering smoothing, drawn by hand on the 力反馈 / 灵敏度 page.
+        "GamepadSteeringSmoothing",
+        // Instance interpolation has no control: per-instance blending leaves a one-frame seam
+        // between a snapped model and an interpolated neighbour, so it is not something to offer
+        // as a checkbox. The key and SM3D_INST_INTERP stay for experiments; listed here so the
+        // generic renderer does not put an unlabelled tick box on the page instead.
+        "InstanceInterpolation",
+        // Test hook for the phase multiples; not something to offer as a setting.
+        "PaceAssumePanelHz",
         // Bezel backdrop. Hand-drawn on the "画面" page, where a display option belongs.
         "BezelMode", "BezelImage", "BezelBrightness",
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+        // HD texture pack switches. Drawn by hand on the 核心 page and in the in-game panel,
+        // where the reload button and the F4 hint belong together with them.
+        "LoadHDTextures", "DumpHDTextures",
+#endif
+        // Paired with the backdrop by hand: it decides whether there are side bars for the backdrop
+        // to fill, so the two are drawn together rather than leaving this among the runtime options.
+        "WideBackground",
+        // Picture options that are honoured by both renderers, drawn by hand at the top of the
+        // 画面 page. They are in the ini's Video group, but the generic list put them on 核心 among
+        // the runtime switches, where they read as emulation options rather than picture ones.
+        "CRTcolors", "UpscaleMode",
+        // Sinden light-gun border. Drawn by the Vulkan compositor, and its three controls are
+        // hand-written on the 画面 page.
+        "SindenBorder", "SindenBorderWidth", "SindenBorderBrightness",
         // Anti-aliasing and post-processing filters. These live in "高级设置" only.
-        "MSAA", "PostFXAA",
+        "MSAA", "TexFilter", "AlphaSortMode", "PostFXAA",
+        "QuadInterpolation", "InternalResolution",
         "PostCRT", "PostScanlines", "PostScanlineIntensity",
         "PostMaskType", "PostMaskScale", "PostMaskIntensity",
         "PostGlow", "PostGlowLevels", "PostGlowThreshold", "PostGain",
         "SoundVolume", "MusicVolume", "EmulateSound", "EmulateDSB", "AudioDevice",
+        // Retired: the SCSP DSP has a single implementation now. An old .ini or a front-end that
+        // still passes -legacy-scsp keeps working, but the key no longer does anything, so it must
+        // not be offered as a switch.
+        "LegacySoundDSP",
         "InputSystem", "ForceFeedback",
         "Network", "SimulateNet", "PortIn", "PortOut", "AddressOut"
     };
@@ -370,7 +689,6 @@ static std::string WidgetLabel(const std::string& key)
         { "BalanceFrontRear", "前后声道" },
         { "NbSoundChannels", "声道数" },
         { "SoundFreq", "音频刷新率" },
-        { "LegacySoundDSP", "旧版音效 DSP" },
         { "FlipStereo", "交换左右声道" },
         { "DirectInputConstForceLeftMax", "恒力（左）" },
         { "DirectInputConstForceRightMax", "恒力（右）" },
@@ -409,6 +727,29 @@ static std::string WidgetLabel(const std::string& key)
     // change instead of being seen as a different widget.
     return std::string(Tr(found->second)) + "##" + key;
 }
+
+/*
+ * Help text for a generated control.
+ *
+ * Options with a dedicated page carry their own (?) markers next to the widget. These are the ones
+ * that only ever get a label in a list, where a name like "Disable White Flash" says the what but
+ * not the why. The text is written in Chinese and goes through Tr(), like every other explanation,
+ * so it follows the interface language.
+ */
+static const char* KeyHelpText(const std::string& key)
+{
+    static const std::map<std::string, const char*> help = {
+        { "NoWhiteFlash",
+            "读档和切场景时，街机硬件会把整屏刷白；开启后跳过这层白闪。\n"
+            "只影响观感，不影响模拟结果。" },
+    };
+    const auto found = help.find(key);
+    return found == help.end() ? nullptr : found->second;
+}
+
+// Defined further down with the other widget helpers; declared here because the generated controls
+// use it for the per-key help above.
+static void HelpMarker(const char* text);
 
 static void UpdateTempValues(Util::Config::Node& config, const std::string group, bool init)
 {
@@ -518,23 +859,22 @@ static SettingScope ScopeOfSetting(const std::string& key)
         // Hardware MSAA is created with the Vulkan render targets. The OpenGL backends antialias a
         // different way, through Supersampling below - the two are alternatives, not layers.
         "MSAA",
+        // The scene shader's exact quad reconstruction. The OpenGL quad path is a separate key
+        // (QuadRendering), so this one must not be offered while an OpenGL renderer is running.
+        "QuadInterpolation",
         // The whole post-processing chain is Vulkan2D's filter pass.
         "PostFXAA", "PostCRT", "PostScanlines", "PostScanlineIntensity",
         "PostMaskType", "PostMaskScale", "PostMaskIntensity",
         "PostGlow", "PostGlowLevels", "PostGlowThreshold", "PostGain",
         // The cabinet backdrop is composed into the black bars by Vulkan2D.
         "BezelMode", "BezelImage", "BezelBrightness",
+        // The light-gun border is a pass of its own in Vulkan2D.
+        "SindenBorder", "SindenBorderWidth", "SindenBorderBrightness",
     };
     static const char* const openGlOnly[] = {
-        // Supersampling is the OpenGL anti-aliasing path. Main.cpp forces it to 1x under Vulkan.
+        // Supersampling is the OpenGL anti-aliasing path. Main.cpp forces it to 1x under Vulkan;
+        // Vulkan has hardware MSAA instead.
         "Supersampling",
-        // CRT colour temperature is consumed by SuperAA, which is the OpenGL screen setup.
-        "CRTcolors",
-        // The crosshair object is only created when there is no Vulkan context.
-        "Crosshairs", "CrosshairStyle",
-        // Passed to both renderers, but the Vulkan Init() signatures take it unnamed and ignore it;
-        // only CRender2D acts on it.
-        "UpscaleMode",
     };
     static const char* const new3dOnly[] = {
         // A New3D pipeline choice (R3DShader picks the quad or triangle program).
@@ -607,6 +947,31 @@ static void CreateControls(Util::Config::Node& config, const std::string group)
                         if (HasDedicatedUI(key))
                             continue;
 
+#if defined(SUPERMODEL_PURE_VULKAN)
+                        /*
+                         * RefreshRate is the frame limiter of the original one-simulation-one-present
+                         * loop. The Vulkan loop paces itself through CDisplayPacer from
+                         * RefreshRateMode/FixedRefreshRate, so this key no longer affects anything and
+                         * must not be offered as if it did. The OpenGL build still uses it, and the
+                         * dual build keeps it because its fallback loop does too.
+                         */
+                        if (key == "RefreshRate")
+                            continue;
+#endif
+
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+                        /*
+                         * This build has no DirectInput or XInput backend - GetInputSystem() maps
+                         * every choice to the SDL one - so those force-feedback keys do nothing
+                         * here. Leaving them on the page is actively misleading: a pad that SDL
+                         * reports as a HIDAPI device (a Switch Pro controller, say) reads as
+                         * "the only vibration setting is XInput", while the SDL keys just below
+                         * are the ones that apply.
+                         */
+                        if (key.rfind("DirectInput", 0) == 0 || key.rfind("XInput", 0) == 0)
+                            continue;
+#endif
+
                         const std::string labelWithId = WidgetLabel(key);
                         const std::string::size_type idPos = labelWithId.find("##");
                         const std::string displayLabel = idPos == std::string::npos
@@ -631,19 +996,28 @@ static void CreateControls(Util::Config::Node& config, const std::string group)
                         const ImGuiStyle& style = ImGui::GetStyle();
                         const float availableWidth = ImGui::GetContentRegionAvail().x;
                         const float desiredItemWidth = availableWidth * 0.55f;
+                        
+                        // Combos size and place themselves (see ComboRow): their width follows the
+                        // longest entry, which is what keeps "Off" from taking a whole row while a
+                        // long option is clipped. The block below is for the other widget shapes.
+                        const bool listControl = index != 0 && !vRange->HasMinMax() && !list.empty();
+
                         const bool stackLabel = index != 0 &&
                             (availableWidth - desiredItemWidth - style.ItemInnerSpacing.x) <
                                 ImGui::CalcTextSize(displayLabel.c_str()).x;
 
                         const char* uiLabel = stackLabel ? idLabel.c_str() : labelWithId.c_str();
-                        if (stackLabel)
+                        if (!listControl)
                         {
-                            ImGui::TextWrapped("%s", displayLabel.c_str());
-                            ImGui::SetNextItemWidth(-FLT_MIN);
-                        }
-                        else if (index != 0)
-                        {
-                            ImGui::SetNextItemWidth(desiredItemWidth);
+                            if (stackLabel)
+                            {
+                                ImGui::TextWrapped("%s", displayLabel.c_str());
+                                ImGui::SetNextItemWidth(-FLT_MIN);
+                            }
+                            else if (index != 0)
+                            {
+                                ImGui::SetNextItemWidth(desiredItemWidth);
+                            }
                         }
 
                         auto ProcessCombo = [&](auto* valuePtr)
@@ -676,7 +1050,7 @@ static void CreateControls(Util::Config::Node& config, const std::string group)
                                     sVector[i] = Tr(names[i]);
                             }
                             if (key == "RefreshRate" && sVector.size() == 2) {
-                                static const char* names[] = { "57.5 Hz（真实机台）", "60 Hz（非 VRR / 60Hz 面板）" };
+                                static const char* names[] = { "57.524 Hz（真实机台）", "60 Hz（非 VRR / 60Hz 面板）" };
                                 for (int i = 0; i < 2; i++)
                                     sVector[i] = Tr(names[i]);
                             }
@@ -713,10 +1087,10 @@ static void CreateControls(Util::Config::Node& config, const std::string group)
                             const bool rateOverridden = fixedRateOverride || vrrAutoRate;
 
                             if (rateOverridden) {
-                                selectedIndex = 0;      // 57.5 Hz, the arcade rate
+                                selectedIndex = 0;      // 57.524 Hz, the arcade rate
                                 ImGui::BeginDisabled();
                             }
-                            ImGui::Combo(uiLabel, &selectedIndex, sVectorChar.data(), (int)sVectorChar.size());
+                            ComboRow(labelWithId.c_str(), &selectedIndex, sVectorChar.data(), (int)sVectorChar.size());
                             if (rateOverridden) {
                                 ImGui::EndDisabled();
                                 if (fixedRateOverride)
@@ -771,6 +1145,16 @@ static void CreateControls(Util::Config::Node& config, const std::string group)
                          */
                         const SettingScope scope = ScopeOfSetting(key);
                         const bool applies = ScopeAppliesToCurrentRenderer(scope, engineIsVulkan, engineIsNew3D);
+#if defined(SUPERMODEL_PURE_VULKAN)
+                        /*
+                         * This build has exactly one renderer and always will, so an option belonging to
+                         * another one is not "disabled until you switch" - it can never apply. Greyed out
+                         * with an explanation it only made the Video page look broken, with four rows of
+                         * "this is not the one running" between the settings that do work.
+                         */
+                        if (!applies)
+                            continue;
+#endif
                         if (!applies)
                             ImGui::BeginDisabled();
 
@@ -821,7 +1205,7 @@ static void CreateControls(Util::Config::Node& config, const std::string group)
                                     loopCount++;
                                 }
 
-                                ImGui::Combo(uiLabel, &selectedIndex, sVector.data(), (int)sVector.size());
+                                ComboRow(labelWithId.c_str(), &selectedIndex, sVector.data(), (int)sVector.size());
                                 vRange->tempValue = choices[selectedIndex];
                             }
                             else {
@@ -842,6 +1226,10 @@ static void CreateControls(Util::Config::Node& config, const std::string group)
                             // squeezed it into whatever width was left beside the widget, which on
                             // a narrow panel wrapped it one character per line.
                             UiTextDim("%s", Tr(ScopeReasonKey(scope)));
+                        }
+                        else if (const char* help = KeyHelpText(key); help != nullptr)
+                        {
+                            HelpMarker(help);
                         }
 
                         if (key == "PowerPCFrequency")
@@ -1017,19 +1405,33 @@ static void AddKeys(Util::Config::Node& config, KeyBindState& kb, std::vector<st
     BindKeys(config, kb, openPopup);
 }
 
-static std::shared_ptr<CInputs> GetInputSystem(Util::Config::Node& config, SDL_Window* window)
+static std::shared_ptr<CInputs> GetInputSystem(Util::Config::Node& config, OSD::Platform::Window* window)
 {
     std::string selectedInputSystem = config["InputSystem"].ValueAs<std::string>();
     std::shared_ptr<CInputSystem> inputSystem;
 
+#if !defined(SUPERMODEL_PLATFORM_SDL2)
+    // The SDL3 binary has no DirectInput/Raw Input backend. Both executables share one Data/Config
+    // tree, so a configuration written for the SDL2 build will name one of them - fall back rather
+    // than starting a session with no controls at all.
+    if (selectedInputSystem != "sdl" && selectedInputSystem != "sdlgamepad")
+    {
+        InfoLog("Input: '%s' is not available in the SDL3 build; using 'sdlgamepad'.",
+            selectedInputSystem.c_str());
+        selectedInputSystem = "sdlgamepad";
+    }
+#endif
+
     if (selectedInputSystem == "sdl")               { inputSystem = std::shared_ptr<CInputSystem>(new CSDLInputSystem(config, false)); }
     else if (selectedInputSystem == "sdlgamepad")   { inputSystem = std::shared_ptr<CInputSystem>(new CSDLInputSystem(config, true)); }
 
-#ifdef _WIN32
+#if defined(_WIN32) && defined(SUPERMODEL_PLATFORM_SDL2)
     else if (selectedInputSystem == "dinput")       { inputSystem = std::shared_ptr<CInputSystem>(new CDirectInputSystem(config, window, false, false)); }
     else if (selectedInputSystem == "xinput")       { inputSystem = std::shared_ptr<CInputSystem>(new CDirectInputSystem(config, window, false, true)); }
     else if (selectedInputSystem == "rawinput")     { inputSystem = std::shared_ptr<CInputSystem>(new CDirectInputSystem(config, window, true, false)); }
-#else
+#endif
+
+#if !defined(_WIN32) || !defined(SUPERMODEL_PLATFORM_SDL2)
     (void)window;
 #endif
 
@@ -1039,8 +1441,8 @@ static std::shared_ptr<CInputs> GetInputSystem(Util::Config::Node& config, SDL_W
         inputs->LoadFromConfig(config);
 
         int x, y, w, h;
-        SDL_GetWindowPosition(window, &x, &y);
-        SDL_GL_GetDrawableSize(window, &w, &h);
+        OSD::Platform::GetWindowPosition(window, &x, &y);
+        OSD::Platform::GetWindowPixelSize(window, &w, &h);
         inputSystem->SetDisplayGeom(x, y, w, h);
         return inputs;
     }
@@ -1052,7 +1454,11 @@ struct RomEntry
 {
     std::string title;
     std::string version;    // region and revision, e.g. "Japan, Revision A"
-    std::string setName;
+    std::string setName;    // the archive name - what the ROM column shows and the row is keyed by
+    // The set the archive was identified as, which can differ from the file name: an archive called
+    // scud.zip may hold the Australian scudau ROMs, and a complete set may sit under a name that is
+    // not in Games.xml. Empty when nothing could be identified.
+    std::string resolvedSet;
     std::string path;
     int year = 0;
     // Whether Games.xml has a definition for this set. Every .zip in the folder is listed, but one
@@ -1064,15 +1470,60 @@ struct RomEntry
 static std::string g_romFolderCached;
 static std::vector<RomEntry> g_roms;
 
+// The set an entry is really for. Box art and the game blurb are keyed by set name, and an archive
+// whose contents were identified (scuda.zip holding the Export scud set, say) has to look them up
+// under the name it resolves to rather than the name of the file.
+static const std::string& EffectiveSet(const RomEntry& entry)
+{
+    return entry.resolvedSet.empty() ? entry.setName : entry.resolvedSet;
+}
+
+// Published by the interface each frame. The save manager needs both for questions the ROM folder
+// cannot answer on its own: naming a set that has no zip of its own (a merged archive resolves to a
+// regional child set such as scudau), and resolving a row's archive the way the game will run it.
+static const std::map<std::string, Game>* g_gameDefinitions = nullptr;
+static const GameLoader* g_gameLoader = nullptr;
+
 // Fraction of the left column taken by the game preview. Written when the splitter is dragged and
 // read back on the next launch (from the Global section, like GuiWindowWidth/Height). -1 means the
 // stored value has not been read yet.
 static float g_previewSplit = -1.0f;
 
-// Largest share of the left column the preview may occupy. The game list sits below it, and that
-// list is the part the user scrolls and clicks, so the preview stops at half the column even if the
-// divider is dragged all the way down.
-static constexpr float kMaxPreviewShare = 0.5f;
+/*
+ * Game-list state that survives a restart.
+ *
+ * LastSelectedGame is the row's ROM set name rather than its index: the list is
+ * rebuilt from whatever zips are in the ROM folder, and an index would silently
+ * point at a different game as soon as one zip was added or removed. The filter
+ * and the table's vertical scroll are stored alongside it, because "the list was
+ * where I left it" is all three things at once.
+ *
+ * Scroll restore is deliberately two frames late: the table's content extent is
+ * only known after its rows have been submitted, so SetScrollY() in the same frame
+ * the child is first built would be clamped to a range that does not exist yet.
+ * The pending flag keeps applying until the position sticks (or four frames have
+ * passed, for a list that became shorter), and the saved value is never
+ * overwritten in the meantime.
+ */
+static bool g_gameListStateRestored = false;
+static bool g_gameListScrollRestorePending = false;
+static int g_gameListScrollRestoreFrames = 0;
+static float g_gameListScrollRestoreY = 0.0f;
+static float g_gameListScrollY = 0.0f;
+static char g_gameListFilter[128] = {};
+// The last set the user actually had selected. The Confirm Exit popup clears
+// selectedGameIndex to mean "do not start a game", so saving that field directly
+// would forget the selection every time the program was quit from the button.
+static std::string g_lastSelectedSet;
+
+// Set when the running game was started from Manage Saves -> Load. The next
+// GuiRunOnce() call is then a return from that game, and reopens the manager for
+// the same row instead of dropping the user back at the top-level game list.
+// Starting a game from the list clears it, so an ordinary session still returns
+// to the list. Declared outside the PURE_VULKAN block because the list's launch
+// paths clear it in every build.
+static bool g_returnToManageSaves = false;
+static std::string g_returnToManageSavesSet;
 
 // Controller detection for the settings window. DetectController() enumerates SDL devices, which is
 // not something to do every frame, so the result is cached. The cache is invalidated whenever a pad
@@ -1125,13 +1576,9 @@ static std::filesystem::path PathFromUtf8(const std::string& text)
     return std::filesystem::path(Utf8ToWide(text));
 }
 
-static HWND WindowHandle(SDL_Window* window)
+static HWND WindowHandle(OSD::Platform::Window* window)
 {
-    SDL_SysWMinfo info;
-    SDL_VERSION(&info.version);
-    if (!SDL_GetWindowWMInfo(window, &info))
-        return nullptr;
-    return info.info.win.window;
+    return static_cast<HWND>(OSD::Platform::GetNativeWindowHandle(window));
 }
 
 /*
@@ -1146,7 +1593,7 @@ static HWND WindowHandle(SDL_Window* window)
  * is attached only around the call and detached immediately; this runs at startup and when
  * returning from a game, not per frame.
  */
-static void RaiseSettingsWindow(SDL_Window* window)
+static void RaiseSettingsWindow(OSD::Platform::Window* window)
 {
     if (window == nullptr)
         return;
@@ -1170,12 +1617,12 @@ static void RaiseSettingsWindow(SDL_Window* window)
     if (attached)
         AttachThreadInput(foregroundThread, currentThread, FALSE);
 #else
-    SDL_ShowWindow(window);
-    SDL_RaiseWindow(window);
+    OSD::Platform::ShowWindow(window);
+    OSD::Platform::RaiseWindow(window);
 #endif
 }
 
-static bool BrowseFolder(SDL_Window* window, std::string& path)
+static bool BrowseFolder(OSD::Platform::Window* window, std::string& path)
 {
     HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     const bool uninit = SUCCEEDED(init);
@@ -1229,7 +1676,7 @@ static bool BrowseFolder(SDL_Window* window, std::string& path)
  * accepts any file, so the "All files" entry stays available for a settings file that was renamed
  * or saved with a different extension.
  */
-static bool BrowseSettingsFile(SDL_Window* window, std::string& path)
+static bool BrowseSettingsFile(OSD::Platform::Window* window, std::string& path)
 {
     HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     const bool uninit = SUCCEEDED(init);
@@ -1287,7 +1734,7 @@ static bool BrowseSettingsFile(SDL_Window* window, std::string& path)
  * path over and the picture would then fail to load with no obvious reason. The description says so
  * as well, so the limitation is visible before the dialog is even opened.
  */
-static bool BrowseImageFile(SDL_Window* window, std::string& path)
+static bool BrowseImageFile(OSD::Platform::Window* window, std::string& path)
 {
     HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     const bool uninit = SUCCEEDED(init);
@@ -1343,7 +1790,7 @@ static bool BrowseImageFile(SDL_Window* window, std::string& path)
  * reimplemented. The offered name is the conventional one so that a plain "Save as" followed by
  * Enter lands somewhere sensible.
  */
-static bool BrowseSaveFile(SDL_Window* window, std::string& path)
+static bool BrowseSaveFile(OSD::Platform::Window* window, std::string& path)
 {
     HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     const bool uninit = SUCCEEDED(init);
@@ -1365,7 +1812,11 @@ static bool BrowseSaveFile(SDL_Window* window, std::string& path)
         dialog->SetFileTypes(IM_ARRAYSIZE(filters), filters);
         dialog->SetFileTypeIndex(1);
         dialog->SetDefaultExtension(L"ini");
+#if defined(SUPERMODEL_PURE_VULKAN)
+        dialog->SetFileName(L"Model3-Vulkan.ini");
+#else
         dialog->SetFileName(L"Supermodel.ini");
+#endif
 
         // Start in the folder the current settings came from, so "Save as" defaults to a sibling
         // copy rather than dropping the user in Documents.
@@ -1403,19 +1854,128 @@ static bool BrowseSaveFile(SDL_Window* window, std::string& path)
     return ok;
 }
 #else
-static void RaiseSettingsWindow(SDL_Window* window)
-{
-    if (window == nullptr)
-        return;
-    SDL_ShowWindow(window);
-    SDL_RaiseWindow(window);
-}
-
 static std::filesystem::path PathFromUtf8(const std::string& text)
 {
     return std::filesystem::path(text);
 }
 #endif
+
+/*
+ * Resolve a ROM folder the way the interface should: a relative value is looked for next to the
+ * executable first, then through the platform's historical rule.  This is what lets the portable
+ * layout keep "roms/" in the settings file: the folder can be moved with the emulator, and the same
+ * setting still names it.  On Windows and macOS ResolvePath() already anchors to the executable,
+ * so the first branch is mostly for Linux, where the settings themselves live under XDG.
+ */
+static std::string ResolveRomPath(const std::string& path)
+{
+    if (path.empty())
+        return path;
+
+    if (PathFromUtf8(path).is_absolute())
+        return path;
+
+    const std::string base = FileSystemPath::GetBasePath();
+    if (!base.empty())
+    {
+        std::error_code error;
+        const std::string besideExe = base + path;
+        if (std::filesystem::is_directory(PathFromUtf8(besideExe), error) && !error)
+            return besideExe;
+    }
+
+    return FileSystemPath::ResolvePath(path);
+}
+
+static std::string PathToUtf8(const std::filesystem::path& path);
+
+static bool FolderHasZip(const std::filesystem::path& folder)
+{
+    std::error_code error;
+    for (const auto& entry : std::filesystem::directory_iterator(folder, error))
+    {
+        if (error)
+            break;
+        std::error_code typeError;
+        if (entry.is_regular_file(typeError) && !typeError &&
+            ToLowerAscii(entry.path().extension().string()) == ".zip")
+            return true;
+    }
+    return false;
+}
+
+/*
+ * The portable ROM layout: a rom/, roms/, romset/ or romsets/ folder next to the executable.
+ *
+ * case is ignored because the package is edited on Windows, macOS and Linux alike, and the point
+ * of the scan is that the user should not have to care which spelling they ended up with.  A
+ * folder that actually contains a zip wins over an empty one with a nicer name, so an empty
+ * leftover roms/ cannot hide a populated rom/ next to it.
+ *
+ * requireZip is what keeps the shipped, empty roms/ folder from replacing a usable C:/Downloads:
+ * only a folder with game data may take over from a path that already works.  When the configured
+ * path is missing, the caller may ask again with requireZip=false to adopt an existing empty
+ * folder rather than leaving the interface pointing at nothing.
+ *
+ * The result is the folder name with a trailing slash, relative to the executable: moving the
+ * whole installation keeps the setting valid, and ResolveRomPath() anchors it at use time.
+ */
+static std::string FindPortableRomFolder(bool requireZip)
+{
+    const std::string base = FileSystemPath::GetBasePath();
+    if (base.empty())
+        return "";
+
+    struct Candidate
+    {
+        int rank;
+        std::string name;
+    };
+
+    std::vector<Candidate> candidates;
+    std::error_code error;
+    for (const auto& entry : std::filesystem::directory_iterator(PathFromUtf8(base), error))
+    {
+        if (error)
+            break;
+
+        std::error_code typeError;
+        if (!entry.is_directory(typeError) || typeError)
+            continue;
+
+        const std::string name = PathToUtf8(entry.path().filename());
+        const std::string lower = ToLowerAscii(name);
+        int rank = -1;
+        if (lower == "roms")
+            rank = 0;
+        else if (lower == "romsets")
+            rank = 1;
+        else if (lower == "romset")
+            rank = 2;
+        else if (lower == "rom")
+            rank = 3;
+
+        if (rank < 0)
+            continue;
+
+        const bool hasZip = FolderHasZip(entry.path());
+        if (requireZip && !hasZip)
+            continue;
+
+        candidates.push_back({ (hasZip ? 0 : 10) + rank, name });
+    }
+
+    if (candidates.empty())
+        return "";
+
+    std::sort(candidates.begin(), candidates.end(),
+        [](const Candidate& a, const Candidate& b)
+        {
+            return a.rank != b.rank ? a.rank < b.rank : ToLowerAscii(a.name) < ToLowerAscii(b.name);
+        });
+
+    return candidates.front().name + "/";
+}
 
 /*
  * Platform dispatch for the four pickers.
@@ -1426,10 +1986,10 @@ static std::filesystem::path PathFromUtf8(const std::string& text)
  * installed, the text field remains the only way to set a path, exactly as before.
  */
 #if defined(__APPLE__)
-static bool BrowseFolder(SDL_Window* window, std::string& path) { return OSXFileDialogs::BrowseFolder(window, path); }
-static bool BrowseSettingsFile(SDL_Window* window, std::string& path) { return OSXFileDialogs::BrowseSettingsFile(window, path); }
-static bool BrowseImageFile(SDL_Window* window, std::string& path) { return OSXFileDialogs::BrowseImageFile(window, path); }
-static bool BrowseSaveFile(SDL_Window* window, std::string& path) { return OSXFileDialogs::BrowseSaveFile(window, path); }
+static bool BrowseFolder(OSD::Platform::Window* window, std::string& path) { return OSXFileDialogs::BrowseFolder(nullptr, path); }
+static bool BrowseSettingsFile(OSD::Platform::Window* window, std::string& path) { return OSXFileDialogs::BrowseSettingsFile(nullptr, path); }
+static bool BrowseImageFile(OSD::Platform::Window* window, std::string& path) { return OSXFileDialogs::BrowseImageFile(nullptr, path); }
+static bool BrowseSaveFile(OSD::Platform::Window* window, std::string& path) { return OSXFileDialogs::BrowseSaveFile(nullptr, path); }
 #elif !defined(_WIN32)
 enum class DialogTool { None, Zenity, KDialog };
 
@@ -1494,7 +2054,7 @@ static bool BrowseWithDialog(const std::string& command, std::string& path)
     return true;
 }
 
-static bool BrowseFolder(SDL_Window*, std::string& path)
+static bool BrowseFolder(OSD::Platform::Window*, std::string& path)
 {
     const DialogTool tool = DetectDialogTool();
     const std::string title = Tr("选择 Model 3 ROM 目录");
@@ -1514,7 +2074,7 @@ static bool BrowseFolder(SDL_Window*, std::string& path)
     return false;
 }
 
-static bool BrowseSettingsFile(SDL_Window*, std::string& path)
+static bool BrowseSettingsFile(OSD::Platform::Window*, std::string& path)
 {
     const DialogTool tool = DetectDialogTool();
     const std::string title = Tr("选择要载入的设置文件");
@@ -1530,7 +2090,7 @@ static bool BrowseSettingsFile(SDL_Window*, std::string& path)
     return false;
 }
 
-static bool BrowseImageFile(SDL_Window*, std::string& path)
+static bool BrowseImageFile(OSD::Platform::Window*, std::string& path)
 {
     const DialogTool tool = DetectDialogTool();
     const std::string title = Tr("选择背景图片（仅支持 PNG）");
@@ -1553,11 +2113,15 @@ static bool BrowseImageFile(SDL_Window*, std::string& path)
     return false;
 }
 
-static bool BrowseSaveFile(SDL_Window*, std::string& path)
+static bool BrowseSaveFile(OSD::Platform::Window*, std::string& path)
 {
     const DialogTool tool = DetectDialogTool();
     const std::string title = Tr("设置另存为");
+#if defined(SUPERMODEL_PURE_VULKAN)
+    const std::string suggested = path.empty() ? std::string("Model3-Vulkan.ini") : path;
+#else
     const std::string suggested = path.empty() ? std::string("Supermodel.ini") : path;
+#endif
     if (tool == DialogTool::Zenity)
     {
         return BrowseWithDialog("zenity --file-selection --save --title=" + ShellQuote(title) +
@@ -1583,14 +2147,15 @@ static std::string PathToUtf8(const std::filesystem::path& path)
 #endif
 }
 
-static std::vector<RomEntry> ScanRomFolder(const std::string& folder, const std::map<std::string, Game>& games)
+static std::vector<RomEntry> ScanRomFolder(const std::string& folder, const std::map<std::string, Game>& games,
+    const GameLoader* loader)
 {
     std::vector<RomEntry> entries;
     std::error_code error;
     // A relative setting is anchored to the executable's directory, the same convention the log and
     // the game XML use. Without this, typing a relative path appeared to do nothing unless the
     // program happened to have been started from exactly the right directory.
-    std::filesystem::path directory = PathFromUtf8(FileSystemPath::ResolvePath(folder));
+    std::filesystem::path directory = PathFromUtf8(ResolveRomPath(folder));
     if (folder.empty() || !std::filesystem::is_directory(directory, error))
         return entries;
 
@@ -1608,12 +2173,33 @@ static std::vector<RomEntry> ScanRomFolder(const std::string& folder, const std:
         RomEntry entry;
         entry.path = PathToUtf8(item.path());
         entry.setName = PathToUtf8(item.path().stem());
+
+        /*
+         * Identify the archive by its contents rather than by its name.
+         *
+         * GameLoader picks the set from the CRC32s inside the zip, so a file called scud.zip can run
+         * - and save as - the Australian scudau revision, and a perfectly good set can sit under a
+         * name Games.xml has never heard of. Listing rows by file name made the first case start the
+         * wrong game without saying so, and marked the second case unstartable when it was not.
+         */
+        Game identified;
+        const bool identifiedByContent = loader != nullptr
+            && !loader->Identify(&identified, entry.path) && !identified.name.empty();
+
         auto found = byName.find(ToLowerAscii(entry.setName));
-        if (found != byName.end())
+        if (identifiedByContent)
         {
+            entry.resolvedSet = identified.name;
+            entry.title = identified.title.empty() ? identified.name : identified.title;
+            entry.version = identified.version;
+            entry.year = identified.year;
+            entry.supported = true;
+        }
+        else if (found != byName.end())
+        {
+            entry.resolvedSet = found->second->name;
             entry.title = found->second->title.empty() ? entry.setName : found->second->title;
             entry.version = found->second->version;
-            entry.setName = found->second->name;
             entry.year = found->second->year;
             entry.supported = true;
         }
@@ -1621,15 +2207,22 @@ static std::vector<RomEntry> ScanRomFolder(const std::string& folder, const std:
         {
             entry.title = entry.setName;
         }
+
+        // Support-visible: a row whose file name says one thing and whose contents say another is the
+        // most confusing thing this list can show, and nothing else leaves a trace of it.
+        if (identifiedByContent && ToLowerAscii(entry.resolvedSet) != ToLowerAscii(entry.setName))
+        {
+            const std::string label = entry.version.empty() ? entry.title : entry.title + " (" + entry.version + ")";
+            InfoLog("GUI: '%s' holds set '%s' - %s.", entry.setName.c_str(), entry.resolvedSet.c_str(), label.c_str());
+        }
         entries.push_back(std::move(entry));
     }
 
     // Supported sets first, then the rest, each group alphabetical.
     //
-    // Sorting purely by name would scatter the unsupported sets through the list next to the working
-    // version of the same game - scuda would sit right beside 飞弹赛车 - which reads as though the
-    // list were inconsistent. Gathering them at the bottom keeps the alphabetical run of playable
-    // games intact and makes the unusable ones easy to skip.
+    // Sorting purely by name would scatter the unrecognised archives through the list next to the
+    // working version of the same game, which reads as though the list were inconsistent. Gathering
+    // them at the bottom keeps the alphabetical run of playable games intact.
     std::sort(entries.begin(), entries.end(), [](const RomEntry& a, const RomEntry& b) {
         if (a.supported != b.supported)
             return a.supported;
@@ -1651,8 +2244,8 @@ static std::vector<RomEntry> ScanRomFolder(const std::string& folder, const std:
         else if (std::string(TrGameTitle(entry.title.c_str())) != entry.title)
             ++translated;
     }
-    InfoLog("GUI: %d ROM(s) listed, %d title(s) translated for the current language, %d without a definition in %s.",
-        (int)entries.size(), translated, unsupported, "Games.xml");
+    InfoLog("GUI: %d ROM(s) listed, %d title(s) translated for the current language, %d with no identifiable set.",
+        (int)entries.size(), translated, unsupported);
 
     return entries;
 }
@@ -1662,7 +2255,7 @@ static void RefreshRoms(const std::string& folder, const std::map<std::string, G
     if (folder == g_romFolderCached)
         return;
     g_romFolderCached = folder;
-    g_roms = ScanRomFolder(folder, games);
+    g_roms = ScanRomFolder(folder, games, g_gameLoader);
 }
 
 /*
@@ -1675,12 +2268,43 @@ static void RefreshRoms(const std::string& folder, const std::map<std::string, G
  */
 struct BoxartTexture
 {
-    unsigned texture = 0;
+    // ImTextureID is a GL texture name on the SDL2/OpenGL build and a Vulkan
+    // descriptor set on the Pure-Vulkan build.  Both are 64-bit values, and the
+    // ImGui draw code treats them as opaque either way.
+    ImTextureID texture = 0;
     int width = 0;
     int height = 0;
 };
 
 static std::map<std::string, BoxartTexture> g_boxartTextures;
+
+/*
+ * Whether a frame has actually reached the screen since the interface started.
+ *
+ * The start-up artwork covers the window until this is true: the window exists but showing it before
+ * a frame has been presented is what caused the black flash this picture replaced. Reset by
+ * GuiCreate(), set by GUI() (Vulkan, which presents from inside the draw function) or by
+ * GuiRunOnce() (OpenGL, which swaps after it).
+ */
+static bool g_guiFramePresented = false;
+
+#if defined(SUPERMODEL_PURE_VULKAN)
+    /*
+     * Set when a frame could not even acquire an image, so nothing was drawn or presented.
+     *
+     * GuiRunOnce() uses it as the trigger for revealing the window while the start-up artwork is still
+     * up: the window is kept hidden until a frame has been presented so nothing empty is ever on
+     * screen, but a driver that refuses to hand out an image for a hidden window would then never get
+     * a frame at all. Seeing this flag is the only reliable way to tell the two cases apart.
+     */
+static bool g_guiFrameSkipped = false;
+#endif
+
+#if defined(SUPERMODEL_PURE_VULKAN)
+// The settings window's Vulkan host.  One window, one backend, set by
+// GuiCreate() and cleared by GuiDestroy().
+static OSD::SDL3App::UiVulkanBackend* g_uiVulkan = nullptr;
+#endif
 
 #ifdef _WIN32
 /*
@@ -1690,7 +2314,7 @@ static std::map<std::string, BoxartTexture> g_boxartTextures;
  * image is scaled while still on the CPU: the files are around 512x700, but the preview only ever
  * draws them about 200 pixels tall and there are dozens of them.
  */
-static bool DecodeBoxart(const std::filesystem::path& path, int maxWidth, std::vector<uint8_t>& pixels, int& width, int& height)
+static bool DecodeBoxartWIC(const std::filesystem::path& path, int maxWidth, std::vector<uint8_t>& pixels, int& width, int& height)
 {
     // WIC is COM-based. The settings window has not necessarily initialised COM on this thread,
     // and repeated calls must not fail: S_FALSE means "already initialised" and
@@ -1732,7 +2356,7 @@ static bool DecodeBoxart(const std::filesystem::path& path, int maxWidth, std::v
         const long rounded = std::lround(sourceHeight * (double)scaledWidth / (double)sourceWidth);
         const UINT scaledHeight = (UINT)(std::max)(1L, rounded);
         if (SUCCEEDED(factory->CreateBitmapScaler(&scaler)) &&
-            SUCCEEDED(scaler->Initialize(frame, scaledWidth, scaledHeight, WICBitmapInterpolationModeCubic)))
+            SUCCEEDED(scaler->Initialize(frame, scaledWidth, scaledHeight, WICBitmapInterpolationModeHighQualityCubic)))
         {
             source = scaler;
         }
@@ -1770,6 +2394,119 @@ static bool DecodeBoxart(const std::filesystem::path& path, int maxWidth, std::v
         scaler->Release();
     frame->Release();
     decoder->Release();
+    return ok;
+}
+
+/*
+ * Fallback decoder: the vendored libwebp in Src/Pkgs/webp.
+ *
+ * WIC reads WebP only when the "Webp Image Extensions" package is installed. A machine without it
+ * refused every cover, silently, which looked exactly like a missing folder. The bundled decoder has
+ * no such dependency, so the covers work on a clean Windows install. Its C paths are slower than the
+ * SIMD ones WIC uses, which does not matter for one 512x700 picture decoded per selected game.
+ */
+static bool DecodeBoxartWithLibwebp(const std::filesystem::path& path, int maxWidth,
+    std::vector<uint8_t>& pixels, int& width, int& height)
+{
+    std::ifstream file(path, std::ios::binary);
+    if (!file)
+        return false;
+    const std::vector<uint8_t> encoded((std::istreambuf_iterator<char>(file)),
+        std::istreambuf_iterator<char>());
+    if (encoded.empty())
+        return false;
+
+    int sourceWidth = 0;
+    int sourceHeight = 0;
+    uint8_t *decoded = WebPDecodeRGBA(encoded.data(), encoded.size(), &sourceWidth, &sourceHeight);
+    if (decoded == nullptr || sourceWidth <= 0 || sourceHeight <= 0)
+    {
+        if (decoded != nullptr)
+            WebPFree(decoded);
+        return false;
+    }
+
+    width = sourceWidth;
+    height = sourceHeight;
+    if (maxWidth > 0 && sourceWidth > maxWidth)
+    {
+        width = maxWidth;
+        height = (std::max)(1, (int)std::lround(sourceHeight * (double)maxWidth / (double)sourceWidth));
+    }
+
+    if (width == sourceWidth && height == sourceHeight)
+    {
+        pixels.assign(decoded, decoded + (size_t)sourceWidth * (size_t)sourceHeight * 4);
+        WebPFree(decoded);
+        return true;
+    }
+
+    // Bilinear, sampled at pixel centres - the same job the WIC path hands to its scaler.
+    pixels.resize((size_t)width * (size_t)height * 4);
+    for (int y = 0; y < height; ++y)
+    {
+        const double sampleY = ((y + 0.5) * sourceHeight / height) - 0.5;
+        int y0 = (int)std::floor(sampleY);
+        double fy = sampleY - y0;
+        if (y0 < 0)
+        {
+            y0 = 0;
+            fy = 0.0;
+        }
+        const int y1 = (std::min)(y0 + 1, sourceHeight - 1);
+
+        for (int x = 0; x < width; ++x)
+        {
+            const double sampleX = ((x + 0.5) * sourceWidth / width) - 0.5;
+            int x0 = (int)std::floor(sampleX);
+            double fx = sampleX - x0;
+            if (x0 < 0)
+            {
+                x0 = 0;
+                fx = 0.0;
+            }
+            const int x1 = (std::min)(x0 + 1, sourceWidth - 1);
+
+            const uint8_t *p00 = decoded + ((size_t)y0 * sourceWidth + x0) * 4;
+            const uint8_t *p10 = decoded + ((size_t)y0 * sourceWidth + x1) * 4;
+            const uint8_t *p01 = decoded + ((size_t)y1 * sourceWidth + x0) * 4;
+            const uint8_t *p11 = decoded + ((size_t)y1 * sourceWidth + x1) * 4;
+            uint8_t *out = &pixels[((size_t)y * width + x) * 4];
+
+            for (int channel = 0; channel < 4; ++channel)
+            {
+                const double top = p00[channel] + (p10[channel] - p00[channel]) * fx;
+                const double bottom = p01[channel] + (p11[channel] - p01[channel]) * fx;
+                out[channel] = (uint8_t)std::lround(top + (bottom - top) * fy);
+            }
+        }
+    }
+
+    WebPFree(decoded);
+    return true;
+}
+
+static bool DecodeBoxart(const std::filesystem::path& path, int maxWidth, std::vector<uint8_t>& pixels, int& width, int& height)
+{
+    /*
+     * WIC first (it has SIMD paths), the bundled decoder only when WIC refuses the file.
+     *
+     * SM3D_BOXART_DECODER=wic|webp forces one of them, which is the only way to exercise the
+     * fallback on a machine that does have the Windows WebP codec. Purely diagnostic.
+     */
+    const char *forced = std::getenv("SM3D_BOXART_DECODER");
+    const bool tryWic = forced == nullptr || _stricmp(forced, "webp") != 0;
+    const bool tryWebp = forced == nullptr || _stricmp(forced, "wic") != 0;
+
+    if (tryWic && DecodeBoxartWIC(path, maxWidth, pixels, width, height))
+        return true;
+    if (!tryWebp)
+        return false;
+
+    const bool ok = DecodeBoxartWithLibwebp(path, maxWidth, pixels, width, height);
+    if (ok)
+        InfoLog("Boxart: '%s' decoded with the bundled libwebp decoder.",
+            path.filename().string().c_str());
     return ok;
 }
 #elif defined(__APPLE__)
@@ -1910,6 +2647,130 @@ static bool DecodeBoxart(const std::filesystem::path& path, int maxWidth,
 #endif
 
 /*
+ * Decodes PNG/WebP bytes returned by the C# save-state list.  WIC takes a
+ * filename in the existing boxart path, so the bytes go through a short-lived
+ * temp file; this is a cold path and avoids duplicating the WIC stream setup.
+ * Returns true on success.
+ */
+static bool DecodeImageBytes(const uint8_t* data, size_t size, int maxWidth,
+    std::vector<uint8_t>& pixels, int& width, int& height)
+{
+    if (data == nullptr || size == 0)
+        return false;
+
+#if !defined(_WIN32) && !defined(__APPLE__)
+    /*
+     * DecodeBoxart() on Linux is a libwebp decoder, while save-state thumbnails are PNG (the
+     * renderer's capture path). Util/PNGFile.h is header-only and uses zlib, which the Unix build
+     * already links, so this is what makes save cards and the in-game overlay preview work there.
+     * Windows (WIC) and macOS (ImageIO) keep the platform decoders, which also resize for us.
+     */
+    static const uint8_t pngSignature[8] = { 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A };
+    if (size >= sizeof(pngSignature) && std::memcmp(data, pngSignature, sizeof(pngSignature)) == 0)
+    {
+        std::vector<uint8_t> decoded;
+        uint32_t decodedWidth = 0;
+        uint32_t decodedHeight = 0;
+        if (Util::PNG::DecodeRGBA(data, size, decoded, decodedWidth, decodedHeight, nullptr) &&
+            decodedWidth > 0 && decodedHeight > 0 && !decoded.empty())
+        {
+            if (maxWidth > 0 && decodedWidth > static_cast<uint32_t>(maxWidth))
+            {
+                // Nearest-neighbour is enough for a UI thumbnail and keeps this path free of a
+                // second resampler; the GPU filters it again when the card is drawn.
+                const uint32_t targetWidth = static_cast<uint32_t>(maxWidth);
+                const uint32_t targetHeight = (std::max)(1u, decodedHeight * targetWidth / decodedWidth);
+                std::vector<uint8_t> scaled(static_cast<size_t>(targetWidth) * targetHeight * 4);
+                for (uint32_t y = 0; y < targetHeight; ++y)
+                {
+                    const uint32_t sy = y * decodedHeight / targetHeight;
+                    for (uint32_t x = 0; x < targetWidth; ++x)
+                    {
+                        const uint32_t sx = x * decodedWidth / targetWidth;
+                        std::memcpy(&scaled[(static_cast<size_t>(y) * targetWidth + x) * 4],
+                            &decoded[(static_cast<size_t>(sy) * decodedWidth + sx) * 4], 4);
+                    }
+                }
+                decoded.swap(scaled);
+                decodedWidth = targetWidth;
+                decodedHeight = targetHeight;
+            }
+            pixels.swap(decoded);
+            width = static_cast<int>(decodedWidth);
+            height = static_cast<int>(decodedHeight);
+            return true;
+        }
+        // A PNG this decoder rejects (interlaced, unusual bit depth) still goes to the temp-file
+        // path, which is a no-op on Linux but keeps one fallback for every platform.
+    }
+#endif
+
+    std::error_code error;
+    const std::filesystem::path temporary =
+        std::filesystem::temp_directory_path(error) / "supermodel-hostcore-thumb.png";
+    if (error)
+        return false;
+
+    {
+        std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+        if (!out)
+            return false;
+        out.write(reinterpret_cast<const char*>(data), (std::streamsize)size);
+        if (!out)
+            return false;
+    }
+
+    const bool decoded = DecodeBoxart(temporary, maxWidth, pixels, width, height);
+    std::filesystem::remove(temporary, error);
+    return decoded;
+}
+
+bool GuiDecodeImageBytes(const uint8_t* data, size_t size, int maxWidth,
+    std::vector<uint8_t>& pixels, int& width, int& height)
+{
+    return DecodeImageBytes(data, size, maxWidth, pixels, width, height);
+}
+
+/*
+ * Logged once per session, before the first cover is looked up.
+ *
+ * "The covers do not show" has three causes that look identical from the interface: the folder is
+ * not where the executable expects it, the file for that set is missing, or the decoder refused the
+ * file. The first is answered by the path and the file count here; the other two by a line per set
+ * in LoadBoxart().
+ */
+static void LogBoxartDirectory()
+{
+    static bool logged = false;
+    if (logged)
+        return;
+    logged = true;
+
+    const std::filesystem::path directory =
+        PathFromUtf8(FileSystemPath::GetPath(FileSystemPath::Assets)) / "Boxarts";
+    std::error_code error;
+    std::filesystem::directory_iterator it(directory, error);
+    if (error)
+    {
+        ErrorLog("Boxarts: cannot read '%s' (%s); covers will not be shown.",
+            directory.string().c_str(), error.message().c_str());
+        return;
+    }
+
+    std::size_t count = 0;
+    for (const auto& entry : it)
+    {
+        std::error_code entryError;
+        if (entry.is_regular_file(entryError) && entry.path().extension() == ".webp")
+            ++count;
+    }
+    InfoLog("Boxarts: %zu file(s) in '%s'.", count, directory.string().c_str());
+    if (count == 0)
+        ErrorLog("Boxarts: no .webp files found; the covers will not be shown. The release package "
+            "puts them in Data/Assets/Boxarts next to the executable.");
+}
+
+/*
  * Returns the cover texture for a set, creating it on first use.
  *
  * Called only from GUI(), which runs with the settings window's OpenGL context current, so the
@@ -1925,19 +2786,45 @@ static BoxartTexture LoadBoxart(const std::string& setName)
     BoxartTexture result;
     g_boxartTextures.emplace(setName, result);
 
+    LogBoxartDirectory();
+
     const std::filesystem::path path = PathFromUtf8(FileSystemPath::GetPath(FileSystemPath::Assets)) /
         "Boxarts" / (setName + ".webp");
     std::error_code error;
     if (!std::filesystem::is_regular_file(path, error))
+    {
+        InfoLog("Boxart: '%s' not found ('%s').", setName.c_str(), path.string().c_str());
         return result;
+    }
 
-#if defined(_WIN32) || defined(__APPLE__) || defined(__linux__)
     std::vector<uint8_t> pixels;
     int width = 0;
     int height = 0;
     if (!DecodeBoxart(path, 384, pixels, width, height) || pixels.empty())
+    {
+        /*
+         * On Windows this is almost always the missing WebP decoder rather than a corrupt file:
+         * WIC only knows WebP when the 'Webp Image Extensions' package is installed, and a machine
+         * without it refuses every one of these files. Said here because the failure is otherwise
+         * completely silent - the preview simply has no picture in it.
+         */
+        ErrorLog("Boxart: '%s' could not be decoded ('%s') by either WIC or the bundled libwebp "
+            "decoder; the file is probably not a WebP picture.",
+            setName.c_str(), path.string().c_str());
         return result;
+    }
 
+#if defined(SUPERMODEL_PURE_VULKAN)
+    if (g_uiVulkan == nullptr)
+        return result;
+    auto texture = g_uiVulkan->AddTexture(pixels.data(), width, height);
+    if (!texture)
+    {
+        ErrorLog("GUI: cover '%s' could not be uploaded: %s", setName.c_str(), texture.error().c_str());
+        return result;
+    }
+    result.texture = *texture;
+#else
     GLuint texture = 0;
     glGenTextures(1, &texture);
     glBindTexture(GL_TEXTURE_2D, texture);
@@ -1949,11 +2836,12 @@ static BoxartTexture LoadBoxart(const std::string& setName)
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    result.texture = texture;
+    result.texture = (ImTextureID)(intptr_t)texture;
+#endif
+
     result.width = width;
     result.height = height;
     g_boxartTextures[setName] = result;
-#endif
 
     return result;
 }
@@ -1962,8 +2850,15 @@ static void ReleaseBoxartTextures()
 {
     for (auto& item : g_boxartTextures)
     {
-        if (item.second.texture != 0)
-            glDeleteTextures(1, &item.second.texture);
+        if (item.second.texture == 0)
+            continue;
+#if defined(SUPERMODEL_PURE_VULKAN)
+        if (g_uiVulkan != nullptr)
+            g_uiVulkan->RemoveTexture(item.second.texture);
+#else
+        GLuint texture = (GLuint)(intptr_t)item.second.texture;
+        glDeleteTextures(1, &texture);
+#endif
     }
     g_boxartTextures.clear();
 }
@@ -2048,8 +2943,27 @@ static const char* GameBlurb(const std::string& setName)
  */
 static void DrawGamePreview(const RomEntry* entry, float width, float height)
 {
-    ImGui::BeginChild("GamePreview", ImVec2(width, height), ImGuiChildFlags_Borders,
-        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    /*
+     * A recessed panel rather than an ImGui child background.
+     *
+     * The preview sits inside the left column's sheet of glass, and a second opaque background there
+     * would hide the blur the sheet exists to show. The well is a translucent dark rectangle with no
+     * backdrop and no rim: a highlight on a recess reads as a raised edge, which is the opposite of
+     * what it is for. The classic theme has no glass, so it keeps its ordinary bordered child.
+     */
+    const bool classic = UiThemeIsClassic();
+    ImGui::BeginChild("GamePreview", ImVec2(width, height),
+        classic ? ImGuiChildFlags_Borders : ImGuiChildFlags_AlwaysUseWindowPadding,
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+            (classic ? 0 : ImGuiWindowFlags_NoBackground));
+    if (!classic)
+    {
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        const ImVec2 origin = ImGui::GetWindowPos();
+        const ImVec2 size = ImGui::GetWindowSize();
+        UiFrost::Plate(draw, 0, origin, ImVec2(origin.x + size.x, origin.y + size.y),
+            ImGui::GetStyle().ChildRounding, UiFrost::Surface::Well);
+    }
     if (entry == nullptr)
     {
         UiTextDim("把鼠标移到游戏上，或单击选中，这里会显示封面和英文简介。");
@@ -2057,7 +2971,7 @@ static void DrawGamePreview(const RomEntry* entry, float width, float height)
         return;
     }
 
-    const BoxartTexture art = LoadBoxart(entry->setName);
+    const BoxartTexture art = LoadBoxart(EffectiveSet(*entry));
     const bool hasImage = art.texture != 0;
     const ImVec2 available = ImGui::GetContentRegionAvail();
 
@@ -2105,7 +3019,7 @@ static void DrawGamePreview(const RomEntry* entry, float width, float height)
 
     // An unrecognised set is named after its .zip and may share a prefix with a real title, so the
     // blurb table is only consulted for sets Games.xml actually defines.
-    const char* blurb = entry->supported ? GameBlurb(entry->setName) : nullptr;
+    const char* blurb = entry->supported ? GameBlurb(EffectiveSet(*entry)) : nullptr;
     if (blurb != nullptr)
     {
         ImGui::Spacing();
@@ -2117,7 +3031,7 @@ static void DrawGamePreview(const RomEntry* entry, float width, float height)
     }
     else if (!entry->supported)
     {
-        UiTextDim("这个 ROM 集在 Games.xml 里没有定义。");
+        UiTextDim("没能从这个包里认出 Model 3 游戏（可能缺文件）。");
     }
     else
     {
@@ -2128,6 +3042,928 @@ static void DrawGamePreview(const RomEntry* entry, float width, float height)
     ImGui::EndChild();
 }
 
+/*
+ * Interface scale.
+ *
+ * Same rule the settings window uses: everything that is a number of pixels rather than a font
+ * metric has to grow with the text, or the layout drifts apart at high DPI. Defined outside the
+ * pure-Vulkan block because the settings window itself uses it on both backends. The save cards
+ * size their thumbnails from it so a picture stays in proportion with its title and buttons.
+ */
+static float UiScale()
+{
+    return (std::max)(1.0f, ImGui::GetFontSize() / 18.0f);
+}
+
+#if defined(SUPERMODEL_PURE_VULKAN)
+/*
+ * Save manager.
+ *
+ * The list, metadata, ZIP container and rename operation live in the C#
+ * Native AOT module; this file only owns the ImGui presentation and the
+ * Vulkan textures for the thumbnails.
+ */
+
+struct SaveCard
+{
+    HostSaveMeta meta{};
+    std::filesystem::path path;
+    std::vector<uint8_t> thumbnail;
+    ImTextureID texture = 0;
+    int width = 0;
+    int height = 0;
+};
+
+static bool g_manageSavesOpen = false;
+// Set once the popup has actually been drawn. Used to tell "the popup has not appeared yet" (the
+// frame between OpenManageSaves() and the deferred OpenPopup) from "the popup went away" (Escape).
+static bool g_manageSavesDrawn = false;
+static std::string g_manageSavesGame;
+// The row the manager was opened from. Usually the same as g_manageSavesGame, but a merged archive
+// resolves to the regional set inside it (see OpenManageSaves), and only the row can select the game.
+static std::string g_manageSavesRow;
+static std::filesystem::path g_manageSavesDirectory;
+static std::vector<SaveCard> g_saveCards;
+// Legacy .st files found for the set the manager is open for. They are deliberately not listed as
+// cards (the manager is the .zst view), but a set that only has them must not look empty.
+static int g_manageSavesLegacyCount = 0;
+// Other set names that have containers in the same folder, with their save counts. Shown only when
+// the current set has none, because the usual reason is that the player opened the manager for a
+// different regional release than the one they actually played.
+static std::vector<std::pair<std::string, int>> g_manageSavesOtherSets;
+static std::string g_manageSavesError;
+static int g_saveRenameIndex = -1;
+// Card whose rename box should take the keyboard on its next frame.
+static int g_saveRenameFocus = -1;
+static char g_saveRenameBuffer[160] = {};
+static std::filesystem::path g_pendingVkState;
+// Developer hook: path the manager should auto-load on the next drawn frame.
+static std::string g_autoLoadSave;
+// Card waiting for the second click of the delete confirmation. -1 when no card is confirming.
+static int g_saveDeleteIndex = -1;
+// Container to remove after the card table has been drawn: deleting inside the loop would invalidate
+// the SaveCard reference the loop is holding.
+static std::filesystem::path g_pendingSaveDelete;
+
+/*
+ * Where a game's saves live.
+ *
+ * The container keeps the classic slot-file layout: every game's states sit in the shared Saves
+ * folder as <set>.zst<slot>, next to the <set>.st<slot> files the emulator has always written.  The
+ * manager therefore scans that folder and keeps the entries that belong to this set, rather than
+ * using a per-game subfolder - otherwise a state saved in-game would not show up here.
+ */
+static std::filesystem::path SaveFolder()
+{
+    return std::filesystem::path(FileSystemPath::GetPath(FileSystemPath::SavePathType()));
+}
+
+/*
+ * Supermodel-LegacyOG.exe's save folder. The manager itself only writes .zst containers to
+ * SaveFolder(), but "Import legacy .st" also looks here so the two executables' saves can be
+ * brought together without the player moving files by hand.
+ */
+static std::filesystem::path LegacySaveFolder()
+{
+    return std::filesystem::path(FileSystemPath::GetPath(FileSystemPath::SavesLegacy));
+}
+
+/*
+ * Whether a container belongs to a set.
+ *
+ * Slot containers are <set>.zst<slot>. The first builds used <set>.vkstate (and the module still
+ * lists that pattern), so the manager has to accept both or those older files stay invisible.
+ */
+static bool SaveNameBelongsToSet(const std::string& name, const std::string& setName)
+{
+    if (name.rfind(setName + ".zst", 0) == 0)
+        return true;
+    return name.rfind(setName + ".vkstate", 0) == 0;
+}
+
+static std::string SetNameFromContainer(const std::string& name)
+{
+    std::size_t marker = name.find(".zst");
+    if (marker == std::string::npos)
+        marker = name.find(".vkstate");
+    return marker == std::string::npos ? std::string() : name.substr(0, marker);
+}
+
+/*
+ * The name the game list shows, for a set name.
+ *
+ * The manager used to be titled with the ROM set ("lamachin"), which is the folder/zip name rather
+ * than anything a player recognises; the list entry carries the real title and its region, and
+ * TrGameTitle() applies the interface language exactly as the list itself does.
+ */
+static std::string GameTitleForSet(const std::string& setName)
+{
+    for (const RomEntry& entry : g_roms)
+    {
+        if (entry.setName == setName)
+        {
+            if (entry.title.empty())
+                break;
+
+            const std::string title = TrGameTitle(entry.title.c_str());
+            return entry.version.empty() ? title : title + " (" + entry.version + ")";
+        }
+    }
+
+    // Sets with saves but no zip of their own are not in the ROM list at all - a regional child set
+    // living inside a merged archive is the usual example - so fall back to the XML definitions.
+    if (g_gameDefinitions != nullptr)
+    {
+        auto found = g_gameDefinitions->find(setName);
+        if (found != g_gameDefinitions->end() && !found->second.title.empty())
+        {
+            const std::string title = TrGameTitle(found->second.title.c_str());
+            return found->second.version.empty() ? title : title + " (" + found->second.version + ")";
+        }
+    }
+    return setName;
+}
+
+static int RomIndexForSet(const std::string& setName)
+{
+    for (int i = 0; i < (int)g_roms.size(); ++i)
+    {
+        if (g_roms[i].setName == setName)
+            return i;
+    }
+    return -1;
+}
+
+static void ReleaseSaveCards()
+{
+    if (g_uiVulkan != nullptr)
+    {
+        for (SaveCard& card : g_saveCards)
+        {
+            if (card.texture != 0)
+                g_uiVulkan->RemoveTexture(card.texture);
+        }
+    }
+    g_saveCards.clear();
+}
+
+static void LoadSaveCards()
+{
+    ReleaseSaveCards();
+    g_manageSavesError.clear();
+    g_manageSavesLegacyCount = 0;
+    g_manageSavesOtherSets.clear();
+    g_saveRenameIndex = -1;
+    g_saveRenameFocus = -1;
+    g_saveDeleteIndex = -1;
+
+    auto bridge = OSD::HostCore::Shared();
+    if (!bridge)
+    {
+        g_manageSavesError = bridge.error().message;
+        return;
+    }
+
+    auto entries = (*bridge)->ListVkStates(g_manageSavesDirectory);
+    if (!entries)
+    {
+        g_manageSavesError = entries.error().message;
+        return;
+    }
+
+    std::map<std::string, int> otherSets;
+    for (OSD::HostCore::SaveEntry& entry : *entries)
+    {
+        const std::string name = entry.path.filename().string();
+
+        // The folder is shared by every game, so keep only the slots that belong to this set.
+        if (!SaveNameBelongsToSet(name, g_manageSavesGame))
+        {
+            const std::string other = SetNameFromContainer(name);
+            if (!other.empty())
+                otherSets[other]++;
+            continue;
+        }
+
+        SaveCard card;
+        card.meta = entry.meta;
+        card.path = std::move(entry.path);
+        card.thumbnail = std::move(entry.thumbnail);
+
+        if (!card.thumbnail.empty() && g_uiVulkan != nullptr)
+        {
+            std::vector<uint8_t> rgba;
+            int width = 0;
+            int height = 0;
+            if (DecodeImageBytes(card.thumbnail.data(), card.thumbnail.size(), 220, rgba, width, height))
+            {
+                auto uploaded = g_uiVulkan->AddTexture(rgba.data(), width, height);
+                if (uploaded)
+                {
+                    card.texture = *uploaded;
+                    card.width = width;
+                    card.height = height;
+                }
+            }
+        }
+
+        g_saveCards.push_back(std::move(card));
+    }
+
+    // Newest first: the card someone wants is almost always the one they just wrote. The stamp is
+    // ISO-8601 with a fixed width, so a plain string comparison orders it correctly.
+    std::stable_sort(g_saveCards.begin(), g_saveCards.end(),
+        [](const SaveCard& a, const SaveCard& b) { return std::strcmp(a.meta.SavedAt, b.meta.SavedAt) > 0; });
+
+    for (const auto& item : otherSets)
+        g_manageSavesOtherSets.emplace_back(item.first, item.second);
+    std::stable_sort(g_manageSavesOtherSets.begin(), g_manageSavesOtherSets.end(),
+        [](const std::pair<std::string, int>& a, const std::pair<std::string, int>& b)
+        {
+            if (a.second != b.second)
+                return a.second > b.second;
+            return a.first < b.first;
+        });
+
+    // Old .st files for this set. They cannot be cards (no metadata, no thumbnail), but the set
+    // having only those is a completely different answer to "where are my saves". Count both
+    // folders: the Vulkan build's own .st fallbacks in Saves, and LegacyOG's new saves in
+    // Saves_Legacy. The same slot name in both counts once.
+    std::map<std::string, bool> legacyNames;
+    for (const std::filesystem::path& folder : { g_manageSavesDirectory, LegacySaveFolder() })
+    {
+        std::error_code directoryError;
+        for (const auto& item : std::filesystem::directory_iterator(folder, directoryError))
+        {
+            if (directoryError || !item.is_regular_file())
+                continue;
+            const std::string name = item.path().filename().string();
+            if (name.rfind(g_manageSavesGame + ".st", 0) == 0)
+                legacyNames[name] = true;
+        }
+    }
+    g_manageSavesLegacyCount = (int)legacyNames.size();
+
+    // Support-visible: "the manager is empty" is otherwise indistinguishable from "the saves are
+    // there but under a different set name", which are very different problems.
+    InfoLog("Manage saves: %zu card(s) for '%s' in '%s' (%d legacy .st, %zu other set(s)).",
+        g_saveCards.size(), g_manageSavesGame.c_str(), g_manageSavesDirectory.string().c_str(),
+        g_manageSavesLegacyCount, g_manageSavesOtherSets.size());
+}
+
+static void OpenManageSaves(const std::string& setName)
+{
+    g_manageSavesRow = setName;
+    g_manageSavesGame = setName;
+
+    /*
+     * Resolve the row's archive the same way the game will.
+     *
+     * Saves are named after the set the emulator actually runs, which GameLoader identifies from the
+     * CRC32s inside the archive rather than from its file name. A zip that opens as scud.zip can
+     * therefore run - and save as - the Australian scudau revision, and the manager would then look
+     * for saves that the session never wrote. Asking the loader answers the question the way the
+     * game will answer it; anything else here is a guess.
+     */
+    if (g_gameLoader != nullptr)
+    {
+        for (const RomEntry& entry : g_roms)
+        {
+            if (entry.setName != setName || entry.path.empty())
+                continue;
+
+            Game resolved;
+            if (!g_gameLoader->Identify(&resolved, entry.path) && !resolved.name.empty())
+                g_manageSavesGame = resolved.name;
+            break;
+        }
+    }
+
+    if (g_manageSavesGame != g_manageSavesRow)
+    {
+        InfoLog("'%s' holds the ROMs of set '%s' (%s); listing that set's saves.", g_manageSavesRow.c_str(),
+            g_manageSavesGame.c_str(), GameTitleForSet(g_manageSavesGame).c_str());
+    }
+
+    g_manageSavesDirectory = SaveFolder();
+    LoadSaveCards();
+    g_manageSavesOpen = true;
+    g_manageSavesDrawn = false;
+    g_pendingPopup = "###ManageSaves";
+}
+
+/*
+ * A legacy .st file records nothing about when it was written, so its modification time is used as
+ * the save stamp. Stored in the same ISO-8601 UTC form a fresh save uses, which keeps the cards
+ * sortable and lets FormatSaveTime() present it in local time.
+ */
+static std::string IsoTimestamp(const std::filesystem::file_time_type& fileTime)
+{
+    const auto systemTime = std::chrono::clock_cast<std::chrono::system_clock>(fileTime);
+    const std::time_t stamp = std::chrono::system_clock::to_time_t(systemTime);
+
+    std::tm utc = {};
+#if defined(_WIN32)
+    if (gmtime_s(&utc, &stamp) != 0)
+        return {};
+#else
+    if (gmtime_r(&stamp, &utc) == nullptr)
+        return {};
+#endif
+
+    char buffer[32];
+    std::snprintf(buffer, sizeof(buffer), "%04d-%02d-%02dT%02d:%02d:%02dZ", utc.tm_year + 1900,
+        utc.tm_mon + 1, utc.tm_mday, utc.tm_hour, utc.tm_min, utc.tm_sec);
+    return buffer;
+}
+
+static void ImportLegacyStates()
+{
+    auto bridge = OSD::HostCore::Shared();
+    if (!bridge)
+    {
+        g_manageSavesError = bridge.error().message;
+        return;
+    }
+
+    /*
+     * Collect the newest .st per slot across both folders first. A slot can exist in Saves (the
+     * Vulkan build's old fallback and pre-split Legacy saves) and in Saves_Legacy (the Legacy
+     * build's current saves); importing them in directory order would let the older one win,
+     * because the first import gives the target .zst a fresh timestamp.
+     */
+    struct LegacyCandidate
+    {
+        std::filesystem::path source;
+        std::filesystem::file_time_type written{};
+        bool hasTime = false;
+    };
+    std::map<std::string, LegacyCandidate> candidates;
+
+    const std::filesystem::path sources[] = {
+        std::filesystem::path(FileSystemPath::GetPath(FileSystemPath::Saves)),
+        LegacySaveFolder()
+    };
+    for (const std::filesystem::path& source : sources)
+    {
+        std::error_code error;
+        for (const auto& item : std::filesystem::directory_iterator(source, error))
+        {
+            if (error || !item.is_regular_file())
+                continue;
+
+            const std::string name = item.path().filename().string();
+            const std::string prefix = g_manageSavesGame + ".st";
+            if (name.rfind(prefix, 0) != 0)
+                continue;
+
+            // Slot naming mirrors the legacy files: "daytona2.st1" becomes "daytona2.zst1", so the
+            // slot survives the conversion and the two names differ by a single letter.
+            const std::string slot = name.substr(prefix.size());
+            const std::string targetName = g_manageSavesGame + ".zst" + slot;
+
+            std::error_code timeError;
+            const std::filesystem::file_time_type written =
+                std::filesystem::last_write_time(item.path(), timeError);
+            auto existing = candidates.find(targetName);
+            const bool newer = existing == candidates.end() ||
+                (!timeError && (!existing->second.hasTime || written > existing->second.written));
+            if (newer)
+            {
+                LegacyCandidate candidate;
+                candidate.source = item.path();
+                candidate.written = written;
+                candidate.hasTime = !timeError;
+                candidates[targetName] = std::move(candidate);
+            }
+        }
+    }
+
+    int imported = 0;
+    for (const auto& candidate : candidates)
+    {
+        const std::string& targetName = candidate.first;
+        const LegacyCandidate& source = candidate.second;
+
+        HostSaveMeta meta = {};
+        meta.StructSize = sizeof(HostSaveMeta);
+        std::snprintf(meta.GameName, sizeof(meta.GameName), "%s", g_manageSavesGame.c_str());
+        std::snprintf(meta.Title, sizeof(meta.Title), "%s", targetName.c_str());
+        std::snprintf(meta.Version, sizeof(meta.Version), "%s", SUPERMODEL_FORK_VERSION);
+
+        // A legacy .st carries no metadata, so the file's own timestamp is the only record of when
+        // it was written. Without this the imported card would show no date at all and sort last.
+        if (source.hasTime)
+            std::snprintf(meta.SavedAt, sizeof(meta.SavedAt), "%s", IsoTimestamp(source.written).c_str());
+
+        const std::filesystem::path target = g_manageSavesDirectory / targetName;
+
+        /*
+         * Do not replace a newer .zst with an older .st just because the import button was
+         * pressed: with the split folders a slot can hold a Vulkan save (newer) and a Legacy
+         * save (older) at the same time. An .st that is newer than the card still wins, which
+         * is what re-importing after a Legacy session is for.
+         */
+        std::error_code targetError;
+        const std::filesystem::file_time_type targetTime =
+            std::filesystem::last_write_time(target, targetError);
+        if (source.hasTime && !targetError && targetTime >= source.written)
+            continue;
+
+        auto converted = (*bridge)->ConvertLegacyState(source.source, target, meta);
+        if (converted)
+            ++imported;
+        else
+            g_manageSavesError = converted.error().message;
+    }
+
+    if (imported > 0)
+        LoadSaveCards();
+}
+
+/*
+ * Save stamps are stored as ISO-8601 UTC, which is unambiguous and sorts correctly but reads as
+ * machine output. The cards show local time to the minute: two saves within the same minute are
+ * rare, and the full "2026-10-21T16:59:44Z" does not fit the card width.
+ */
+static std::string FormatSaveTime(const char* iso, const char* fallback)
+{
+    if (iso == nullptr || *iso == '\0')
+        return fallback;
+
+    std::tm utc = {};
+    if (std::sscanf(iso, "%d-%d-%dT%d:%d:%d", &utc.tm_year, &utc.tm_mon, &utc.tm_mday, &utc.tm_hour,
+            &utc.tm_min, &utc.tm_sec) != 6)
+        return iso;
+
+    utc.tm_year -= 1900;
+    utc.tm_mon -= 1;
+
+#if defined(_WIN32)
+    const std::time_t stamp = _mkgmtime(&utc);
+    std::tm local = {};
+    if (stamp == (std::time_t)-1 || localtime_s(&local, &stamp) != 0)
+        return iso;
+#else
+    const std::time_t stamp = timegm(&utc);
+    std::tm local = {};
+    if (stamp == (std::time_t)-1 || localtime_r(&stamp, &local) == nullptr)
+        return iso;
+#endif
+
+    char buffer[32];
+    std::snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d", local.tm_year + 1900, local.tm_mon + 1,
+        local.tm_mday, local.tm_hour, local.tm_min);
+    return buffer;
+}
+
+/*
+ * Deletes one save card.
+ *
+ * The manager lists <set>.zst<slot> containers (and the older <set>.vkstate). The emulator also
+ * accepts <set>.st<slot> as a fallback for states written before the container existed, so removing
+ * only the container would leave that file behind: the slot would still look occupied in the in-game
+ * save menu, and "Import legacy .st" would bring the card back. Both are removed.
+ *
+ * Existing slots are never renumbered. The freed number simply becomes the first gap the next save
+ * can use: NextFreeSaveSlot() in Main.cpp scans from the current slot for the lowest unoccupied one,
+ * and the in-game menu lists all sixteen slots including the empty gap.
+ *
+ * Returns true when the container itself is gone. error is filled on failure; a failed legacy
+ * removal is reported but does not keep the card on screen, because the card's own file is gone.
+ */
+static bool DeleteSaveCard(const std::filesystem::path& container, std::string& error)
+{
+    error.clear();
+
+    std::error_code removeError;
+    const bool removed = std::filesystem::remove(container, removeError);
+    if (!removed)
+    {
+        error = Util::Format() << Tr("删除失败") << ": " << container.filename().string();
+        if (removeError)
+            error += Util::Format() << " (" << removeError.message() << ")";
+        return false;
+    }
+
+    InfoLog("Manage saves: deleted '%s'.", container.filename().string().c_str());
+
+    // <set>.zst<slot> has a <set>.st<slot> fallback; <set>.vkstate carries no slot number.
+    const std::string name = container.filename().string();
+    const std::size_t marker = name.find(".zst");
+    if (marker != std::string::npos)
+    {
+        const std::string slot = name.substr(marker + 4);
+        if (!slot.empty() && std::all_of(slot.begin(), slot.end(),
+                [](unsigned char c) { return std::isdigit(c) != 0; }))
+        {
+            const std::filesystem::path legacy =
+                container.parent_path() / (g_manageSavesGame + ".st" + slot);
+            std::error_code legacyError;
+            if (std::filesystem::exists(legacy, legacyError) && !legacyError)
+            {
+                if (std::filesystem::remove(legacy, legacyError) && !legacyError)
+                {
+                    InfoLog("Manage saves: deleted the legacy fallback '%s'.",
+                        legacy.filename().string().c_str());
+                }
+                else
+                {
+                    error = Util::Format() << Tr("删除失败") << ": " << legacy.filename().string();
+                    if (legacyError)
+                        error += Util::Format() << " (" << legacyError.message() << ")";
+                }
+            }
+        }
+    }
+
+    return true;
+}
+
+static void DrawManageSavesModal(int& selectedGameIndex, bool& exit, bool& saveSettings)
+{
+    if (!g_manageSavesOpen)
+        return;
+
+    const ImVec2 displaySize = ImGui::GetIO().DisplaySize;
+    // The manager is a workspace rather than a yes/no dialog, so it takes 75% of the display width
+    // and 85% of its height; the game list and the settings tabs stay visible around it.  The taller
+    // box fits one more row of save cards now that the quick-save menu offers sixteen slots.
+    //
+    // The size is re-applied every frame rather than only when the popup appears: the module is not
+    // resizable (see NoResize below), and this also keeps the 75% relationship when the settings
+    // window itself is resized. Leaving the old grip enabled once let a drag shrink the window until
+    // the cards were a few pixels tall and nothing could be read or clicked.
+    ImGui::SetNextWindowSize(ImVec2(displaySize.x * 0.75f, displaySize.y * 0.85f), ImGuiCond_Always);
+    bool open = true;
+    // The "###" suffix resets the hash, so the popup keeps the same identity while the part before it
+    // stays visible and can follow the interface language. Opening it under one id and looking it up
+    // under another is silent: the window simply never appears.
+    const std::string popupTitle = std::string(Tr("管理存档")) + " - " + GameTitleForSet(g_manageSavesGame) + "###ManageSaves";
+    if (!ImGui::BeginPopupModal(popupTitle.c_str(), &open, ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoResize))
+    {
+        // A modal closes on Escape without telling the owner, so the flag is cleared here rather than
+        // only in the buttons. Without this the next frame would keep calling BeginPopupModal for a
+        // popup that is no longer on the stack, which silently does nothing - and the "open" state
+        // would then be stale the next time the menu item is chosen.
+        if (g_manageSavesDrawn)
+        {
+            g_manageSavesOpen = false;
+            g_manageSavesDrawn = false;
+        }
+        return;
+    }
+    g_manageSavesDrawn = true;
+
+    UiTextDim("存档目录：%s", g_manageSavesDirectory.string().c_str());
+
+    if (UiButton("刷新"))
+        LoadSaveCards();
+    ImGui::SameLine();
+    if (UiButton("导入旧版 .st"))
+        ImportLegacyStates();
+    ImGui::SameLine();
+    if (UiButton("关闭窗口"))
+        open = false;
+
+    if (!g_manageSavesError.empty())
+        UiTextWarn("%s", g_manageSavesError.c_str());
+
+    if (g_saveCards.empty())
+    {
+        UiTextDim("这个游戏还没有 .zst 存档。游戏内保存后，这里会显示缩略图卡片。");
+
+        if (g_manageSavesLegacyCount > 0)
+        {
+            UiTextDim("这个 set 还有 %d 个旧版 .st 存档（含 LegacyOG 的 Saves_Legacy；这里只列 .zst）；点「导入旧版 .st」即可转换。",
+                g_manageSavesLegacyCount);
+        }
+
+        if (!g_manageSavesOtherSets.empty())
+        {
+            UiTextWarn("这个 set 没有 .zst 存档，但存档目录里还有其他 set 的存档：");
+            std::size_t shown = 0;
+            for (const auto& other : g_manageSavesOtherSets)
+            {
+                if (shown++ >= 8)
+                {
+                    UiTextDim("……");
+                    break;
+                }
+                UiTextDim("  %s（%d 个）", GameTitleForSet(other.first).c_str(), other.second);
+            }
+            UiTextDim("如果你玩的是另一个区域版本，请关闭本窗口，在游戏列表里右键那个版本再打开「管理存档」。");
+        }
+    }
+    else
+    {
+        const ImGuiStyle& style = ImGui::GetStyle();
+
+        /*
+         * Reserve room for the action row before sizing the card.
+         *
+         * At 150% the three buttons plus their padding came to almost the whole content width, so
+         * the row had no margin to distribute: Delete ended up against the right border even though
+         * the row was nominally centred. Measuring the translated labels makes the card wide enough
+         * for the buttons plus an ItemSpacing margin on each side, in both languages and at every
+         * UI scale.
+         */
+        const auto buttonWidth = [&style](const char* label)
+        {
+            return ImGui::CalcTextSize(Tr(label)).x + style.FramePadding.x * 2.0f;
+        };
+        const float actionsWidth = buttonWidth("读取") + buttonWidth("改名") + buttonWidth("删除")
+            + style.ItemSpacing.x * 2.0f;
+        const float confirmWidth = buttonWidth("确认删除") + buttonWidth("取消") + style.ItemSpacing.x;
+        const float actionsContentWidth =
+            (std::max)(actionsWidth, confirmWidth) + style.ItemSpacing.x;
+
+        // The picture is the point of a card, so it scales with the interface instead of staying at a
+        // fixed pixel size while the text around it grows. 480x360 captures cover the largest card
+        // this can produce (a 2x interface) with room to spare.
+        const float imageHeight = (std::min)(150.0f * UiScale(), 320.0f);
+        const float cardWidth = (std::max)({ 280.0f,
+            imageHeight * 4.0f / 3.0f + style.WindowPadding.x * 2.0f,
+            actionsContentWidth + style.WindowPadding.x * 2.0f });
+        const float contentWidth = cardWidth - style.WindowPadding.x * 2.0f;
+        const float lineHeight = ImGui::GetTextLineHeightWithSpacing();
+        // Laid out from the font metrics rather than a fixed 250 px box: the fixed height clipped the
+        // buttons at the default scale and at every DPI above it, and left a scrollbar inside a card.
+        // Two lines for the title, one each for the date and the size, plus the action row. The date
+        // and the size were once combined onto a single line, which did not fit the card width at
+        // the larger interface scales.
+        const float cardHeight = imageHeight + lineHeight * 4.0f + ImGui::GetFrameHeightWithSpacing()
+            + style.WindowPadding.y * 2.0f + 4.0f;
+        const int columns = (std::max)(1, (int)(ImGui::GetContentRegionAvail().x / (cardWidth + 16.0f)));
+
+        if (ImGui::BeginTable("SaveCards", columns, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_ScrollY,
+                ImVec2(0, ImGui::GetContentRegionAvail().y - 8.0f)))
+        {
+            for (int i = 0; i < (int)g_saveCards.size(); ++i)
+            {
+                SaveCard& card = g_saveCards[i];
+                ImGui::TableNextColumn();
+                ImGui::PushID(i);
+                ImGui::BeginChild("##card", ImVec2(cardWidth, cardHeight), ImGuiChildFlags_Borders,
+                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+
+                // Double-clicking anywhere on the card starts a rename. Loading is the explicit
+                // button: a stray click over a card should not throw away the running game.
+                bool beginRename = false;
+                if (card.texture != 0)
+                {
+                    const float imageWidth = imageHeight * (float)card.width / (float)(std::max)(1, card.height);
+                    const ImVec2 size = imageWidth > contentWidth
+                        ? ImVec2(contentWidth, imageHeight * contentWidth / imageWidth)
+                        : ImVec2(imageWidth, imageHeight);
+                    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (contentWidth - size.x) * 0.5f);
+                    ImGui::Image(ImTextureRef(card.texture), size);
+                    beginRename = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0);
+                }
+                else
+                {
+                    // Same total height as the thumbnail so the text below lines up across cards.
+                    ImGui::Dummy(ImVec2(contentWidth, imageHeight - ImGui::GetTextLineHeightWithSpacing()));
+                    const char* placeholder = Tr("无缩略图");
+                    ImGui::SetCursorPosX(ImGui::GetCursorPosX()
+                        + (contentWidth - ImGui::CalcTextSize(placeholder).x) * 0.5f);
+                    ImGui::TextDisabled("%s", placeholder);
+                    beginRename = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0);
+                }
+
+                const std::string title = card.meta.Title[0] != 0 ? std::string(card.meta.Title)
+                                                                 : card.path.filename().string();
+
+                if (g_saveRenameIndex == i)
+                {
+                    // Focus and select the whole title on the frame the editor appears, so the
+                    // keyboard is usable straight after the button press: the box used to come up
+                    // unfocused, which made a rename button look like it had done nothing.
+                    if (g_saveRenameFocus == i)
+                    {
+                        ImGui::SetKeyboardFocusHere();
+                        g_saveRenameFocus = -1;
+                    }
+
+                    ImGui::SetNextItemWidth(-1);
+                    const bool submitted = ImGui::InputText("##newname", g_saveRenameBuffer,
+                        sizeof(g_saveRenameBuffer),
+                        ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+                    if (submitted || UiButton("确定"))
+                    {
+                        auto bridge = OSD::HostCore::Shared();
+                        if (!bridge)
+                            g_manageSavesError = bridge.error().message;
+                        else
+                        {
+                            auto renamed = (*bridge)->RenameVkState(card.path, g_saveRenameBuffer);
+                            if (renamed)
+                            {
+                                std::snprintf(card.meta.Title, sizeof(card.meta.Title), "%s", g_saveRenameBuffer);
+                                g_saveRenameIndex = -1;
+                            }
+                            else
+                                g_manageSavesError = renamed.error().message;
+                        }
+                    }
+                    ImGui::SameLine();
+                    if (UiButton("取消"))
+                        g_saveRenameIndex = -1;
+                }
+                else
+                {
+                    // Two lines are reserved and the rest is clipped, so a long title cannot push
+                    // the buttons out of the card or move them between cards. A title that fits is
+                    // centred with the date and size below it; one that wraps uses the full width.
+                    ImGui::BeginChild("##title", ImVec2(0.0f, lineHeight * 2.0f), ImGuiChildFlags_None,
+                        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+                    const float titleWidth = ImGui::GetContentRegionAvail().x;
+                    const ImVec2 titleExtent = ImGui::CalcTextSize(title.c_str(), nullptr, false, titleWidth);
+                    if (titleExtent.x < titleWidth)
+                        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (titleWidth - titleExtent.x) * 0.5f);
+                    ImGui::TextWrapped("%s", title.c_str());
+                    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))
+                        beginRename = true;
+                    ImGui::EndChild();
+
+                    const std::string savedAt = FormatSaveTime(card.meta.SavedAt, "-");
+                    const float savedAtWidth = ImGui::CalcTextSize(savedAt.c_str()).x;
+                    ImGui::SetCursorPosX(ImGui::GetCursorPosX()
+                        + (std::max)(0.0f, (contentWidth - savedAtWidth) * 0.5f));
+                    ImGui::TextDisabled("%s", savedAt.c_str());
+
+                    // Large states run to several megabytes, so the unit is picked to keep the line
+                    // inside the card: "5653.0 KB" was clipped on a full 30 MB state.
+                    const double sizeKb = (double)card.meta.FileSize / 1024.0;
+                    char sizeText[32];
+                    if (sizeKb >= 1024.0)
+                        std::snprintf(sizeText, sizeof(sizeText), "%.1f MB", sizeKb / 1024.0);
+                    else
+                        std::snprintf(sizeText, sizeof(sizeText), "%.0f KB", sizeKb);
+                    const float sizeWidth = ImGui::CalcTextSize(sizeText).x;
+                    ImGui::SetCursorPosX(ImGui::GetCursorPosX()
+                        + (std::max)(0.0f, (contentWidth - sizeWidth) * 0.5f));
+                    ImGui::TextDisabled("%s", sizeText);
+                }
+
+                if (beginRename)
+                {
+                    g_saveDeleteIndex = -1;
+                    g_saveRenameIndex = i;
+                    g_saveRenameFocus = i;
+                    std::snprintf(g_saveRenameBuffer, sizeof(g_saveRenameBuffer), "%s", title.c_str());
+                }
+
+                // Pinned to the bottom edge so the buttons form one row across the grid whatever
+                // the title wrapped to, and centred with equal margins on both sides.
+                ImGui::SetCursorPosY(cardHeight - style.WindowPadding.y - ImGui::GetFrameHeight());
+                const float rowWidth = g_saveDeleteIndex == i ? confirmWidth : actionsWidth;
+                ImGui::SetCursorPosX(ImGui::GetCursorPosX()
+                    + (std::max)(0.0f, (contentWidth - rowWidth) * 0.5f));
+                if (g_saveDeleteIndex == i)
+                {
+                    // Two-step delete: the confirm button takes the place Load had, so the second
+                    // click of a double-click on Delete lands on Cancel instead of confirming by
+                    // accident.
+                    if (UiButton("确认删除"))
+                    {
+                        g_pendingSaveDelete = card.path;
+                        g_saveDeleteIndex = -1;
+                    }
+                    ImGui::SameLine();
+                    if (UiButton("取消"))
+                        g_saveDeleteIndex = -1;
+                }
+                else
+                {
+                    if (UiButton("读取"))
+                    {
+                        // Loading starts the game in the selected save, so the row it belongs to has to be
+                        // the selection when the settings window closes. Without this the settings window
+                        // simply quit: no game was selected, so no session was started.
+                        const int row = RomIndexForSet(g_manageSavesRow);
+                        if (row >= 0)
+                            selectedGameIndex = row;
+
+                        InfoLog("Manage saves: Load '%s' as set '%s' (row %d).",
+                            card.path.string().c_str(), g_manageSavesGame.c_str(), row);
+
+                        g_pendingVkState = card.path;
+                        // Remember that this session came from the manager, so Escape from the game
+                        // returns to these save cards rather than to the top-level game list.
+                        g_returnToManageSaves = true;
+                        g_returnToManageSavesSet = g_manageSavesRow;
+                        exit = true;
+                        saveSettings = true;
+                        g_manageSavesOpen = false;
+                        g_manageSavesDrawn = false;
+                        open = false;
+                    }
+                    ImGui::SameLine();
+                    if (UiButton("改名"))
+                    {
+                        g_saveDeleteIndex = -1;
+                        g_saveRenameIndex = i;
+                        g_saveRenameFocus = i;
+                        std::snprintf(g_saveRenameBuffer, sizeof(g_saveRenameBuffer), "%s", title.c_str());
+                    }
+                    ImGui::SameLine();
+                    if (UiButton("删除"))
+                    {
+                        g_saveDeleteIndex = i;
+                        g_saveRenameIndex = -1;
+                    }
+                }
+
+                ImGui::EndChild();
+                ImGui::PopID();
+            }
+            ImGui::EndTable();
+        }
+
+        if (!g_pendingSaveDelete.empty())
+        {
+            const std::filesystem::path target = std::move(g_pendingSaveDelete);
+            g_pendingSaveDelete.clear();
+
+            std::string deleteError;
+            if (DeleteSaveCard(target, deleteError))
+            {
+                // Re-read the folder so the cards close the gap. The in-game save menu builds its list
+                // from the same files on every frame, so it sees the deletion without a restart; the
+                // slot simply becomes an empty row the next save can use.
+                LoadSaveCards();
+            }
+            if (!deleteError.empty())
+                g_manageSavesError = deleteError;
+        }
+    }
+
+    if (!g_autoLoadSave.empty())
+    {
+        const std::filesystem::path wanted(g_autoLoadSave);
+        const SaveCard* chosen = nullptr;
+        for (const SaveCard& card : g_saveCards)
+        {
+            // Path separators differ between the GUI's saved paths and the literal environment
+            // path, so compare the file name rather than the whole string.
+            if (card.path.filename() == wanted.filename())
+            {
+                chosen = &card;
+                break;
+            }
+        }
+        if (chosen == nullptr && !g_saveCards.empty())
+            chosen = &g_saveCards.front();
+
+        if (chosen != nullptr)
+        {
+            const int row = RomIndexForSet(g_manageSavesRow);
+            if (row >= 0)
+                selectedGameIndex = row;
+            InfoLog("GUI: auto-load save card '%s' (row %d).", chosen->path.string().c_str(), row);
+            g_pendingVkState = chosen->path;
+            g_returnToManageSaves = true;
+            g_returnToManageSavesSet = g_manageSavesRow;
+            g_autoLoadSave.clear();
+            exit = true;
+            saveSettings = true;
+            g_manageSavesOpen = false;
+            g_manageSavesDrawn = false;
+            open = false;
+        }
+        else
+        {
+            ErrorLog("GUI: auto-load requested but no save cards are listed for '%s'.", g_manageSavesGame.c_str());
+            g_autoLoadSave.clear();
+        }
+    }
+
+    if (!open)
+    {
+        g_manageSavesOpen = false;
+        g_manageSavesDrawn = false;
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
+std::filesystem::path GuiTakePendingVkState()
+{
+    std::filesystem::path path = std::move(g_pendingVkState);
+    g_pendingVkState.clear();
+    return path;
+}
+
+#else
+
+std::filesystem::path GuiTakePendingVkState()
+{
+    return {};
+}
+
+#endif // SUPERMODEL_PURE_VULKAN
+
 static std::string SelectedRomPath(int index)
 {
     if (index < 0 || index >= (int)g_roms.size())
@@ -2135,12 +3971,33 @@ static std::string SelectedRomPath(int index)
     return g_roms[index].path;
 }
 
+/*
+ * Copy the game list's position into `config`.
+ *
+ * The set name is stored rather than the row index so that adding or removing a zip
+ * changes what the number means, not which game was last played. Collapsing the
+ * three values into one helper keeps the two write paths at the end of GuiRunOnce
+ * ("saved" and "window closed without saving") from drifting apart.
+ */
+static void SaveGameListPreferences(Util::Config::Node& config, int selectedGame)
+{
+    std::string selectedSet;
+    if (selectedGame >= 0 && selectedGame < (int)g_roms.size())
+        selectedSet = g_roms[selectedGame].setName;
+    else
+        selectedSet = g_lastSelectedSet;
+
+    config.Set("GuiLastSelectedGame", selectedSet);
+    config.Set("GuiGameListScrollY", g_gameListScrollY);
+    config.Set("GuiGameListFilter", std::string(g_gameListFilter));
+}
+
 static Game GameForSelection(const std::map<std::string, Game>& games, int index)
 {
     Game game;
     if (index < 0 || index >= (int)g_roms.size())
         return game;
-    const std::string& name = g_roms[index].setName;
+    const std::string& name = EffectiveSet(g_roms[index]);
     auto found = games.find(name);
     if (found != games.end())
         return found->second;
@@ -2216,17 +4073,27 @@ static void UiExplain(const char* format, ...)
 
 static int RendererIndex(const Util::Config::Node& config)
 {
+#if defined(SUPERMODEL_OPENGL_ONLY)
+    // There is no Vulkan renderer to index: the choice is only between the two
+    // OpenGL engines.
+    return config["New3DEngine"].ValueAs<bool>() ? 1 : 2;
+#else
     if (config["Vulkan3DEngine"].ValueAs<bool>())
         return 0;
     if (config["New3DEngine"].ValueAs<bool>())
         return 1;
     return 2;
+#endif
 }
 
 static void SetRenderer(Util::Config::Node& config, int index)
 {
+#if defined(SUPERMODEL_OPENGL_ONLY)
+    config.Set("New3DEngine", index != 2);
+#else
     config.Set("Vulkan3DEngine", index == 0);
     config.Set("New3DEngine", index != 2);
+#endif
 }
 
 /*
@@ -2257,10 +4124,24 @@ void GuiPostNotice(const std::string& text)
     g_rendererNotice = text;
 }
 
+#if !defined(SUPERMODEL_OPENGL_ONLY)
 // Names of the Vulkan physical devices, queried once. Enumerating creates a throw-away
 // Vulkan instance, so this is deliberately deferred until the tab is actually drawn.
 static const std::vector<std::string>& GetDisplayDevices()
 {
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+    /*
+     * The startup preflight has already enumerated the physical devices, so reuse its list.
+     *
+     * Enumerating here meant creating a second throw-away Vulkan instance on the first UI frame.
+     * With the overlay layers a normal desktop has installed (Steam, RTSS, ReShade, OBS, ...)
+     * that costs about a second, and it happened inside startup, before the window was revealed -
+     * which is why this build appeared to open much more slowly than the OpenGL one.
+     */
+    const std::vector<std::string>& probed = OSD::SDL3App::KnownVulkanDeviceNames();
+    if (!probed.empty())
+        return probed;
+#endif
     static std::vector<std::string> devices;
     static bool queried = false;
     if (!queried)
@@ -2270,9 +4151,10 @@ static const std::vector<std::string>& GetDisplayDevices()
     }
     return devices;
 }
+#endif
 
-// Names of the host audio output devices, queried once. SDL needs its audio subsystem up to
-// answer this, which is harmless here because nothing is playing yet.
+// Names of the host audio output devices, queried once. The platform layer brings the audio
+// subsystem up, which is harmless here because nothing is playing yet.
 static const std::vector<std::string>& GetAudioDevices()
 {
     static std::vector<std::string> devices;
@@ -2280,15 +4162,12 @@ static const std::vector<std::string>& GetAudioDevices()
     if (!queried)
     {
         queried = true;
-        if (SDL_InitSubSystem(SDL_INIT_AUDIO) == 0)
+        const int count = OSD::Platform::GetAudioOutputDeviceCount();
+        for (int i = 0; i < count; i++)
         {
-            int count = SDL_GetNumAudioDevices(0);   // 0 = playback devices
-            for (int i = 0; i < count; i++)
-            {
-                const char* name = SDL_GetAudioDeviceName(i, 0);
-                if (name != nullptr && name[0] != '\0')
-                    devices.emplace_back(name);
-            }
+            const char* name = OSD::Platform::GetAudioOutputDeviceName(i);
+            if (name != nullptr && name[0] != '\0')
+                devices.emplace_back(name);
         }
     }
     return devices;
@@ -2327,7 +4206,7 @@ static void DeviceCombo(Util::Config::Node& config, const char* label, const cha
     for (const auto& text : labels)
         items.push_back(text.c_str());
 
-    if (ImGui::Combo(Tr(label), &selected, items.data(), (int)items.size()))
+    if (ComboRow(Tr(label), &selected, items.data(), (int)items.size()))
     {
         // If user selects 0 ("Auto/System Default") or selects index 1 (which is the default device),
         // we can store "" or the device name directly. Storing "" ensures 100% native fallback to SDL default route.
@@ -2338,7 +4217,7 @@ static void DeviceCombo(Util::Config::Node& config, const char* label, const cha
     }
 
     if (devices.empty() && emptyHint != nullptr)
-        UiTextDim("%s", emptyHint);
+        UiTextDim("%s", Tr(emptyHint));
 }
 
 /*
@@ -2354,7 +4233,7 @@ static void DeviceCombo(Util::Config::Node& config, const char* label, const cha
  */
 static void DrawTriggerPairingHint(Util::Config::Node& config)
 {
-    const std::string system = config["InputSystem"].ValueAsDefault<std::string>("xinput");
+    const std::string system = config["InputSystem"].ValueAsDefault<std::string>("sdlgamepad");
     const bool perTrigger = (system == "xinput" || system == "sdlgamepad");
     const std::string brake = config["InputBrake"].ValueAsDefault<std::string>("");
 
@@ -2371,7 +4250,7 @@ static void DrawTriggerPairingHint(Util::Config::Node& config)
     if (perTrigger == usesRz)
         return;     // consistent: RZAXIS with a per-trigger system, ZAXIS_POS with a shared one
 
-    UiTextColored(kAttentionColour,
+    UiTextColored(AttentionColour(),
         "刹车绑定的扳机形式与当前输入系统不符，刹车会没反应。");
     if (UiButton("修复扳机绑定##FixTrigger"))
         config.Set("InputBrake", perTrigger ? "KEY_DOWN,JOY1_RZAXIS" : "KEY_DOWN,JOY1_ZAXIS_POS");
@@ -2453,6 +4332,166 @@ static bool VrrArcadeRateSupported()
 static bool ArcadeDisplayModeAvailable()
 {
     return GetArcadeDisplayInfo().modeAvailable;
+}
+
+/*
+ * Highest whole refresh rate a display's fullscreen mode list advertises.
+ *
+ * The desktop mode alone is not the answer: a 144 Hz panel usually runs at 60 on
+ * the desktop and only reaches 144 in an exclusive fullscreen mode, which is
+ * exactly the list this walks. Rates are rounded to the nearest whole Hz because
+ * SDL reports 59.94 and 119.88 for panels everyone calls 60 and 120; treating
+ * those as unsupported would grey out the only rate such a panel can take. Returns
+ * 0 when the list cannot be read, which means "do not refuse anything" rather than
+ * "nothing is supported".
+ */
+static int QueryMaxSupportedHz(OSD::Platform::DisplayId display)
+{
+    int maxHz = 0;
+    const int modeCount = OSD::Platform::GetDisplayModeCount(display);
+    for (int i = 0; i < modeCount; i++)
+    {
+        OSD::Platform::DisplayMode mode{};
+        if (!OSD::Platform::GetDisplayMode(display, i, &mode) || !(mode.refreshHz > 1.0f))
+            continue;
+        const int hz = (int)std::lround((double)mode.refreshHz);
+        if (hz > maxHz)
+            maxHz = hz;
+    }
+
+    if (maxHz <= 0)
+    {
+        OSD::Platform::DisplayMode mode{};
+        if (OSD::Platform::GetDesktopDisplayMode(display, &mode) && mode.refreshHz > 1.0f)
+            maxHz = (int)std::lround((double)mode.refreshHz);
+    }
+    return maxHz;
+}
+
+/*
+ * The same answer for the display the settings window is on, cached briefly.
+ *
+ * Enumerating a mode list allocates, and the fixed-rate row asks on every frame;
+ * re-reading twice a second keeps a mode added in the driver control panel from
+ * being invisible until a restart without paying for the enumeration per frame.
+ */
+static int MaxSupportedHzForWindow(OSD::Platform::Window* window)
+{
+    static OSD::Platform::DisplayId checkedDisplay = OSD::Platform::kPrimaryDisplay;
+    static int checkedHz = -1;
+    static double nextCheck = 0.0;
+
+    const OSD::Platform::DisplayId display = window != nullptr
+        ? OSD::Platform::GetWindowDisplay(window)
+        : OSD::Platform::kPrimaryDisplay;
+    const double now = ImGui::GetTime();
+    if (display != checkedDisplay || checkedHz < 0 || now >= nextCheck)
+    {
+        checkedDisplay = display;
+        checkedHz = QueryMaxSupportedHz(display);
+        nextCheck = now + 2.0;
+    }
+    return checkedHz;
+}
+
+/*
+ * Clamp a saved FixedRefreshRate to what the display the window is on can scan.
+ *
+ * Called once, after the window exists: the setting is written on one machine and
+ * carried to another often enough that a 240 Hz value on a 60 Hz panel is a real
+ * case, not a hand-edited one. The clamped value is put into the file copy as
+ * well, so closing the window without pressing Save still leaves a usable value
+ * behind. A display that reports no modes is left alone.
+ */
+static void ClampSavedFixedRefreshRate(Util::Config::Node& config, Util::Config::Node& fileConfig,
+    OSD::Platform::Window* window)
+{
+    if (window == nullptr)
+        return;
+
+    const int maxHz = QueryMaxSupportedHz(OSD::Platform::GetWindowDisplay(window));
+    if (maxHz <= 0)
+        return;
+
+    const int requested = config["FixedRefreshRate"].ValueAsDefault<int>(120);
+    const int clamped = ClampFixedRefreshRate(requested, maxHz);
+    if (clamped == requested)
+        return;
+
+    config.Set("FixedRefreshRate", clamped);
+    fileConfig.Set("FixedRefreshRate", clamped);
+    InfoLog("Pace: FixedRefreshRate %d -> %d Hz; the display reports modes up to %d Hz.",
+        requested, clamped, maxHz);
+}
+
+/*
+ * Fixed present rate combo with unsupported entries disabled.
+ *
+ * A plain ImGui::Combo cannot disable individual entries, and the list is the
+ * whole point here: on a 60 Hz panel 120/144/240 are not choices, they are numbers
+ * that would make the pacer present frames the display never scans. Each entry is
+ * therefore its own Selectable inside BeginDisabled, with a tooltip naming the
+ * panel's limit rather than leaving the reason implicit.
+ */
+static bool FixedRefreshRateCombo(Util::Config::Node& config, int maxSupportedHz, bool& changed)
+{
+    const int currentHz = config["FixedRefreshRate"].ValueAsDefault<int>(120);
+    char preview[32];
+    std::snprintf(preview, sizeof(preview), "%d Hz", currentHz);
+
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const float chrome = style.FramePadding.x * 2.0f + ImGui::GetFrameHeight();
+    float width = kComboFloorWidth;
+    for (int i = 0; i < kFixedRefreshRateCount; i++)
+    {
+        char label[32];
+        std::snprintf(label, sizeof(label), "%d Hz", kFixedRefreshRates[i]);
+        width = (std::max)(width, ImGui::CalcTextSize(label).x + chrome);
+    }
+    ImGui::SetNextItemWidth((std::min)(width, ImGui::GetContentRegionAvail().x));
+
+    if (!ImGui::BeginCombo(Tr("呈现频率##FixedRefreshRate"), preview))
+    {
+        // BeginCombo still submits the closed combo, so the pointer can be set before bailing out.
+        HandOver();
+        return false;
+    }
+    HandOver();
+
+    bool picked = false;
+    for (int i = 0; i < kFixedRefreshRateCount; i++)
+    {
+        const int rate = kFixedRefreshRates[i];
+        const bool supported = DisplaySupportsFixedRate(rate, maxSupportedHz);
+
+        if (!supported)
+            ImGui::BeginDisabled();
+
+        char item[48];
+        std::snprintf(item, sizeof(item), "%d Hz##FixedRate%d", rate, rate);
+        if (ImGui::Selectable(item, rate == currentHz))
+        {
+            config.Set("FixedRefreshRate", rate);
+            changed = true;
+            picked = true;
+        }
+        HandOver();
+
+        if (!supported)
+        {
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            {
+                char tip[160];
+                std::snprintf(tip, sizeof(tip), Tr("当前显示器最高支持 %d Hz，%d Hz 无法使用。"),
+                    maxSupportedHz, rate);
+                UiTooltip("%s", tip);
+            }
+        }
+    }
+
+    ImGui::EndCombo();
+    return picked;
 }
 
 /*
@@ -2555,22 +4594,456 @@ static void DrawOutputDisplayCombo(Util::Config::Node& config)
     for (const std::string& text : labels)
         items.push_back(text.c_str());
 
-    ImGui::SetNextItemWidth(520.0f);
-    if (ImGui::Combo(Tr("输出显示器##DisplayNumber"), &selected, items.data(), static_cast<int>(items.size())))
+    if (ComboRow(Tr("输出显示器##DisplayNumber"), &selected, items.data(), static_cast<int>(items.size())))
         config.Set("DisplayNumber", selected == 0 ? 0 : outputs[selected - 1].number);
 
     ImGui::SameLine();
     UiTextDim("(?)");
     if (ImGui::IsItemHovered())
         UiTooltip(
-            "游戏窗口与两种独占全屏都出现在所选显示器上，下次启动游戏时生效。\n"
-            "选「自动」则始终跟随系统主显示器。\n"
-            "\n"
-            "每项末尾的 #n 是 Windows 给该显示器的编号（即「显示设置 → 标识」里的数字）。\n"
-            "这个编号也是 Scripts\\ArcadeDisplay.ps1 的 -Monitor 参数 —— 两边必须填同一个，\n"
-            "否则脚本在某一台上切换了 57.524Hz 模式，而游戏在另一台上全屏，结果是\n"
-            "静默退回桌面刷新率（不报错）。");
+            "游戏窗口与独占全屏都出现在这台显示器上，下一局生效。\n"
+            "「自动」跟随系统主显示器；末尾 #n 是 Windows 的显示器编号。");
 }
+
+static void DrawHardwarePresetSettings(Util::Config::Node& config)
+{
+    /*
+     * Four combinations, not two.
+     *
+     * Most cards sit between "integrated" and "4K with 4x MSAA", and the four settings this sets are
+     * not independent: per-pixel sorted transparency costs an extra pass per translucent priority
+     * whose price scales with the pixel count, the two-subpass composite exists to remove MSAA
+     * attachment bandwidth (so MSAA gets cheaper the more of it there is), and the derivative mip
+     * modes only pay off once the surface is sharp enough to show the difference. A single high/low
+     * split either wastes a mid-range card or overloads an entry-level one.
+     *
+     * The resolution is clamped to the desktop: a preset that asks for 4K on a 1080p panel would
+     * create a window larger than the screen. The clamped size is remembered so the combo keeps
+     * showing the tier that was picked rather than falling back to "custom".
+     */
+    struct QualityTier
+    {
+        const char* label;
+        int width, height, msaa, alphaSort, texFilter;
+        // The ultra-low tier is a whole-system choice rather than four picture knobs: it also
+        // drops to the arcade cadence, turns interpolation and post-processing off, and uses the
+        // cheap shader path. Matching it therefore has to look at those keys too, or the combo
+        // would claim the tier while half of it had been changed by hand.
+        bool ultraLow;
+    };
+    static const QualityTier tiers[] = {
+        { "超低配极速（496×384，核显）", 496, 384, 0, 0, 0, true },
+        { "核显 / 低配（1080p，1x）", 1920, 1080, 0, 0, 1, false },
+        { "入门独显（1080p，2x）",    1920, 1080, 2, 0, 1, false },
+        { "中端独显（2K，2x）",       2560, 1440, 2, 1, 2, false },
+        { "高端独显（4K，4x）",       3840, 2160, 4, 1, 2, false },
+    };
+    constexpr int tierCount = IM_ARRAYSIZE(tiers);
+    constexpr int customTierIndex = tierCount;
+
+    OSD::Platform::DisplayMode desktopMode{};
+    const bool haveDesktop = OSD::Platform::GetDesktopDisplayMode(OSD::Platform::kPrimaryDisplay, &desktopMode) &&
+        desktopMode.width > 0 && desktopMode.height > 0;
+
+    const int tierWidth = config["XResolution"].ValueAsDefault<int>(0);
+    const int tierHeight = config["YResolution"].ValueAsDefault<int>(0);
+    const int tierMsaa = config["MSAA"].ValueAsDefault<int>(0);
+    const int tierAlphaSort = std::clamp(config["AlphaSortMode"].ValueAsDefault<int>(0), 0, 2);
+    const int tierTexFilter = std::clamp(config["TexFilter"].ValueAsDefault<int>(0), 0, 2);
+    const bool tierIntegerScale = config["IntegerScale"].ValueAsDefault<bool>(false);
+#if defined(SUPERMODEL_OPENGL_ONLY)
+    // Vulkan-only key: reading it in this build would create an empty node that the ini writer would
+    // then persist into the file both executables share.
+    constexpr int tierInternalRes = 0;
+#else
+    const int tierInternalRes = config["InternalResolution"].ValueAsDefault<int>(0);
+#endif
+    const bool tierQuadInterp = config["QuadInterpolation"].ValueAsDefault<bool>(true);
+    const int tierRefreshMode = config["RefreshRateMode"].ValueAsDefault<int>(1);
+    const bool tierInterp = config["MotionInterpolation"].ValueAsDefault<bool>(true) &&
+        !config["LowLatency"].ValueAsDefault<bool>(false);
+    const bool tierFxaa = config["PostFXAA"].ValueAsDefault<bool>(false);
+    const int tierCrt = config["PostCRT"].ValueAsDefault<int>(0);
+    const int tierGlow = config["PostGlow"].ValueAsDefault<int>(0);
+    const bool tierFrost = config["UiFrostedGlass"].ValueAsDefault<bool>(true);
+
+    const auto tierExtrasMatch = [&](const QualityTier& tier)
+    {
+        if (!tier.ultraLow)
+            return true;
+        // The OpenGL build does not offer low-resolution rendering (it is a Vulkan render-target
+        // change), so its ultra-low tier is identified by the keys it does have.
+#if defined(SUPERMODEL_OPENGL_ONLY)
+        constexpr bool tierLowRes = true;
+#else
+        const bool tierLowRes = tierInternalRes == 1;
+#endif
+        return tierIntegerScale && tierLowRes && !tierQuadInterp && tierRefreshMode == 0 && !tierInterp &&
+            !tierFxaa && tierCrt == 0 && tierGlow == 0 && !tierFrost;
+    };
+    const auto tierMatches = [&](const QualityTier& tier)
+    {
+        return tierWidth == tier.width && tierHeight == tier.height &&
+            tierMsaa == tier.msaa && tierAlphaSort == tier.alphaSort &&
+            tierTexFilter == tier.texFilter && tierExtrasMatch(tier);
+    };
+
+    int tierMatched = customTierIndex;
+    for (int i = 0; i < tierCount; i++)
+        if (tierMatches(tiers[i]))
+            tierMatched = i;
+
+    // A tier applied on a smaller display stores the clamped size, which matches no row by itself.
+    // Remembering what was applied keeps the combo on that tier instead of snapping to "custom".
+    static int appliedTier = -1;
+    static int appliedWidth = 0, appliedHeight = 0;
+    if (tierMatched == customTierIndex && appliedTier >= 0 &&
+        tierWidth == appliedWidth && tierHeight == appliedHeight &&
+        tierMsaa == tiers[appliedTier].msaa && tierAlphaSort == tiers[appliedTier].alphaSort &&
+        tierTexFilter == tiers[appliedTier].texFilter && tierExtrasMatch(tiers[appliedTier]))
+        tierMatched = appliedTier;
+
+    // Same idea as the resolution combo: once the user asks for "custom" the selection stays there
+    // even if the individual values happen to equal a tier, until a tier is picked again.
+    static bool customSelected = false;
+    static const char* tierItems[tierCount + 1] = {
+        tiers[0].label, tiers[1].label, tiers[2].label, tiers[3].label, tiers[4].label,
+        "自定义（按下面几项单独调）",
+    };
+    static const char* tierTr[tierCount + 1];
+    int tierSelection = customSelected ? customTierIndex : tierMatched;
+
+    UiSep("硬件预设");
+    if (ComboRow(Tr("档位##QualityTier"), &tierSelection, UiItems(tierItems, tierCount + 1, tierTr), tierCount + 1))
+    {
+        if (tierSelection < tierCount)
+        {
+            const QualityTier& tier = tiers[tierSelection];
+            int w = tier.width;
+            int h = tier.height;
+            if (haveDesktop)
+            {
+                if (w > desktopMode.width) w = desktopMode.width;
+                if (h > desktopMode.height) h = desktopMode.height;
+            }
+            config.Set("XResolution", w);
+            config.Set("YResolution", h);
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+            // These keys exist only in builds with the Vulkan backend. Writing them from the
+            // OpenGL-only executable would add root-level duplicates to the shared ini, where they
+            // could shadow the real [Video] entries on the next Vulkan run.
+            config.Set("MSAA", tier.msaa);
+            config.Set("AlphaSortMode", tier.alphaSort);
+            config.Set("TexFilter", tier.texFilter);
+#endif
+            if (tier.ultraLow)
+            {
+                /*
+                 * The rest of the potato preset. None of these is a picture knob in the same sense
+                 * as the four above, which is why the other tiers leave them alone: this tier is
+                 * meant for a 24-EU integrated GPU where every per-pixel read and every extra
+                 * present costs a frame.
+                 *
+                 *   - 496x384 is the native 2D tile size; IntegerScale turns it into a whole-number
+                 *     magnification instead of a blurry non-integer stretch.
+                 *   - Original 57.524 Hz halves the presents compared with a 120 Hz interpolated
+                 *     setup, and turning interpolation off removes the sub-frame work entirely.
+                 *   - QuadInterpolation off is the shader fast path (no four-corner pull, no
+                 *     quadratic solve); TexFilter 0 keeps the radial single-tap lookup.
+                 *   - The two post-processing switches are the most expensive full-screen passes, and
+                 *     the frosted backdrop is a four-pass chain that only runs while the panel is
+                 *     open - cheap, but on a 24-EU part the panel is the one moment the UI is in
+                 *     front of a picture that cannot afford the extra bandwidth.
+                 */
+                config.Set("IntegerScale", true);
+                config.Set("RefreshRateMode", 0);
+                config.Set("MotionInterpolation", false);
+                config.Set("LowLatency", true);
+                config.Set("UiFrostedGlass", false);
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+                // The 3D scene at the native 496x384, upscaled onto the picture. This is what keeps the
+                // 24-EU class of integrated GPU at 60 Hz at 1080p; IntegerScale above stays set, but
+                // this option takes precedence over it (see CalcScreenGeometry), so the preset's
+                // picture fills the display instead of sitting in a 2x box.
+                config.Set("InternalResolution", 1);
+                config.Set("QuadInterpolation", false);
+                config.Set("PostFXAA", false);
+                config.Set("PostCRT", 0);
+                config.Set("PostScanlines", 0);
+                config.Set("PostGlow", 0);
+#endif
+                InfoLog("GUI: applied the ultra-low preset (496x384, no MSAA/interpolation/post, fast quad path).");
+            }
+            appliedTier = tierSelection;
+            appliedWidth = w;
+            appliedHeight = h;
+            customSelected = false;
+        }
+        else
+        {
+            customSelected = true;
+        }
+    }
+    HelpMarker(
+        "一次配好分辨率、MSAA、半透明排序、贴图过滤等相关选项，下一局生效。\n"
+        "超低配极速：496×384 原生 3D + 等比放大，关插值/后处理。\n"
+        "核显 / 低配：1080p、1x、原版半透明与硬件贴图，最稳。\n"
+        "入门独显：1080p + 2x MSAA。\n"
+        "中端独显：2K + 2x MSAA + 逐像素排序 + 锐利贴图。\n"
+        "高端独显：4K + 4x MSAA，同上最高画质。\n"
+        "自定义：不套预设，只改下面各项。");
+
+    // The ultra-low tier's low resolution comes from rendering the 3D scene at 496x384, not from the
+    // number in XResolution/YResolution - and IntegerScale is not what keeps it alive any more.
+    // Saying so here is the only place the two controls sit together.
+    if (tierWidth == 496 && tierHeight == 384 && tierInternalRes == 0 && !tierIntegerScale)
+        UiTextWarn("超低配的低开销靠「低分辨率渲染」（或「整数倍缩放」）；两者都关掉时全屏会按面板分辨率渲染，帧率会明显下降。");
+
+}
+
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+static void DrawPresentationCadenceSettings(Util::Config::Node& config, OSD::Platform::Window* window)
+{
+    /*
+     * 呈现节奏 - how the arcade's 57.524 Hz relates to what the display scans out.
+     *
+     * Vulkan only: the OpenGL executable keeps the classic one-simulation-one-present loop, so
+     * `highRefresh` is false there, the pacer is never configured, and the OpenGL renderers do not
+     * implement PrepareFrame()/RenderFrame(alpha). Every control in this section would do nothing.
+     *
+     * This is the setting that removes the judder a 57.524 Hz game shows on a 60/120/144/240 Hz
+     * panel, and it is one choice out of three rather than a checkbox, because the three modes
+     * differ in *who* decides the next scan-out: the arcade (Original), the panel (Auto), or a
+     * rate the user names (Fixed). Two of those are the same rate on paper and behave differently
+     * in practice, which is exactly what a row of radio buttons can say and a checkbox cannot.
+     *
+     * Written straight to the configuration rather than through a temp value: these are read back
+     * by the game loop every frame and the pacer is reconfigured when they change, so a change
+     * applies to the next present without restarting the session.
+     */
+    UiSep("呈现节奏");
+    {
+        const int paceMode = config["RefreshRateMode"].ValueAsDefault<int>(1);
+        bool paceChanged = false;
+
+        if (UiRadioButton("原始 57.5Hz（与机台一致）##PaceOriginal", paceMode == 0))
+        {
+            config.Set("RefreshRateMode", 0);
+            paceChanged = true;
+        }
+        ImGui::SameLine();
+        UiTextDim("(?)");
+        if (ImGui::IsItemHovered())
+            UiTooltip(
+                "按真机的 57.524Hz 输出，一逻辑帧一画面，不插值。\n"
+                "需要 57.5Hz 模式或 VRR 显示器，否则高刷屏会有规律顿挫。");
+
+        if (UiRadioButton("跟随显示器（推荐）##PaceAuto", paceMode == 1))
+        {
+            config.Set("RefreshRateMode", 1);
+            paceChanged = true;
+        }
+        ImGui::SameLine();
+        UiTextDim("(?)");
+        if (ImGui::IsItemHovered())
+            UiTooltip(
+                "逻辑仍按 57.524Hz 推进，画面按显示器当前刷新率输出，\n"
+                "亚帧用运动插值补平。60/75/90Hz 与高刷屏都适用。");
+
+        if (UiRadioButton("固定呈现频率##PaceFixed", paceMode == 2))
+        {
+            config.Set("RefreshRateMode", 2);
+            paceChanged = true;
+        }
+        ImGui::SameLine();
+        UiTextDim("(?)");
+        if (ImGui::IsItemHovered())
+            UiTooltip(
+                "按下方指定频率输出，不切换显示器模式。\n"
+                "60 Hz：最保守，任何屏都能跑。\n"
+                "75 / 90 Hz：普通高刷或笔记本屏。\n"
+                "120 / 144 / 165 Hz：主流电竞屏。\n"
+                "240 / 480 Hz：需对应面板。\n"
+                "低于实际刷新率只会重复帧；高了会被丢弃。");
+
+        if (paceMode == 2)
+        {
+            ImGui::Indent();
+            const int maxHz = MaxSupportedHzForWindow(window);
+
+            // A value carried over from a faster display is clamped before the control is drawn,
+            // so what the combo shows is what the pacer will actually use.
+            const int configuredHz = config["FixedRefreshRate"].ValueAsDefault<int>(120);
+            const int clampedHz = ClampFixedRefreshRate(configuredHz, maxHz);
+            if (clampedHz != configuredHz)
+            {
+                config.Set("FixedRefreshRate", clampedHz);
+                paceChanged = true;
+            }
+
+            FixedRefreshRateCombo(config, maxHz, paceChanged);
+            if (maxHz > 0)
+                UiTextDim("当前显示器最高支持 %d Hz；更高的档位已置灰。", maxHz);
+            ImGui::Unindent();
+        }
+
+        UiTextDim("60/75/90Hz 显示器用「跟随显示器」即可；高刷屏请先在 Windows 或显卡控制面板固定 120/144/240Hz。");
+        UiTextDim("G-SYNC：NVIDIA 控制面板 → 显示 → 设置 G-SYNC；「固定呈现频率」只改呈现目标，不切换模式。");
+
+        /*
+         * Exact multiples of the arcade rate, for a display that can scan that
+         * fast.
+         *
+         * These are the only modes where the picture cannot land unevenly: two
+         * presents per emulated frame at 115.048 Hz, four at 230.097, and so on,
+         * with the weight between the two snapshots fixed by the slot rather than
+         * measured from the clock. What a panel has to bring is headroom - the
+         * target has to sit clearly under its own rate - and that is what the
+         * greying out says.
+         *
+         * Kept on the same row and labelled with the multiple alone: the rates
+         * are in the tooltip, because five numbers on one line is a table, not a
+         * choice.
+         */
+        OSD::Platform::DisplayMode desktopMode{};
+        const double panelHz =
+            (OSD::Platform::GetDesktopDisplayMode(OSD::Platform::kPrimaryDisplay, &desktopMode) &&
+             desktopMode.refreshHz > 1.0f) ? (double)desktopMode.refreshHz : 0.0;
+
+        UiText("VRR 倍频");
+        ImGui::SameLine();
+        UiTextDim("(?)");
+        if (ImGui::IsItemHovered())
+            UiTooltip(
+                "向面板的整数倍频，每个仿真帧正好扫描 N 次。\n"
+                "2x = 115.05Hz，需面板 120Hz 以上。\n"
+                "3x = 172.57Hz，需 176Hz 以上。\n"
+                "4x = 230.10Hz，需 235Hz 以上。\n"
+                "8x = 460.19Hz，需 470Hz 以上。\n"
+                "不够的档位置灰；都需 VRR 跟随 + 垂直同步。");
+
+        static const struct { int phases; int mode; } kMultiples[] = {
+            { 2, 3 }, { 3, 4 }, { 4, 5 }, { 8, 6 }
+        };
+        for (int i = 0; i < 4; i++)
+        {
+            const int phases = kMultiples[i].phases;
+            const int value = kMultiples[i].mode;
+            const bool supported = PanelSupportsPhaseCount(phases, panelHz);
+            char label[32];
+            snprintf(label, sizeof(label), "%dx##PaceVrr%d", phases, phases);
+
+            if (i > 0)
+                ImGui::SameLine();
+            ImGui::BeginDisabled(!supported);
+            if (UiRadioButton(label, paceMode == value))
+            {
+                config.Set("RefreshRateMode", value);
+                paceChanged = true;
+            }
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            {
+                /*
+                 * Translated in pieces.
+                 *
+                 * UiTooltip() runs Tr() on its *format*, so a tooltip assembled with
+                 * snprintf and handed over as "%s" never passes through the table -
+                 * which is how this one ended up Chinese in the English interface
+                 * while every string around it was translated.
+                 */
+                char tip[256];
+                snprintf(tip, sizeof(tip),
+                    Tr("%.2f Hz：每个仿真帧 %d 次扫描。\n%s"),
+                    kModel3StepHz * phases, phases,
+                    Tr(supported ? "本机面板支持。" : "本机面板刷新率不够，此项不可选。"));
+                UiTooltip("%s", tip);
+            }
+        }
+
+        if (panelHz > 1.0)
+        {
+            ImGui::Indent();
+            if (PanelSupportsPhaseCount(2, panelHz))
+            {
+                UiTextDim("面板 %.0f Hz：2x 可用（%.2f Hz，余量 %.1f%%），倍频下的节奏与面板无关。",
+                    panelHz, kModel3StepHz * 2.0,
+                    (panelHz - kModel3StepHz * 2.0) * 100.0 / panelHz);
+            }
+            else
+            {
+                UiTextDim("面板 %.0f Hz：低于 120 Hz，无法使用整数倍频；可选择「跟随显示器」让插值接管。",
+                    panelHz);
+            }
+            ImGui::Unindent();
+        }
+
+        /*
+         * Interpolation is a separate switch because it trades latency for smoothness, and that is
+         * a preference rather than a consequence of the cadence: someone on a 60 Hz panel may want
+         * it off for the one frame of input lag, and someone on 240 Hz may want it on even in the
+         * original rate's neighbourhood.
+         *
+         * The stored value is the resolved one: LowLatency is an alias that turns interpolation off
+         * without changing the present rate, and leaving two switches that can disagree would give
+         * a ticked box that does nothing. Writing both from one control keeps them consistent.
+         */
+        bool interp = config["MotionInterpolation"].ValueAsDefault<bool>(true) &&
+            !config["LowLatency"].ValueAsDefault<bool>(false);
+        ImGui::BeginDisabled(paceMode == 0);
+        if (UiCheckbox("运动插值##MotionInterpolation", &interp))
+        {
+            config.Set("MotionInterpolation", interp);
+            config.Set("LowLatency", !interp);
+            paceChanged = true;
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        UiTextDim("(?)");
+        if (ImGui::IsItemHovered())
+            UiTooltip(
+                "在两次逻辑帧之间对相机和动态物体插值，高刷屏每帧都是新画面。\n"
+                "关闭＝低延迟优先，比插值少约 17ms 延迟，但画面会重复。");
+
+        if (interp && paceMode != 0)
+        {
+            ImGui::Indent();
+            int scope = config["InterpolationScope"].ValueAsDefault<int>(0);
+            const char* kScopeItems[] = { Tr("自动"), Tr("全部视口"), Tr("仅主视口") };
+            if (UiCombo("插值范围##InterpolationScope", &scope, kScopeItems, 3))
+            {
+                config.Set("InterpolationScope", scope);
+                paceChanged = true;
+            }
+            ImGui::SameLine();
+            UiTextDim("(?)");
+            if (ImGui::IsItemHovered())
+                UiTooltip(
+                    "自动：全屏与移动的小视口插值，固定的小视口离散更新。\n"
+                    "全部视口：所有 3D 视口都插值。\n"
+                    "仅主视口：只插值全屏视口。\n"
+                    "2D 图层（计时、字幕）永不插值。");
+
+            OSD::Platform::DisplayMode desktopMode{};
+            if (OSD::Platform::GetDesktopDisplayMode(OSD::Platform::kPrimaryDisplay, &desktopMode) &&
+                desktopMode.refreshHz > 0.0f)
+            {
+                const double stepHz = 57.524160;
+                const double ratio = desktopMode.refreshHz / stepHz;
+                UiTextDim("显示器当前 %.0f Hz：每 1 次逻辑步呈现 %.2f 帧，亚帧权重 0.00-1.00。",
+                    desktopMode.refreshHz, ratio);
+            }
+            ImGui::Unindent();
+        }
+
+        if (paceChanged)
+            InfoLog("Pace: presentation settings changed (mode %d, fixed %d Hz, interpolation %s).",
+                config["RefreshRateMode"].ValueAsDefault<int>(1),
+                config["FixedRefreshRate"].ValueAsDefault<int>(120),
+                interp ? "on" : "off");
+    }
+}
+#endif
 
 static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInputs>& inputs)
 {
@@ -2580,16 +5053,82 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
         // Each language is listed in its own language, which is what a language picker should do.
         const char* languageNames[] = { UiLanguageName(UiLanguage::English), UiLanguageName(UiLanguage::Chinese) };
         int languageIndex = GetUiLanguage() == UiLanguage::Chinese ? 1 : 0;
-        ImGui::SetNextItemWidth(220.0f);
-        if (ImGui::Combo(Tr("界面语言##UiLanguage"), &languageIndex, languageNames, 2))
+        if (ComboRow(Tr("界面语言##UiLanguage"), &languageIndex, languageNames, 2))
         {
             SetUiLanguage(languageIndex == 1 ? UiLanguage::Chinese : UiLanguage::English);
             config.Set("UiLanguage", languageIndex);
         }
     }
 
+    /*
+     * Interface appearance, directly under the language and in the same visual group: both decide how
+     * the window itself is drawn rather than what the emulator does, and neither belongs on the video
+     * page. The theme applies to this window immediately (see the watcher at the top of GUI()) and to
+     * the in-game panel from the next session, because the overlay owns a second ImGui context.
+     *
+     * Light is listed first and is the default: 0 in the settings file, 1 for dark.
+     */
+    UiSep("界面外观");
+    {
+        static const char* themeItems[] = { "浅色（暖色护眼）", "深色", "原始界面（改动前）" };
+        static const char* themeTr[3];
+        const char* const* themeLabels = UiItems(themeItems, 3, themeTr);
+        int theme = 0;
+        if (UiThemeIsDark())
+            theme = 1;
+        else if (UiThemeIsClassic())
+            theme = 2;
+        if (ComboRow(Tr("界面主题##UITheme"), &theme, themeLabels, 3))
+        {
+            SetUiTheme(theme == 1 ? UiTheme::WarmDark
+                : (theme == 2 ? UiTheme::Classic : UiTheme::WarmPaper));
+            config.Set("UITheme", theme);
+        }
+        if (ImGui::IsItemHovered())
+            UiTooltip("%s", Tr("浅色：温润羊皮纸色底 + 陶土琥珀强调色，默认。\n"
+                "深色：暖岩灰玻璃底 + 琥珀强调色，晚上更不刺眼。\n"
+                "原始界面：毛玻璃重做之前的平面暖纸样式（蓝色强调色、不透底、无背景图）。\n"
+                "前两个主题都不使用纯黑与纯白；切换立即生效。"));
+
+        /*
+         * Frosted glass is a property of the two glass themes. The original theme paints opaque panes
+         * and never records the blur chain, so the switch would be a no-op there - greyed out rather
+         * than hidden, with the reason in the tooltip, so the row does not change shape.
+         */
+        const bool glassTheme = !UiThemeIsClassic();
+        if (!glassTheme)
+            ImGui::BeginDisabled();
+        BoolSetting(config, "毛玻璃背景##UiFrostedGlass", "UiFrostedGlass");
+        if (!glassTheme)
+            ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            UiTooltip("%s", Tr("面板背景改用模糊后的画面（双重 Kawase 模糊），带 1px 玻璃高光边。\n"
+                "关闭后改用不透明底色，适合核显或驱动不支持的情形。\n"
+                "原始界面本来就不透明，此开关对它无效。"));
+    }
+
+    DrawHardwarePresetSettings(config);
+
     UiSep("画面");
     int renderer = RendererIndex(config);
+#if defined(SUPERMODEL_PURE_VULKAN)
+    /*
+     * Nothing to choose: this executable contains exactly one renderer, and the two executables are
+     * separate downloads.  The disabled radio and the line under it that used to say so were
+     * explaining a choice the reader does not have.
+     */
+    renderer = 0;
+#elif defined(SUPERMODEL_OPENGL_ONLY)
+    /*
+     * New 3D and Legacy 3D are the choice here; both are OpenGL engines, so the graphics API itself
+     * is not a setting in this executable and is not mentioned.
+     */
+    if (UiRadioButton("New 3D", renderer == 1))
+        SetRenderer(config, 1);
+    ImGui::SameLine();
+    if (UiRadioButton("Legacy 3D", renderer == 2))
+        SetRenderer(config, 2);
+#else
     if (UiRadioButton("Vulkan 3D", renderer == 0))
     {
         SetRenderer(config, 0);
@@ -2607,7 +5146,9 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
         SetRenderer(config, 2);
         g_rendererNotice.clear();
     }
+#endif
 
+#if !defined(SUPERMODEL_OPENGL_ONLY)
     /*
      * Shown right under the renderer radios, because that is where the remedy is. Dismissible so it
      * does not become permanent furniture for someone who is content to stay on OpenGL.
@@ -2622,7 +5163,9 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
         ImGui::SameLine();
         if (ImGui::SmallButton(Tr("知道了##RendererNotice")))
             g_rendererNotice.clear();
+        HandOver();
     }
+#endif
 
     /*
      * Nothing is said here about the in-game overlay, and the absence is deliberate.
@@ -2635,11 +5178,15 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
      * it stops people trying the thing that works.
      */
 
+#if !defined(SUPERMODEL_OPENGL_ONLY)
     if (renderer != 0)
         ImGui::BeginDisabled();
     BoolSetting(config, "Vulkan 校验层##VkValidation", "VkValidation");
     if (renderer != 0)
         ImGui::EndDisabled();
+    HelpMarker(
+        "让 Vulkan 校验层逐帧检查绘制调用、描述符和同步，发现的问题写进 Supermodel.log。"
+        "正常游玩请关闭（会明显变慢）；排查花屏、闪烁或崩溃时临时打开。");
 
     if (renderer == 0)
     {
@@ -2647,6 +5194,7 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
             "自动（默认高性能显卡）", "没有检测到可用的 Vulkan 显卡。");
     }
     else
+#endif
     {
         /*
          * OpenGL has no API for choosing a GPU, so this is not a setting - and the panel no longer
@@ -2686,15 +5234,8 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
         UiTextDim("(?)");
         if (ImGui::IsItemHovered())
             UiTooltip(
-                "OpenGL 无法在程序内选择显卡（OpenGL 没有设备枚举接口）。\n"
-                "本程序只能“请求”使用独立显卡，驱动可以不理会。\n"
-                "\n"
-                "要改用另一块显卡：\n"
-                "Windows 设置 → 系统 → 显示 → 显卡（或“高级显示器设置”里的图形设置），\n"
-                "为 Supermodel-VK.exe 指定“高性能”，然后重新启动本程序。\n"
-                "\n"
-                "注意：该设置是否对 OpenGL 生效由驱动决定，且本程序无法检测它是否被采纳，\n"
-                "以上一行 GL_RENDERER 为准。");
+                "OpenGL 无法在程序内选择显卡，只能「请求」独显。\n"
+                "要换卡：Windows 设置 → 系统 → 显示 → 图形，为该程序指定「高性能」。");
     }
 
     /*
@@ -2743,7 +5284,7 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
     for (int i = 0; i < IM_ARRAYSIZE(presets); i++)
         presetLabels[i] = Tr(presets[i].label);
     presetLabels[IM_ARRAYSIZE(presets)] = Tr("自定义分辨率");
-    if (ImGui::Combo(Tr("分辨率"), &preset, presetLabels, IM_ARRAYSIZE(presetLabels)))
+    if (ComboRow(Tr("分辨率"), &preset, presetLabels, IM_ARRAYSIZE(presetLabels)))
     {
         if (preset < IM_ARRAYSIZE(presets))
         {
@@ -2780,7 +5321,56 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
     BoolSetting(config, "宽屏##WideScreen", "WideScreen");
     BoolSetting(config, "垂直同步##VSync", "VSync");
     ImGui::SameLine();
-    BoolSetting(config, "显示帧率##ShowFrameRate", "ShowFrameRate");
+    /*
+     * Named for where it writes, not for what it measures.
+     *
+     * "Show frame rate" read as if it controlled the readout's FPS line, which is why it looked
+     * redundant next to the Stats panel box. It does something else - the window title, plus the audio
+     * buffer counters that the readout does not carry - and the label now says so.
+     */
+    BoolSetting(config, "标题栏帧率##ShowFrameRate", "ShowFrameRate");
+    if (ImGui::IsItemHovered())
+        UiTooltip("%s", Tr("每秒把帧率和音频缓冲欠载/溢出计数写进标题栏；独占全屏时看不到。"));
+    ImGui::SameLine();
+
+    /*
+     * Colour presets for the readout. ImGui keeps the item pointers for as long as the popup is
+     * open, so the translated labels live in a static array, like the other combos on this page.
+     * The combo carries no visible caption: the row is already full and the current preset name is
+     * self-explanatory. The explanation is a tooltip on the box itself, not another (?) marker.
+     *
+     * It sits before the checkbox that turns the readout on, and is disabled while that box is
+     * clear: changing the colours of something that is not drawn only invites the question of why
+     * nothing happened.
+     *
+     * Width matters here. At the 1280-pixel minimum this row is only 805 px wide and the three
+     * checkboxes plus their help marker consume most of it; inserting the picker before the last
+     * checkbox costs its width plus one gap. The English preset names are therefore single words
+     * (the full names live in the tooltip) and "Statistics panel" becomes "Stats panel", so the
+     * row fits without clipping or wrapping at the minimum width.
+     */
+    static const char* statsStyleItems[] = {
+        "琥珀经典", "冷灰暖黄", "高对比", "极简描边"
+    };
+    static const char* statsStyleTr[4];
+    const char* const* statsStyleLabels = UiItems(statsStyleItems, 4, statsStyleTr);
+    int statsStyle = config["StatsOsdStyle"].ValueAsDefault<int>(0);
+    if (statsStyle < 0 || statsStyle >= 4)
+        statsStyle = 0;
+    const bool statsStyleEnabled = config["ShowStatsOsd"].ValueAsDefault<bool>(false);
+    if (!statsStyleEnabled)
+        ImGui::BeginDisabled();
+    if (ComboRow(Tr("##StatsOsdStyle"), &statsStyle, statsStyleLabels, 4))
+        config.Set("StatsOsdStyle", statsStyle);
+    if (!statsStyleEnabled)
+        ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        UiTooltip("%s", Tr("统计面板的配色预设（先勾选「统计面板」）。\n"
+            "琥珀经典：天青标签 + 琥珀数值，帧率按 57/50 fps 变色。\n"
+            "冷灰暖黄：标签低调，数值暖黄。\n"
+            "高对比：深底板 + 白标签，适合亮场景。\n"
+            "极简描边：无底板，文字带黑描边。"));
+
     ImGui::SameLine();
     /*
      * The readout is toggled in play with the key above Tab, and saying so here is the only way anyone
@@ -2788,10 +5378,8 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
      */
     BoolSetting(config, "统计面板##ShowStatsOsd", "ShowStatsOsd");
     HelpMarker(
-        "在游戏画面左上角显示一串实时数据：渲染引擎、屏幕刷新率与同步方式、CPU 频率与占用、"
-        "GPU 频率与占用、显存与内存占用、帧率和 1% Low 帧率。\n"
-        "游戏里按 Tab 上面那个键（`）也能开关。\n"
-        "只有 Vulkan 渲染引擎下有效。");
+        "在画面左上角显示引擎、刷新率、CPU/GPU 频率与占用、内存、帧率和 1% Low。\n"
+        "游戏里按 ` 键开关；Vulkan 与 OpenGL 都支持。");
 
     /*
      * What integer scaling is actually doing, stated rather than left to be inferred.
@@ -2834,6 +5422,7 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
             ImGui::Unindent();
         }
     }
+
 
     // Arcade-exact sync: how the display is driven. One choice out of three rather than two
     // independent checkboxes.
@@ -2882,23 +5471,16 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
         {
             if (arcadeModeAvailable)
                 UiTooltip(
-                    "怎么选：\n"
-                    "  · 显示器支持 VRR（G-SYNC/FreeSync）→ 选第 2 项\n"
-                    "  · 显示器不支持 VRR，但已检测到 57/58Hz 模式 → 选第 3 项\n"
-                    "  · 两者都没有 → 留在第 1 项（第 3 项不可用）\n"
-                    "\n"
-                    "三种方式的区别只在于「谁定下一次扫描」：\n"
-                    "第 1 项由桌面合成器定（面板按自身刷新率），\n"
-                    "第 2 项由显示器跟随模拟器，第 3 项把显示器锁到 57.5Hz。");
+                    "第 1 项：无边框，桌面合成器定节奏，最省事。\n"
+                    "第 2 项：显示器跟随模拟器，需要 VRR。\n"
+                    "第 3 项：把显示器锁到 57.5Hz，需已有 57/58Hz 模式。\n"
+                    "怎么选：有 VRR 用第 2 项，否则第 1 项。");
             else
                 UiTooltip(
-                    "怎么选：\n"
-                    "  · 显示器支持 VRR（G-SYNC/FreeSync）→ 选第 2 项\n"
-                    "  · 否则留在第 1 项；想用第 3 项需先在显卡控制面板创建 57.524Hz 自定义分辨率\n"
-                    "\n"
-                    "三种方式的区别只在于「谁定下一次扫描」：\n"
-                    "第 1 项由桌面合成器定（面板按自身刷新率），\n"
-                    "第 2 项由显示器跟随模拟器，第 3 项把显示器锁到 57.5Hz。");
+                    "第 1 项：无边框，桌面合成器定节奏，最省事。\n"
+                    "第 2 项：显示器跟随模拟器，需要 VRR。\n"
+                    "第 3 项：把显示器锁到 57.5Hz，需先建自定义分辨率。\n"
+                    "怎么选：有 VRR 用第 2 项，否则第 1 项。");
         }
 
         if (UiRadioButton("无边框全屏（默认）##SyncOff", mode == 0))
@@ -2907,87 +5489,84 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
         UiTextDim("(?)");
         if (ImGui::IsItemHovered())
             UiTooltip(
-                "游戏和设置界面共用同一个窗口，来回切换更顺，\n"
-                "代价是有时帧率略低。\n"
-                "\n"
-                "【例外】若驱动已为「窗口和全屏模式」启用 G-SYNC/FreeSync\n"
-                "（NVIDIA 控制面板 → 设置 G-SYNC），本模式也能让显示器跟随模拟器，\n"
-                "效果与下面的独占模式相同，且无需自定义分辨率。\n"
-                "这一点本程序无法检测，只能看显示器自己的实时刷新率：\n"
-                "游戏运行时显示约 57-58Hz 表示已生效；显示桌面刷新率（如 120Hz）则未生效，\n"
-                "此时画面会有轻微帧节奏不均，用下面的独占模式可以消除。");
+                "与设置界面共用窗口，来回切换最顺，帧率可能略低。\n"
+                "驱动已为窗口启用 G-SYNC 时，本模式也能让面板跟随。");
 
         if (UiRadioButton("独占全屏 · G-SYNC/VRR##SyncGSync", mode == 1))
             applyMode(1);
         ImGui::SameLine();
         UiTextDim("(?)");
         if (ImGui::IsItemHovered())
+        {
+#if defined(SUPERMODEL_OPENGL_ONLY)
             UiTooltip(
-                "让显示器的 G-SYNC/FreeSync 跟着模拟器的帧率走，画面不撕裂。\n"
-                "需要 VRR 显示器，驱动里也要开启；不需要自定义分辨率。\n"
-                "\n"
-                "【必须满足】显示器支持 VRR，且其刷新率范围包含 57.5Hz。\n"
-                "本程序会读取 EDID 的时序范围：\n"
-                "若包含 57.5Hz，就直接按街机 57.5Hz 呈现（「画面」页的「刷新率」显示 57.5 并置灰）；\n"
-                "若读不到 EDID 或不包含，则仍按「画面」页的「刷新率」呈现。\n"
-                "EDID 没写 VRR 范围时，可以在这些地方确认\n"
-                "（都看「范围」而不是「是否支持」）：\n"
-                "  · Windows 11：设置 → 系统 → 显示 → 高级显示器设置\n"
-                "  · NVIDIA 控制面板 → 设置 G-SYNC（会列出该显示器的刷新率范围）\n"
-                "  · 显示器自带的 OSD 菜单（多数游戏屏会显示当前实时刷新率）\n"
-                "若显示器不支持，本项不会报错也不会更差，只是退回按面板自身的刷新率输出，\n"
-                "画面会有和「无边框全屏」类似的轻微帧节奏不均。\n"
-                "\n"
-                "【笔记本内屏】多数笔记本内置屏不支持 VRR（外接电竞屏通常支持）。\n"
-                "这类机器上本项与「无边框全屏」等价 —— 面板仍按自身刷新率，\n"
-                "既不会更差也不会更好，可以留在第 1 项。");
+                "独占全屏，显示器跟随模拟器，需要 VRR（EDID 范围含 57.5Hz）。\n"
+                "若读不到 EDID 或不包含，仍按「画面」页的刷新率呈现。");
+#else
+            UiTooltip(
+                "独占全屏，显示器跟随呈现节奏，需要 VRR。\n"
+                "面板的 VRR 范围必须包含当前呈现速率（见「画面」页）。");
+#endif
+        }
 
         if (mode == 1)
         {
             ImGui::Indent();
+#if defined(SUPERMODEL_OPENGL_ONLY)
             if (VrrArcadeRateSupported())
                 UiTextDim("已按街机 57.5Hz 自动呈现（显示器时序范围包含 57.5Hz）。");
             else
                 UiTextDim("未确认显示器时序范围包含 57.5Hz，按「画面」页的刷新率呈现。");
+#else
+            /*
+             * Name the rate the panel will actually follow. This is the line that keeps "Fixed 120 Hz"
+             * and "exclusive G-SYNC" from reading as contradictory choices: the cadence group on the
+             * Video tab owns the rate, this option only decides who drives the scan.
+             */
+            double presentHz = kModel3StepHz;
+            const int paceMode = config["RefreshRateMode"].ValueAsDefault<int>(1);
+            if (paceMode == 2)
+                presentHz = config["FixedRefreshRate"].ValueAsDefault<int>(120);
+            else if (paceMode >= 3 && paceMode <= 6)
+            {
+                static const int kPhases[] = { 0, 0, 0, 2, 3, 4, 8 };
+                presentHz = kModel3StepHz * kPhases[paceMode];
+            }
+            else if (paceMode != 0)
+            {
+                // Auto, and anything unrecognised (Main.cpp maps the latter to Auto as well).
+                OSD::Platform::DisplayMode desktopMode{};
+                presentHz = (OSD::Platform::GetDesktopDisplayMode(OSD::Platform::kPrimaryDisplay, &desktopMode) &&
+                    desktopMode.refreshHz > 1.0f) ? (double)desktopMode.refreshHz : 60.0;
+            }
+            UiTextDim("面板会跟随呈现节奏（%.2f Hz）扫描；节奏本身在「画面」页设置。", presentHz);
+#endif
             ImGui::Unindent();
         }
 
         /*
          * Why the requirements above are a tooltip and not a paragraph.
          *
-         * The declared timing range now decides the pacing rate, not just the wording: this tooltip
-         * is where the reader learns why the rate did or did not switch to the arcade one. But
-         * "said" does not have to mean "occupies five lines of the page": the sentence is there when
-         * someone is deciding, and out of the way when they are not. The same reasoning applies to
-         * the fixed-rate notes below.
+         * The two builds answer different questions here. In the OpenGL build the declared EDID
+         * range still decides the frame limiter, so the tooltip is where the reader learns why the
+         * rate did or did not switch to 57.5 Hz. In the Vulkan build the cadence group owns the rate
+         * and this option only decides who drives the scan; the range still matters, but relative to
+         * whatever rate that group produces. Either way "said" does not have to mean five lines on
+         * the page: the sentence is there when someone is deciding, and out of the way when not.
          */
 
         /*
-         * Said here rather than only in the README, because the declared range is what decides the
-         * pacing rate - and the usual reason someone believes G-SYNC is on while the picture is
-         * still uneven.
+         * Why the option is not disabled when the EDID does not declare a VRR range.
          *
-         * "The display supports G-SYNC" and "the display will sync at 57.5 Hz" are different claims.
-         * Variable refresh only works between the display's own minimum and maximum rates, and the
-         * minimum is often 48 Hz but can be 60 - in which case 57.5 Hz is outside the range entirely
-         * and the driver either repeats frames to reach the minimum or stops varying altogether.
-         * ResolveFullScreenMode() reads the declared range and only switches to the arcade rate when
-         * 57.5 Hz is inside it; otherwise the configured rate is kept. The sentence stays because a
-         * display that declares nothing still gets the configured rate, and it is worth knowing why.
+         * A declaration proves the capability, but its absence proves nothing: a display can support
+         * VRR without announcing it (older AMD HDMI FreeSync lives in the driver rather than in the
+         * EDID). Disabling on a missing declaration would take the option away from users who have
+         * the capability and simply do not announce it. So the option stays selectable and the
+         * consequence of a display that cannot do it is stated instead.
          *
-         * Deliberately not used to disable the option, and the reason is not that detection is
-         * impossible - a display's declared range IS read, and shown above when it states one. The
-         * reason is the asymmetry of that evidence: a declaration proves the capability, but its
-         * absence proves nothing, because a display can support VRR without declaring it (older AMD
-         * HDMI FreeSync lives in the driver rather than in the EDID). Disabling on a missing
-         * declaration would take the option away from users who have the capability and simply do not
-         * announce it - which is the worst possible reading of the data. So the option stays
-         * selectable and the consequence of a display that cannot do it is stated instead.
-         *
-         * Note the asymmetry with the fixed-rate option above, which *is* disabled. That one can be
-         * checked and its failure is provable - it would do exactly what G-SYNC does. This one's
-         * failure is merely a missed opportunity: the session still runs, at the desktop mode, with
-         * frame pacing no worse than borderless.
+         * Note the asymmetry with the fixed-rate option below, which *is* disabled. That one can be
+         * checked and its failure is provable. This one's failure is merely a missed opportunity:
+         * the session still runs, at the desktop mode, with frame pacing no worse than borderless.
          */
 
         /*
@@ -3019,8 +5598,8 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
             std::string tip;
             if (arcadeModeAvailable)
             {
-                tip = "把显示器锁到真机的 57.5Hz，与帧率 1:1，画面最顺滑。\n"
-                      "少数显示器或驱动不接受该时序，遇到黑屏就换回上面的选项。";
+                tip = "把显示器锁到真机 57.5Hz，与帧率 1:1。\n"
+                      "少数显示器/驱动不接受该时序，黑屏就换回上一项。";
             }
             else
             {
@@ -3037,27 +5616,13 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
                  * this does not matter" is what stops that reading - and moving it into the tooltip
                  * cost nothing, since the one line left on the page still says what is disabled.
                  */
-                tip = "把显示器锁到真机的 57.5Hz，与帧率 1:1，画面最顺滑。\n"
-                      "这是给没有 VRR 的显示器用的替代方案，需要先创建自定义分辨率。\n"
-                      "少数显示器或驱动不接受该时序，遇到黑屏就换回上面的选项。\n"
-                      "\n"
-                      "【本项为何不可用】\n"
-                      "本项需要一个 57/58Hz 的「固定模式」，而 VRR 是另一回事：\n"
-                      "VRR 是一段可以落在其中的范围，不需要存在某个具体速率对应的模式。\n"
-                      "所以「没有 57/58Hz 模式」并不等于「做不到 57.5Hz」——\n"
-                      "若显示器支持 VRR，用上面的 G-SYNC 即可，不受此影响。\n"
-                      "\n"
-                      "【不支持 VRR 时怎么办】\n"
-                      "需在显卡控制面板创建一个 57.524Hz 自定义分辨率\n"
-                      "（见 Scripts\\ArcadeDisplay.ps1，创建后自动生效）。\n"
-                      "创建前请对照下方列出的该显示器「时序范围」：\n"
-                      "若 57.5Hz 不在其中，创建也不会被接受。\n"
-                      "\n"
-                      "注意「在时序范围内」只是必要条件 —— 它说明面板会接受该时序，\n"
-                      "是否真能创建还取决于显卡驱动是否开放自定义分辨率（多数笔记本面板不开放）。\n"
-                      "另：未标「已声明 VRR」不代表不支持，只是 EDID 里没写。";
+                tip = "把显示器锁到真机 57.5Hz，与帧率 1:1。\n"
+                      "不可用＝没有 57/58Hz 固定模式；支持 VRR 的话用上一项即可。\n"
+                      "没有 VRR 时需先在驱动里创建 57.524Hz 自定义分辨率。";
             }
-            UiTooltip("%s", tip.c_str());
+            // Same trap as the multiple buttons: the text was assembled from
+            // literals into a std::string, so the format "%s" is all Tr() sees.
+            UiTooltip("%s", Tr(tip.c_str()));
         }
 
         if (!arcadeModeAvailable || mode == 2)
@@ -3069,7 +5634,7 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
             }
             else
             {
-                UiTextColored(kAttentionColour,
+                UiTextColored(AttentionColour(),
                     "未检测到显示器的 57/58 Hz 模式，此项不可选。");
 
                 /*
@@ -3131,7 +5696,7 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
 
     UiSep("手柄");
     struct InputChoice { const char* id; const char* label; };
-#ifdef _WIN32
+#if defined(_WIN32) && defined(SUPERMODEL_PLATFORM_SDL2)
     static const InputChoice choices[] = {
         { "xinput", "XInput（Xbox 手柄）" },
         { "dinput", "DirectInput" },
@@ -3153,7 +5718,7 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
     const char* inputLabels[IM_ARRAYSIZE(choices)];
     for (int i = 0; i < IM_ARRAYSIZE(choices); i++)
         inputLabels[i] = Tr(choices[i].label);
-    if (ImGui::Combo(Tr("输入系统##InputSystem"), &inputIndex, inputLabels, IM_ARRAYSIZE(inputLabels)))
+    if (ComboRow(Tr("输入系统##InputSystem"), &inputIndex, inputLabels, IM_ARRAYSIZE(inputLabels)))
     {
         config.Set("InputSystem", std::string(choices[inputIndex].id));
         inputs.reset();
@@ -3161,12 +5726,30 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
     ImGui::SameLine();
     UiTextDim("(?)");
     if (ImGui::IsItemHovered())
+    {
+#if defined(_WIN32) && defined(SUPERMODEL_PLATFORM_SDL2)
         UiTooltip(
-            "%s\n%s\n%s\n\n%s",
-            Tr("按键在「按键」页里改。Xbox 手柄选 XInput，左右扳机才能分开。"),
-            Tr("手柄按键按「位置」对应，不看你手柄上印的字："),
-            Tr("    Back / Select / Share 位置 = 投币      Start / Options / Menu 位置 = 启动 / 确认"),
-            Tr("不同输入系统下扳机轴的名字不同，切换后原来的绑定会失效：XInput / SDL 手柄用 JOY1_RZAXIS，DirectInput / Raw Input / SDL 用 JOY1_ZAXIS_POS。"));
+            "%s\n%s\n%s\n%s",
+            Tr("XInput：Xbox 手柄，左右扳机分开。"),
+            Tr("DirectInput / Raw Input：旧手柄或特殊设备。"),
+            Tr("SDL：通用读取；SDL 手柄：按标准手柄映射，推荐。"),
+            Tr("按键在「按键」页改；切换系统后旧绑定会失效。"));
+#else
+        UiTooltip(
+            "%s\n%s\n%s",
+            Tr("SDL 手柄：按标准手柄映射，推荐；Xbox 手柄请选它（Windows 上经 XInput 读取，左右扳机分开）。"),
+            Tr("SDL：通用读取，适合键盘、鼠标或非标准设备。"),
+            Tr("按键在「按键」页改；切换系统后旧绑定会失效。"));
+#endif
+    }
+#if !defined(SUPERMODEL_PLATFORM_SDL2)
+    /*
+     * Say it where the choice is made. The SDL3 build has no DirectInput/XInput/Raw Input backend
+     * (see GetInputSystem), and an Xbox pad owner looking for the old "XInput" entry otherwise
+     * concludes the controller support is missing rather than renamed.
+     */
+    UiTextDim("Xbox 手柄选「SDL 手柄」；本版本不提供 XInput / DirectInput。");
+#endif
     BoolSetting(config, "力反馈##ForceFeedback", "ForceFeedback");
     DrawTriggerPairingHint(config);
 
@@ -3240,7 +5823,7 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
         familyLabels[0] = autoFamilyLabel;
     }
 
-    if (ImGui::Combo(Tr("手柄型号##ControllerFamily"), &familyIndex, familyLabels, IM_ARRAYSIZE(familyLabels)))
+    if (ComboRow(Tr("手柄型号##ControllerFamily"), &familyIndex, familyLabels, IM_ARRAYSIZE(familyLabels)))
     {
         presetFamily = families[familyIndex].id;
         config.Set("ControllerFamily", presetFamily);
@@ -3297,7 +5880,7 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
     const char* controlPresetLabels[IM_ARRAYSIZE(controlPresets)];
     for (int i = 0; i < IM_ARRAYSIZE(controlPresets); i++)
         controlPresetLabels[i] = Tr(controlPresets[i].label);
-    ImGui::Combo(Tr("键位预设##ControlPreset"), &presetIndex, controlPresetLabels, IM_ARRAYSIZE(controlPresetLabels));
+    ComboRow(Tr("键位预设##ControlPreset"), &presetIndex, controlPresetLabels, IM_ARRAYSIZE(controlPresetLabels));
 
     if (UiButton("应用推荐键位"))
         ImGui::OpenPopup("ApplyPreset");
@@ -3308,21 +5891,18 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
     UiSep("视角切换");
     BoolSetting(config, "单键循环切换视角##VRCycle", "VRCycle");
     HelpMarker(
-        "开启后用一个键循环切换 4 个视角，不再占用 4 个键位。\n"
-        "只影响有 4 视角的游戏（Daytona 2、Scud Race、Le Mans 24）。");
+        "开启后一个键循环切换 4 个视角；只影响有 4 视角的游戏（Daytona 2、Scud Race、Le Mans 24）。");
     if (config["VRCycle"].ValueAsDefault<bool>(false))
     {
         const char* viewNames[] = { Tr("VR1（红）"), Tr("VR2（蓝）"), Tr("VR3（黄）"), Tr("VR4（绿）") };
         int def = config["VRDefaultView"].ValueAsDefault<int>(2);
-        ImGui::SetNextItemWidth(200.0f);
-        if (ImGui::Combo(Tr("起始视角##VRDefaultView"), &def, viewNames, 4))
+        if (ComboRow(Tr("起始视角##VRDefaultView"), &def, viewNames, 4))
             config.Set("VRDefaultView", def);
         ImGui::SameLine();
         UiTextDim("(?)");
         if (ImGui::IsItemHovered())
             UiTooltip(
-                "进入游戏时默认使用的视角。\n"
-                "Daytona 2 的默认第三人称跟车视角是 VR3（黄）。");
+                "进入游戏时的默认视角；Daytona 2 的第三人称跟车视角是 VR3（黄）。");
     }
 
     if (ImGui::BeginPopupModal("ApplyPreset", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
@@ -3336,7 +5916,7 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
 
             // When auto-detecting, also adopt the input system the pad works best with,
             // which is what makes the analogue triggers behave.
-            std::string system = config["InputSystem"].ValueAsDefault<std::string>("xinput");
+            std::string system = config["InputSystem"].ValueAsDefault<std::string>("sdlgamepad");
             if (presetFamily == "auto" && !detected.inputSystem.empty())
                 system = detected.inputSystem;
 
@@ -3458,9 +6038,9 @@ static const int kCrtPresetCount = (int)(sizeof(kCrtPresets) / sizeof(kCrtPreset
  */
 static int CrtPresetOutputHeight()
 {
-	SDL_DisplayMode mode{};
-	if (SDL_GetDesktopDisplayMode(0, &mode) == 0 && mode.h > 0)
-		return mode.h;
+	OSD::Platform::DisplayMode mode{};
+	if (OSD::Platform::GetDesktopDisplayMode(OSD::Platform::kPrimaryDisplay, &mode) && mode.height > 0)
+		return mode.height;
 	return 2160;
 }
 
@@ -3528,7 +6108,8 @@ static int CrtMaskPeriod(int maskType, int maskScale)
  * Everything here is hand-written, which is why these keys are listed in HasDedicatedUI: otherwise
  * the generic renderer would draw them a second time from the Video group.
  */
-static void DrawBezelSettings(Util::Config::Node& config, SDL_Window* window)
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+static void DrawBezelSettings(Util::Config::Node& config, OSD::Platform::Window* window)
 {
 	UiSep("机柜背景图");
 
@@ -3550,8 +6131,7 @@ static void DrawBezelSettings(Util::Config::Node& config, SDL_Window* window)
 		mode = 0;
 
 	const char* modes[] = { Tr("关闭"), Tr("内置机柜图"), Tr("自选图片") };
-	ImGui::SetNextItemWidth(220.0f);
-	if (ImGui::Combo(Tr("背景图##BezelMode"), &mode, modes, 3))
+	if (ComboRow(Tr("背景图##BezelMode"), &mode, modes, 3))
 		config.Set("BezelMode", mode);
 
 	if (mode == 2)
@@ -3619,184 +6199,83 @@ static void DrawBezelSettings(Util::Config::Node& config, SDL_Window* window)
 		}
 	}
 }
+#endif
 
 /*
- * Advanced rendering settings. These live in the Video group like the rest of the renderer
- * options, but are kept on their own page because they are only honoured by the Vulkan backend and
- * need a new session - the render targets and pipelines are built when a game starts.
+ * CRT colour and 2D upscaling.
  *
- * A new session, not a program restart: RunGameSession() is called once per game and tears the
- * renderer down afterwards, so returning to this window with Esc and starting a game is enough. The
- * wording in the panel deliberately says so, because "restart" reads as "close the program".
+ * Both are picture decisions and both renderers honour them: OpenGL applies the colour matrices in
+ * SuperAA and compiles the upscale filter into the tile shader, Vulkan applies them in its post and
+ * composite passes. They used to be generic Core entries, which put two picture combos in a list of
+ * runtime switches - the colour preset in particular read as an emulation-core option.
  */
-void DrawAdvancedSettingsPanel(Util::Config::Node& config, bool overlayMode)
+void DrawPictureModeSettings(Util::Config::Node& config, bool overlayMode)
 {
-    // RAII-ish: restored on exit so a later caller cannot be affected. The settings window draws this
-    // with the flag clear and the overlay with it set; the two never run in the same frame, but
-    // leaving a global flipped would be the kind of thing that only shows up much later.
+    // Same rule as DrawAdvancedSettingsPanel: the overlay drops the (?) markers, and the OpenGL
+    // caveat has to be a visible line instead. Restored on exit so a later caller is unaffected.
     const bool previousOverlayMode = g_overlayMode;
     g_overlayMode = overlayMode;
 
+    UiSep("色彩与缩放");
+
+    // Values must match the allow-lists in Main.cpp and the labels special-cased in ProcessCombo().
+    static const char* colourItems[] = { "关闭", "ARI/D93（日版）", "PVM", "BT.601 525/D93", "BT.601 525/D65（美版）", "BT.601 625/D65（欧版）" };
+    int colour = config["CRTcolors"].ValueAsDefault<int>(0);
+    static const char* colourTr[6];
+    const std::string colourLabel = std::string(Tr("CRT 色彩")) + "##CRTcolors";
+    if (ComboRow(colourLabel.c_str(), &colour, UiItems(colourItems, 6, colourTr), 6))
+        config.Set("CRTcolors", colour);
+    HelpMarker(
+        "把当时街机 CRT 的色温换算到 sRGB，只改颜色。\n"
+        "关闭：不转换，保持原始颜色。\n"
+        "ARI/D93：日版机台的白点（偏冷）。\n"
+        "PVM：专业监视器的白点。\n"
+        "BT.601 525/D93、525/D65：美版 525 行制式（冷 / 标准白）。\n"
+        "BT.601 625/D65：欧版 625 行制式。\n"
+        "不确定就保持关闭；Vulkan 即时生效，OpenGL 下一局生效。");
+
+    static const char* upscaleItems[] = { "锐利", "双五次", "双线性", "双三次" };
+    int upscale = config["UpscaleMode"].ValueAsDefault<int>(2);
+    static const char* upscaleTr[4];
+    const std::string upscaleLabel = std::string(Tr("2D 放大")) + "##UpscaleMode";
+    if (ComboRow(upscaleLabel.c_str(), &upscale, UiItems(upscaleItems, 4, upscaleTr), 4))
+        config.Set("UpscaleMode", upscale);
+    HelpMarker(
+        "2D 层（HUD、文字）放大用的滤镜。\n"
+        "锐利：最近邻，最硬但有锯齿。\n"
+        "双五次 / 双三次：平滑且保留细节。\n"
+        "双线性：最平滑、最软。\n"
+        "Vulkan 即时生效；OpenGL 下一局生效。");
+
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+    // The overlay hides the help markers, so the OpenGL caveat has to be visible in its own line.
+    // In the settings window the (?) text above already says it, and repeating it would be noise.
+    if (g_overlayMode && !config["Vulkan3DEngine"].ValueAsDefault<bool>(false))
+        UiTextDim("OpenGL：这两项需要重新开一局生效。");
+#else
+    // The OpenGL-only build has no renderer choice: every session is OpenGL.
+    if (g_overlayMode)
+        UiTextDim("OpenGL：这两项需要重新开一局生效。");
+#endif
+
+    g_overlayMode = previousOverlayMode;
+}
+
+/*
+ * CRT filter and glass glow.
+ *
+ * These are picture settings, so they are drawn on the Video page of the settings window; the
+ * in-game panel calls this too, because a shadow mask is judged by eye against a moving picture.
+ * They were the tail of the advanced page on Core, which put a picture decision two tabs away
+ * from the picture options.
+ *
+ * Greyed out rather than hidden when the OpenGL renderer is running: the keys are read by
+ * Vulkan2D only, so on that backend they can never apply.
+ */
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+static void DrawCrtFilterSettings(Util::Config::Node& config)
+{
     const bool vulkan = config["Vulkan3DEngine"].ValueAsDefault<bool>(false);
-
-    /*
-     * "Start a new game", not "restart the emulator".
-     *
-     * It said restart, which overstates it: the renderer, its render targets and its pipelines are all
-     * built per session, and quitting a game with Esc returns to the settings window rather than
-     * exiting. So the whole procedure is Esc, change the setting, start a game - and telling someone
-     * to close and reopen the program sends them through a longer loop for no reason.
-     *
-     * The overlay cannot offer these because it runs inside a session that is already under way.
-     */
-    UiTextDim(overlayMode
-        ? "滤镜和宽屏开关即时生效；抗锯齿等选项仍需要重新开一局。"
-        : "这些选项需要重新开一局才会生效（不用退出程序：按 Esc 回到本窗口再启动即可）。");
-    if (!vulkan)
-    {
-        ImGui::Spacing();
-        // The renderer radios are on the 常用 (Common) page - not on 画面 (Video), which is where this
-        // text used to send people. 画面 holds resolution, fullscreen, CRT colour and 2D upscaling,
-        // all of which work under OpenGL too; naming it here sent the reader to a page that cannot
-        // change the renderer at all.
-        UiText("当前渲染引擎是 OpenGL，本页的抗锯齿与滤镜都不起作用。");
-        UiText("想用这些效果，请到「常用」页把渲染引擎切换到 Vulkan 3D。");
-        ImGui::Spacing();
-    }
-
-    /*
-     * The page is disabled as a whole when Vulkan is not running, rather than control by control.
-     *
-     * Everything here is Vulkan-only with exactly one exception - integer scaling, which is applied
-     * where the viewport geometry is computed and therefore works under either renderer. That
-     * exception steps back out of the disabled block below, which is less code and much harder to get
-     * wrong than wrapping each of the two dozen controls individually: a section added later is
-     * covered automatically, and there is no list of keys to keep in step.
-     */
-    if (!vulkan)
-        ImGui::BeginDisabled();
-
-    UiSep("抗锯齿");
-
-    /*
-     * Hardware MSAA is omitted from the overlay.
-     *
-     * Its sample count is baked into the pipelines and render targets when they are built - that is,
-     * when a game starts - so a control here would appear to work and do nothing until the next one.
-     * The settings window still offers it, because that is where starting a new game is the expected
-     * next step.
-     */
-    if (!overlayMode)
-    {
-    // Values must stay in step with the MSAA config allow-list.
-    static const char* msaaItems[] = { "关闭", "2x MSAA", "4x MSAA", "8x MSAA" };
-    static const int msaaValues[] = { 0, 2, 4, 8 };
-    int msaa = config["MSAA"].ValueAsDefault<int>(0);
-    int msaaIndex = 0;
-    for (int i = 0; i < 4; ++i)
-        if (msaaValues[i] == msaa)
-            msaaIndex = i;
-    ImGui::SetNextItemWidth(220.0f);
-    // The translated list lives in a static array: ImGui holds on to the item pointers for as long
-    // as the popup is open, so it has to survive the frame.
-    static const char* msaaTr[4];
-    if (ImGui::Combo(Tr("硬件 MSAA##MSAA"), &msaaIndex, UiItems(msaaItems, 4, msaaTr), 4))
-        config.Set("MSAA", msaaValues[msaaIndex]);
-    HelpMarker(
-        "显卡对多边形边缘做抗锯齿，贴图本身保持锐利。\n"
-        "效果最好，有独显优先用它。8x 需要驱动支持，4K 下开销很大。");
-    }   // end of the sections omitted from the overlay
-
-    /*
-     * FXAA and integer scaling are also omitted from the overlay.
-     *
-     * FXAA is a matter of "on or off" for a whole session rather than something to dial in, and
-     * integer scaling is worse than that: it is read where the viewport geometry is computed, which
-     * happens on a resize rather than every frame, so a control here would change nothing until the
-     * window was resized. Both stay in the settings window, which is where a restart-expecting
-     * control belongs.
-     *
-     * What is left - and what the overlay exists for - is the CRT filter: a dozen values judged by
-     * eye against a moving picture.
-     */
-    if (!overlayMode)
-    {
-    BoolSetting(config, "FXAA 后处理抗锯齿##PostFXAA", "PostFXAA");
-    HelpMarker(
-        "后处理抗锯齿，开销极低但整个画面会略软。\n"
-        "适合集显；有独显优先用上面的 MSAA。");
-
-    UiSep("画面缩放");
-
-    /*
-     * The one control on this page that is not Vulkan-only, so it steps back out of the disabled
-     * block. Integer scaling is applied in CalcScreenGeometry, which both renderers go through, so
-     * greying it out with the rest would be wrong - and it is the option most likely to be wanted on
-     * an older machine, which is exactly where OpenGL is being used.
-     */
-    if (!vulkan)
-        ImGui::EndDisabled();
-
-    BoolSetting(config, "整数倍缩放（点对点）##IntegerScale", "IntegerScale");
-    HelpMarker(
-        "只按整数倍放大，放不满的部分留黑边。\n"
-        "2D 层的文字会更均匀，代价是损失一些屏幕面积。\n"
-        "倍率由面板的真实分辨率算出来，不是由上面的「分辨率」决定：\n"
-        "384 x 倍率 必须不超过面板行数，所以 2160 行的 4K 屏只能到 5 倍（2480 x 1920）。\n"
-        "勾选后「分辨率」会被覆盖，实际倍率见本页下面的读数。");
-
-    // The same readout as the one on the 常用 page, repeated here because this is the page where the
-    // option is switched on: having to leave the page to learn what it did is the whole problem.
-    {
-        const IntegerScaleInfo info = GetIntegerScaleInfo();
-        if (info.active && info.valid)
-        {
-            ImGui::Indent();
-            UiTextDim("实际生效 %dx：可见区 %d x %d（面板 %d x %d）。",
-                info.multiple, info.visibleWidth, info.visibleHeight,
-                info.panelWidth, info.panelHeight);
-            if (info.nextVisibleHeight > info.panelHeight)
-            {
-                UiTextDim("下一档 %dx 需要 %d 行，本面板只有 %d 行。",
-                    info.nextMultiple, info.nextVisibleHeight, info.panelHeight);
-            }
-            ImGui::Unindent();
-        }
-    }
-    }   // end of the sections omitted from the overlay
-
-    /*
-     * Widescreen is the one display option the overlay exposes. It is live: Vulkan3D re-reads the
-     * key every frame for the 3D frustum and Vulkan2D re-reads it for the compositor rectangle, so
-     * an A/B comparison can be made in the same scene without starting a new game. OpenGL is
-     * deliberately not offered because its viewport and scissor are computed on resize.
-     */
-    if (overlayMode && vulkan)
-    {
-        UiSep("宽屏");
-        BoolSetting(config, "宽屏##WideScreen", "WideScreen");
-        HelpMarker(
-            "只加宽水平视锥，不拉伸画面。\n"
-            "适合在同一场景里对比宽屏开关的效果。\n"
-            "部分游戏的 2D 背景不会延伸到加宽区域，四角可能露黑。");
-        UiTextDim("此开关即时生效，无需重新开局。");
-        /*
-         * The blue border that is not a bug.
-         *
-         * WideBackground stretches the bottom 2D layer across the whole window and is independent of
-         * WideScreen. With the latter off, the 3D picture returns to 4:3 while that stretched layer
-         * still fills the sides and the letterbox, so what looks like a coloured bar is game
-         * background, not a clear colour - there is no setting here that can turn it black except
-         * switching WideBackground off, which lives on the settings window's Video page.
-         */
-        if (!config["WideScreen"].ValueAsDefault<bool>(false) &&
-            config["WideBackground"].ValueAsDefault<bool>(false))
-        {
-            UiTextWarn("「宽屏背景」已开启：2D 背景仍会拉伸铺满窗口，所以取消宽屏后四周不是黑边。要黑边请关掉「宽屏背景」。");
-        }
-    }
-
-    // Back into the disabled block: the CRT and glow sections below are Vulkan-only like the rest.
     if (!vulkan)
         ImGui::BeginDisabled();
 
@@ -3805,18 +6284,22 @@ void DrawAdvancedSettingsPanel(Util::Config::Node& config, bool overlayMode)
      * the in-game panel. Open by default so the filter is still the first thing found there; the
      * open/closed state is kept by ImGui for the session.
      */
-    if (ImGui::CollapsingHeader(Tr("CRT 滤镜##PostCRTSection"), ImGuiTreeNodeFlags_DefaultOpen))
+    const bool crtOpen = ImGui::CollapsingHeader(Tr("CRT 滤镜##PostCRTSection"), ImGuiTreeNodeFlags_DefaultOpen);
+    // The header is clickable whether the section is open or closed.
+    HandOver();
+    if (crtOpen)
     {
     // CRT mode. 0 off, 1 scanlines, 2 scanlines + shadow mask.
     static const char* crtItems[] = { "关闭", "扫描线", "扫描线 + 荫罩" };
     int crt = config["PostCRT"].ValueAsDefault<int>(0);
-    ImGui::SetNextItemWidth(220.0f);
     static const char* crtTr[3];
-    if (ImGui::Combo(Tr("CRT 滤镜##PostCRT"), &crt, UiItems(crtItems, 3, crtTr), 3))
+    if (ComboRow(Tr("CRT 滤镜##PostCRT"), &crt, UiItems(crtItems, 3, crtTr), 3))
         config.Set("PostCRT", crt);
     HelpMarker(
         "模拟街机 CRT 的扫描线和荧光粉点阵。\n"
-        "4K 下最像真机；1080p 建议只开扫描线。");
+        "关闭：不处理。\n"
+        "扫描线：只画横线。\n"
+        "扫描线 + 荫罩：再加荧光粉点阵，最像真机；4K 效果最好。");
 
     // Recommended presets. Placed directly under the mode selector because this is the intended
     // entry point: every entry is a combination that is known not to beat, so nobody has to work out
@@ -3832,8 +6315,7 @@ void DrawAdvancedSettingsPanel(Util::Config::Node& config, bool overlayMode)
 
         static const char* presetTr[kCrtPresetCount + 1];
         int selection = matched + 1;
-        ImGui::SetNextItemWidth(220.0f);
-        if (ImGui::Combo(Tr("推荐配置##PostPreset"), &selection,
+        if (ComboRow(Tr("推荐配置##PostPreset"), &selection,
                 UiItems(presetLabels, kCrtPresetCount + 1, presetTr), kCrtPresetCount + 1))
         {
             if (selection > 0)
@@ -3849,8 +6331,8 @@ void DrawAdvancedSettingsPanel(Util::Config::Node& config, bool overlayMode)
             }
         }
         HelpMarker(
-            "扫描线和点阵都是周期图案，周期不成整数倍时会打拍子，\n"
-            "出现彩色横带。这里列出的组合不会。");
+            "扫描线与点阵的周期不成整数倍会打拍子（彩色横带），这些组合不会。\n"
+            "只改扫描线/荫罩和亮度补偿，不改上面的 CRT 色彩。");
 
         // Spell out the two periods and whether they line up. This turns the artefact from something
         // the user has to recognise by eye into something the panel states outright.
@@ -3932,12 +6414,14 @@ void DrawAdvancedSettingsPanel(Util::Config::Node& config, bool overlayMode)
             // Mask pattern. Keep in step with the PostMaskType allow-list.
             static const char* maskItems[] = { "栅条式（特丽珑类）", "槽孔式（世嘉街机）", "点阵式（普通彩显）" };
             int maskType = config["PostMaskType"].ValueAsDefault<int>(1);
-            ImGui::SetNextItemWidth(220.0f);
             static const char* maskTr[3];
-            if (ImGui::Combo(Tr("点阵类型##PostMaskType"), &maskType, UiItems(maskItems, 3, maskTr), 3))
+            if (ComboRow(Tr("点阵类型##PostMaskType"), &maskType, UiItems(maskItems, 3, maskTr), 3))
                 config.Set("PostMaskType", maskType);
             HelpMarker(
-                "荧光粉的排列方式。世嘉街机用「槽孔式」，想还原原机选它。");
+                "荧光粉的排列方式。\n"
+                "栅条式：特丽珑类显示器。\n"
+                "槽孔式：世嘉街机，想还原原机选它。\n"
+                "点阵式：普通彩显。");
 
             int maskScale = config["PostMaskScale"].ValueAsDefault<int>(2);
             ImGui::SetNextItemWidth(220.0f);
@@ -3958,8 +6442,7 @@ void DrawAdvancedSettingsPanel(Util::Config::Node& config, bool overlayMode)
             if (UiSliderInt("亮度补偿##PostGain", &gain, 100, 250, "%d%%"))
                 config.Set("PostGain", gain);
             HelpMarker(
-                "点阵和扫描线会挡光、让画面变暗，这里补回来。\n"
-                "觉得太暗就往上调。");
+                "点阵和扫描线会让画面变暗，这里补回来；太暗就往上调。");
         }
     }
     }   // end of the CRT section
@@ -3980,20 +6463,450 @@ void DrawAdvancedSettingsPanel(Util::Config::Node& config, bool overlayMode)
         if (UiSliderInt("辉光级数##PostGlowLevels", &levels, 1, 8))
             config.Set("PostGlowLevels", levels);
         HelpMarker(
-            "光晕铺开的范围。级数越多、光晕越大越淡。\n"
-            "4K 用 5，1080p 用 4。");
+            "光晕铺开的范围；级数越多越大越淡。4K 用 5，1080p 用 4。");
 
         int threshold = config["PostGlowThreshold"].ValueAsDefault<int>(40);
         ImGui::SetNextItemWidth(220.0f);
         if (UiSliderInt("辉光阈值##PostGlowThreshold", &threshold, 0, 100, "%d%%"))
             config.Set("PostGlowThreshold", threshold);
         HelpMarker(
-            "多亮的地方才会发光。调高更干净，\n"
-            "调低整片画面会被抬亮、发蒙。");
+            "多亮才开始发光；调高更干净，调低整片会发蒙。");
     }
 
     if (!vulkan)
         ImGui::EndDisabled();
+}
+#endif
+
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+/*
+ * Sinden light-gun border.
+ *
+ * Its own section rather than part of the CRT filter: the border is not a picture effect, it is a
+ * signal for the gun camera, and Vulkan2D draws it after the CRT pass so the two cannot interact.
+ */
+static void DrawLightGunBorderSettings(Util::Config::Node& config)
+{
+    const bool vulkan = config["Vulkan3DEngine"].ValueAsDefault<bool>(false);
+    if (!vulkan)
+        ImGui::BeginDisabled();
+
+    const bool sindenOpen = ImGui::CollapsingHeader(Tr("光枪白边##SindenBorderSection"));
+    HandOver();
+    if (sindenOpen)
+    {
+        const std::string enableLabel = std::string(Tr("Sinden 光枪白边")) + "##SindenBorder";
+        bool enabled = config["SindenBorder"].ValueAsDefault<bool>(false);
+        if (ImGui::Checkbox(enableLabel.c_str(), &enabled))
+            config.Set("SindenBorder", enabled);
+        HandOver();
+        HelpMarker(
+            "在画面四周画白边，供 Sinden 光枪摄像头识别。\n"
+            "画在最终输出上，不受 CRT/机柜背景影响；只对光枪游戏有意义。");
+
+        if (enabled)
+        {
+            int width = config["SindenBorderWidth"].ValueAsDefault<int>(16);
+            ImGui::SetNextItemWidth(220.0f);
+            if (ImGui::SliderInt(Tr("白边宽度##SindenBorderWidth"), &width, 0, 256, "%d px"))
+                config.Set("SindenBorderWidth", width);
+            HelpMarker(
+                "边框像素宽度；1080p 建议 16-32，4K 建议 32-64。");
+
+            int brightness = config["SindenBorderBrightness"].ValueAsDefault<int>(100);
+            ImGui::SetNextItemWidth(220.0f);
+            if (ImGui::SliderInt(Tr("白边亮度##SindenBorderBrightness"), &brightness, 0, 100, "%d%%"))
+                config.Set("SindenBorderBrightness", brightness);
+            HelpMarker(
+                "边框亮度；100% 纯白，环境光强可调低，太低会难识别。");
+        }
+    }
+
+    if (!vulkan)
+        ImGui::EndDisabled();
+}
+#endif
+
+/*
+ * HD texture pack switches, plus a reload button in the in-game panel.
+ *
+ * Drawn on the 核心 page (below the runtime options) and in the in-game panel. The
+ * switches are read by the renderer every simulation frame, so they take effect
+ * without a new session; the panel's reload button and the F4 binding rescans the
+ * pack. While the panel is open the emulator is paused, so a reload completes when
+ * the panel is closed and the game resumes - the hint says so rather than leaving
+ * the button looking unresponsive.
+ *
+ * The settings window has no renderer running, so it offers the switches only; a
+ * pack is scanned when the next session starts.
+ */
+void DrawHDTextureSettings(Util::Config::Node& config, bool overlayMode)
+{
+#if defined(SUPERMODEL_OPENGL_ONLY)
+    (void)config;
+    (void)overlayMode;
+#else
+    bool vulkan = true;
+#if !defined(SUPERMODEL_PURE_VULKAN)
+    // Dual build: the same page is reachable with either renderer selected. The switches and the
+    // reload button are Vulkan-only, so grey them out rather than leaving controls that do nothing.
+    vulkan = config["Vulkan3DEngine"].ValueAsDefault<bool>(false);
+#endif
+
+    UiSep("高清纹理");
+    if (!vulkan)
+        ImGui::BeginDisabled();
+
+    bool load = config["LoadHDTextures"].ValueAsDefault<bool>(false);
+    if (UiCheckbox("加载高清纹理包##LoadHDTextures", &load))
+        config.Set("LoadHDTextures", load);
+    if (!overlayMode)
+        HelpMarker(
+            "读取 Data/Assets/HDTextures/<游戏>/ 里的替换贴图，按内容哈希匹配。\n"
+            "支持 PNG 和 WebP，分辨率可以是原图的 2x、4x、8x 等任意倍数，\n"
+            "并支持完整的 8 位平滑 Alpha。找不到替换的贴图仍用原版。");
+
+    bool dump = config["DumpHDTextures"].ValueAsDefault<bool>(false);
+    if (UiCheckbox("导出当前游戏纹理##DumpHDTextures", &dump))
+        config.Set("DumpHDTextures", dump);
+    if (!overlayMode)
+        HelpMarker(
+            "把游戏实际使用的每块子贴图解码成 RGBA8 PNG，写到\n"
+            "Data/Assets/DumpTextures/<游戏>/，文件名带内容哈希。\n"
+            "同一张内容只写一次；超分后放进 HDTextures 目录即可替换。");
+
+    if (overlayMode)
+    {
+        if (UiButton("重新加载高清纹理##ReloadHDTextures"))
+        {
+            Vulkan3D::RequestHDTextureReload();
+            InfoLog("HD textures: reload requested from the in-game panel.");
+        }
+        ImGui::SameLine();
+        UiTextDim("（也可按 F4；关闭面板后生效）");
+    }
+    else
+    {
+        UiTextDim("替换贴图：Data/Assets/HDTextures/<游戏>/（PNG 或 WebP）");
+        UiTextDim("导出贴图：Data/Assets/DumpTextures/<游戏>/（PNG）");
+        UiTextDim("游戏中按 F4 可重新扫描，无需重启。");
+    }
+
+    if (!vulkan)
+    {
+        ImGui::EndDisabled();
+        UiTextDim("仅 Vulkan 渲染引擎有效，当前不是。");
+    }
+#endif
+}
+
+/*
+ * Advanced rendering settings. These live in the Video group like the rest of the renderer
+ * options, but are kept on their own page because they are only honoured by the Vulkan backend and
+ * need a new session - the render targets and pipelines are built when a game starts.
+ *
+ * A new session, not a program restart: RunGameSession() is called once per game and tears the
+ * renderer down afterwards, so returning to this window with Esc and starting a game is enough. The
+ * wording in the panel deliberately says so, because "restart" reads as "close the program".
+ */
+void DrawAdvancedSettingsPanel(Util::Config::Node& config, bool overlayMode)
+{
+    // RAII-ish: restored on exit so a later caller cannot be affected. The settings window draws this
+    // with the flag clear and the overlay with it set; the two never run in the same frame, but
+    // leaving a global flipped would be the kind of thing that only shows up much later.
+    const bool previousOverlayMode = g_overlayMode;
+    g_overlayMode = overlayMode;
+
+#if defined(SUPERMODEL_OPENGL_ONLY)
+    // This executable has one renderer family; the Vulkan-only page sections below
+    // are not compiled at all.
+    const bool vulkan = false;
+#else
+    const bool vulkan = config["Vulkan3DEngine"].ValueAsDefault<bool>(false);
+#endif
+
+    /*
+     * "Start a new game", not "restart the emulator".
+     *
+     * It said restart, which overstates it: the renderer, its render targets and its pipelines are all
+     * built per session, and quitting a game with Esc returns to the settings window rather than
+     * exiting. So the whole procedure is Esc, change the setting, start a game - and telling someone
+     * to close and reopen the program sends them through a longer loop for no reason.
+     *
+     * The overlay cannot offer these because it runs inside a session that is already under way.
+     */
+    UiTextDim(overlayMode
+        ? "滤镜和宽屏开关即时生效；抗锯齿等选项仍需要重新开一局。"
+        : "这些选项需要重新开一局才会生效（不用退出程序：按 Esc 回到本窗口再启动即可）。");
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+    if (!vulkan)
+    {
+        ImGui::Spacing();
+        // The renderer radios are on the 常用 (Common) page - not on 画面 (Video), which is where this
+        // text used to send people. 画面 holds the picture options (CRT colour, 2D upscaling, the CRT
+        // filter and the backdrop), all of which work under OpenGL too; naming it here sent the
+        // reader to a page that cannot change the renderer at all.
+        UiText("当前渲染引擎是 OpenGL，本页的抗锯齿与滤镜都不起作用。");
+        UiText("想用这些效果，请到「常用」页把渲染引擎切换到 Vulkan 3D。");
+        ImGui::Spacing();
+    }
+#endif
+
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+    if (!vulkan)
+        ImGui::BeginDisabled();
+
+    /*
+     * Hardware MSAA is omitted from the overlay.
+     *
+     * Its sample count is baked into the pipelines and render targets when they are built - that is,
+     * when a game starts - so a control here would appear to work and do nothing until the next one.
+     * The settings window still offers it, because that is where starting a new game is the expected
+     * next step.
+     */
+    if (!overlayMode)
+    {
+    UiSep("抗锯齿");
+    // Values must stay in step with the MSAA config allow-list.
+    static const char* msaaItems[] = { "关闭", "2x MSAA", "4x MSAA", "8x MSAA" };
+    static const int msaaValues[] = { 0, 2, 4, 8 };
+    int msaa = config["MSAA"].ValueAsDefault<int>(0);
+    int msaaIndex = 0;
+    for (int i = 0; i < 4; ++i)
+        if (msaaValues[i] == msaa)
+            msaaIndex = i;
+    static const char* msaaTr[4];
+    if (ComboRow(Tr("硬件 MSAA##MSAA"), &msaaIndex, UiItems(msaaItems, 4, msaaTr), 4))
+        config.Set("MSAA", msaaValues[msaaIndex]);
+    HelpMarker(
+        "显卡对多边形边缘做抗锯齿，贴图保持锐利。\n"
+        "关闭：最快。\n"
+        "2x / 4x：画质与开销的常用折中。\n"
+        "8x：更平滑，4K 下开销大，且需驱动支持。");
+
+    UiSep("贴图过滤");
+
+    /*
+     * Where the 3D scene takes its mip level from.
+     *
+     * The default is what the hardware did: a radial estimate from the polygon's
+     * texture-NP factor, isotropic across the polygon. The other two use the uv
+     * derivatives the quad interpolation makes exact, so a surface running away
+     * from the camera - a road, a wall - keeps the detail its pixel footprint can
+     * support. That is sharper than the hardware rather than identical to it, and
+     * can shimmer slightly where the hardware's blur hid aliasing, hence opt-in.
+     */
+    static const char* texFilterItems[] = { "硬件（按距离，原机行为）", "锐利（屏幕空间导数）", "锐利 + 4x 各向异性" };
+    int texFilter = config["TexFilter"].ValueAsDefault<int>(0);
+    if (texFilter < 0 || texFilter > 2)
+        texFilter = 0;
+    static const char* texFilterTr[3];
+    if (ComboRow(Tr("贴图过滤##TexFilter"), &texFilter, UiItems(texFilterItems, 3, texFilterTr), 3))
+        config.Set("TexFilter", texFilter);
+    HelpMarker(
+        "远处贴图用哪一级 mip。\n"
+        "硬件：按原机径向公式估算，最忠实。\n"
+        "锐利：按像素覆盖面积计算，倾斜路面/墙壁更清晰。\n"
+        "锐利 + 4x 各向异性：再沿拉伸方向采 4 次样。\n"
+        "后两项不是原机行为，可能轻微闪烁。");
+
+    /*
+     * Exact quad interpolation. This is the switch the ultra-low preset turns off: the fragment
+     * stage then uses the rasteriser's interpolated attributes instead of pulling four corners and
+     * solving the quad's own (s, t). It is a quality/performance trade rather than a correctness
+     * option, so it lives next to the other per-pixel lookup choices rather than in the preset only.
+     */
+    bool quadInterpolation = config["QuadInterpolation"].ValueAsDefault<bool>(true);
+    if (UiCheckbox("四边形精确插值##QuadInterpolation", &quadInterpolation))
+        config.Set("QuadInterpolation", quadInterpolation);
+    HelpMarker(
+        "关闭后改用显卡三角形插值，跳过每像素 4 次顶点读取和二次求解。\n"
+        "核显档位用；非平面四边形会有 0-2 对角线接缝。下一局生效。");
+
+    UiSep("半透明排序");
+
+    /*
+     * Real3D 硬件只有两层半透明缓冲，New3D 也是这么还原的：每层每个像素只留
+     * 最靠前的一个面，最后把两层合在一起。同一像素超过两层（尾烟、水花、树叶、
+     * 玻璃）或同一层内提交顺序与深度相反时，就会出现半透明被吞、前后颈倒。
+     *
+     * 逐像素排序把当前 Priority 内每个通过深度测试的半透明片元存进固定槽位，按深度从远到
+     * 近排序后再合成，能彻底解决这两类问题；代价是每个含半透明的 Priority 多两次最小
+     * pass，以及 4 层/像素的 A-Buffer（4K 约 253 MB）。默认保持原版，因为它是逐位兼容的。
+     *
+     * 街机真机把两层半透明各自写进棋盘格的一半像素（偶格 / 奇格），所以密集的效果（Sega
+     * Rally 2 的雪雾）总有一半像素留着后面的不透明画面，而不是两层一重叠就变成实心。代价
+     * 是不再走双 Subpass 片上合成，半透明层要多存一遍再读回来。
+     *
+     * **这一档是试验模式。** 按像素拆层后，合成器只能从 2×2 组反推覆盖，而 LOD 交叉淡化
+     * （Daytona 2 的瀑布：同一个面画两遍、alpha 互补）需要“每一像素两层都在 → 不透明”这个
+     * 信息，它在半像素写入时就丢了。实测瀑布区蓝色像素 20.1%，原版 4.9%（详见
+     * sdl3_reports/2026-10-27-checkerboard-hd）。所以下拉框和提示都标了“试验”，避免用户
+     * 把它当成通用的高清选项。
+     */
+    static const char* alphaSortItems[] = { "原版（双层，逐位兼容）", "逐像素排序（OIT）",
+        "街机真机（棋盘格，试验）" };
+    int alphaSort = config["AlphaSortMode"].ValueAsDefault<int>(0);
+    if (alphaSort < 0 || alphaSort > 2)
+        alphaSort = 0;
+    static const char* alphaSortTr[3];
+    // No trailing label: the section header above already names this option, and at the minimum
+    // window width the duplicate text pushed the (?) onto its own line.
+    if (ComboRow("##AlphaSortMode", &alphaSort, UiItems(alphaSortItems, 3, alphaSortTr), 3))
+        config.Set("AlphaSortMode", alphaSort);
+    HelpMarker(
+        "决定重叠的半透明表面怎么合成。下一局生效。\n"
+        "AlphaSortMode = 0：Original (two layers, bit-exact) —— 原版 OG 的 2-Subpass 快速混合。\n"
+        "AlphaSortMode = 1：Per-pixel sorted (OIT) —— 4 槽位 A-Buffer，现代高画质 OIT。\n"
+        "AlphaSortMode = 2：Arcade hardware (checkerboard) —— 试验模式，只为雪雾/尘土；"
+        "无法还原 LOD 交叉淡化（瀑布、水幕会变成闪动的蓝块），这类场景用 0 或 1。");
+    }   // end of the sections omitted from the overlay
+#endif
+
+    /*
+     * FXAA and integer scaling are also omitted from the overlay.
+     *
+     * FXAA is a matter of "on or off" for a whole session rather than something to dial in, and
+     * integer scaling is worse than that: it is read where the viewport geometry is computed, which
+     * happens on a resize rather than every frame, so a control here would change nothing until the
+     * window was resized. Both stay in the settings window, which is where a restart-expecting
+     * control belongs.
+     *
+     * What is left - and what the overlay exists for - is the CRT filter: a dozen values judged by
+     * eye against a moving picture.
+     */
+    if (!overlayMode)
+    {
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+    BoolSetting(config, "FXAA 后处理抗锯齿##PostFXAA", "PostFXAA");
+    HelpMarker(
+        "开销极低的后处理抗锯齿，画面会略软；有独显优先用 MSAA。");
+#endif
+
+    UiSep("画面缩放");
+
+    /*
+     * The one control on this page that is not Vulkan-only. Integer scaling is applied in
+     * CalcScreenGeometry, which every renderer goes through.
+     */
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+    if (!vulkan)
+        ImGui::EndDisabled();
+#endif
+
+    /*
+     * Low-resolution 3D rendering.
+     *
+     * Rasterises the scene at the Model 3's native 496x384 and upscales it onto the picture, which is
+     * the one change that makes a 24-EU integrated GPU hold 60 Hz at 1080p: the scene is about seven
+     * times cheaper while the 2D HUD keeps its own resolution. It sits next to IntegerScale because
+     * both decide how the finished picture is scaled, and only one of them can be in charge.
+     */
+    	static const char* internalResItems[] = {
+    		"关闭（按画面分辨率渲染）",
+    		"496×384（原生，等比放大）",
+    		"992×768（2x 原生，等比放大）",
+    	};
+    	int internalRes = config["InternalResolution"].ValueAsDefault<int>(0);
+    	if (internalRes < 0 || internalRes > 2)
+    		internalRes = 0;
+    	static const char* internalResTr[3];
+    	// No trailing label either: the options describe themselves, and the label was what pushed the
+    	// (?) onto a second line at 1280 logical width.
+    	if (ComboRow("##InternalResolution", &internalRes,
+    			UiItems(internalResItems, 3, internalResTr), 3))
+    		config.Set("InternalResolution", internalRes);
+    	HelpMarker(
+    		"3D 场景按固定小分辨率渲染，再等比放大到画面矩形；2D HUD 仍按原分辨率，保持清晰。\n"
+    		"关闭：按画面分辨率渲染，最清晰也最慢。\n"
+    		"496×384：街机原生分辨率，与画面矩形同比例；1080p 全屏仍是 1395×1080，左右黑边保留。\n"
+    		"992×768：2 倍原生分辨率，比 496×384 清晰，填充开销仍远低于画面分辨率。\n"
+    		"开启后「整数倍缩放」与「宽屏」不生效。下一局生效。");
+
+    const bool lowRes = config["InternalResolution"].ValueAsDefault<int>(0) != 0;
+    ImGui::BeginDisabled(lowRes);
+    BoolSetting(config, "整数倍缩放（点对点）##IntegerScale", "IntegerScale");
+    ImGui::EndDisabled();
+    HelpMarker(
+        "只按整数倍放大，余量留黑边；文字更均匀，但损失屏幕面积。\n"
+        "倍率按面板真实分辨率算（496×384 的整数倍），勾选后会覆盖「分辨率」。\n"
+        "关闭后全屏按面板分辨率渲染（1080p 上约 1395×1080），核显帧率会明显下降。");
+    if (lowRes)
+        UiTextDim("「低分辨率渲染」已开启，整数倍缩放被忽略。");
+
+    // The same readout as the one on the 常用 page, repeated here because this is the page where the
+    // option is switched on: having to leave the page to learn what it did is the whole problem.
+    {
+        const IntegerScaleInfo info = GetIntegerScaleInfo();
+        if (info.active && info.valid)
+        {
+            ImGui::Indent();
+            UiTextDim("实际生效 %dx：可见区 %d x %d（面板 %d x %d）。",
+                info.multiple, info.visibleWidth, info.visibleHeight,
+                info.panelWidth, info.panelHeight);
+            if (info.nextVisibleHeight > info.panelHeight)
+            {
+                UiTextDim("下一档 %dx 需要 %d 行，本面板只有 %d 行。",
+                    info.nextMultiple, info.nextVisibleHeight, info.panelHeight);
+            }
+            ImGui::Unindent();
+        }
+    }
+    }   // end of the sections omitted from the overlay
+
+    /*
+     * Widescreen is the one display option the overlay exposes. It is live: Vulkan3D re-reads the
+     * key every frame for the 3D frustum and Vulkan2D re-reads it for the compositor rectangle, so
+     * an A/B comparison can be made in the same scene without starting a new game. OpenGL is
+     * deliberately not offered because its viewport and scissor are computed on resize.
+     */
+    if (overlayMode && vulkan)
+    {
+        UiSep("宽屏");
+        /*
+         * Low-resolution rendering needs a scene target the width of the picture, so a widened frustum
+         * has nowhere to go. It wins over widescreen (see CVulkan3D::RefreshSceneViewport), and the
+         * switch is greyed out here rather than left looking live: this section exists to be toggled
+         * while watching the picture, so a control that does nothing would be blamed on the renderer.
+         */
+        const bool lowResSession = config["InternalResolution"].ValueAsDefault<int>(0) != 0;
+        ImGui::BeginDisabled(lowResSession);
+        BoolSetting(config, "宽屏##WideScreen", "WideScreen");
+        ImGui::EndDisabled();
+        HelpMarker(
+            "只加宽水平视锥，不拉伸画面。\n"
+            "部分游戏的 2D 背景不延伸，四角可能露黑。");
+        if (lowResSession)
+            UiTextDim("「低分辨率渲染」已开启，本局宽屏不生效。");
+        else
+            UiTextDim("此开关即时生效，无需重新开局。");
+        /*
+         * The blue border that is not a bug.
+         *
+         * WideBackground stretches the bottom 2D layer across the whole window and is independent of
+         * WideScreen. With the latter off, the 3D picture returns to 4:3 while that stretched layer
+         * still fills the sides and the letterbox, so what looks like a coloured bar is game
+         * background, not a clear colour - there is no setting here that can turn it black except
+         * switching WideBackground off, which lives on the settings window's Video page.
+         */
+        if (!config["WideScreen"].ValueAsDefault<bool>(false) &&
+            config["WideBackground"].ValueAsDefault<bool>(false))
+        {
+            UiTextWarn("「宽屏背景」已开启：2D 背景仍会拉伸铺满窗口，所以取消宽屏后四周不是黑边。要黑边请关掉「宽屏背景」。");
+        }
+    }
+
+    /*
+     * The CRT filter and the glass glow live on the settings window's Video page now, next to the
+     * other picture options. The in-game panel still draws them here: that is the one place they
+     * can be judged against a moving picture.
+     */
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+    if (overlayMode)
+        DrawCrtFilterSettings(config);
+    if (overlayMode)
+        DrawLightGunBorderSettings(config);
+#endif
 
     g_overlayMode = previousOverlayMode;
 }
@@ -4027,6 +6940,13 @@ static bool LoadSettingsFromFile(Util::Config::Node& config, const std::string& 
     const bool couldNotOpen = Util::Config::FromINIFile(&selected, path);
     if (couldNotOpen)
         return false;
+
+#if defined(SUPERMODEL_OPENGL_ONLY)
+    // A file written by the dual-renderer build carries settings this executable
+    // cannot honour.  Dropping them here keeps them out of the count below and,
+    // more importantly, out of the copy that is written back to disk.
+    Util::Config::StripRetiredVulkanSettings(selected);
+#endif
 
     int applied = 0;
     for (auto it = selected.begin(); it != selected.end(); ++it)
@@ -4072,7 +6992,7 @@ static bool LoadSettingsFromFile(Util::Config::Node& config, const std::string& 
         romNote = Util::Format() << Tr("ROM 目录：与当前相同（") << currentRom << Tr("）。");
         useFileRom = true;
     }
-    else if (std::filesystem::is_directory(PathFromUtf8(FileSystemPath::ResolvePath(fileRom))))
+    else if (std::filesystem::is_directory(PathFromUtf8(ResolveRomPath(fileRom))))
     {
         romNote = Util::Format() << Tr("ROM 目录：已改用文件里的目录：") << fileRom;
         useFileRom = true;
@@ -4131,20 +7051,291 @@ static bool LoadSettingsFromFile(Util::Config::Node& config, const std::string& 
     return true;
 }
 
-static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<std::string, Game>& games, int& selectedGameIndex, bool& exit, bool& saveSettings, SDL_Window* window, std::shared_ptr<CInputs>& inputs, KeyBindState& kb)
+static float GetDPIScale(OSD::Platform::Window* window);
+static void ApplyGuiWindowMinimumSize(OSD::Platform::Window* window, float previousScale = 0.0f);
+static void RescaleUi(float scale);
+
+static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<std::string, Game>& games, int& selectedGameIndex, bool& exit, bool& saveSettings, OSD::Platform::Window* window, std::shared_ptr<CInputs>& inputs, KeyBindState& kb)
 {
-    const ImVec4 clear_color = ImVec4(0.965f, 0.957f, 0.937f, 1.00f); // warm paper, matches the theme
+#if !defined(SUPERMODEL_PURE_VULKAN)
+    // Behind the ambient backdrop, so this is only ever seen for the one frame a resize can expose
+    // it on. Taken from the theme anyway so that frame does not flash the wrong colour.
+    const ImVec4 washTint = UiFrost::AmbientColours().tint;
+    const ImVec4 clear_color = ImVec4(washTint.x, washTint.y, washTint.z, 1.0f);
+#endif
+    g_gameDefinitions = &games;
+
+    /*
+     * The pre-rework interface is a real theme, and it is the only one without the ambient backdrop,
+     * the glass plates and the extra pane inset - those are what the rework added. Every other
+     * difference (spacing, radii, borders, colours) comes from ApplyUiTheme().
+     */
+    const bool classicUi = UiThemeIsClassic();
+
+    /*
+     * Theme changes take effect here rather than at the next start.
+     *
+     * ApplyUiTheme() resets every size to its unscaled value before rebuilding the palette, which is
+     * exactly the pair RescaleUi() performs - so a change mid-session neither loses the display's
+     * DPI scaling nor compounds it. The overlay owns a second ImGui context and picks the new theme
+     * up when it is created for the next session.
+     */
+    {
+        static UiTheme appliedTheme = GetUiTheme();
+        if (appliedTheme != GetUiTheme())
+        {
+            appliedTheme = GetUiTheme();
+            RescaleUi((std::max)(1.0f, GetDPIScale(window)));
+            InfoLog("GUI: interface theme set to %s.", UiThemeIsDark() ? "warm dark" : "warm paper");
+        }
+    }
+
+    /*
+     * The resize floor belongs to a display, not to the process. Windows gives every monitor its
+     * own content scale, and SDL stores the minimum in window coordinates, so moving the window to
+     * another monitor has to recompute it - see ApplyGuiWindowMinimumSize(). The work area also
+     * changes when the taskbar moves or the resolution changes, so it is part of the comparison.
+     */
+    {
+        static OSD::Platform::DisplayId lastDisplay = OSD::Platform::kPrimaryDisplay;
+        static float lastScale = 0.0f;
+        static int lastUsableWidth = 0;
+        static int lastUsableHeight = 0;
+
+        const OSD::Platform::DisplayId display = OSD::Platform::GetWindowDisplay(window);
+        const float scale = GetDPIScale(window);
+        OSD::Platform::DisplayInfo info{};
+        const bool haveInfo = OSD::Platform::GetDisplayInfoById(display, &info);
+        const int usableWidth = haveInfo ? info.usableBounds.width : 0;
+        const int usableHeight = haveInfo ? info.usableBounds.height : 0;
+        if (display != lastDisplay || scale != lastScale ||
+            usableWidth != lastUsableWidth || usableHeight != lastUsableHeight)
+        {
+            const float previousScale = lastScale;
+            // The interface scale is per monitor too. Rebuild the style and the font size before
+            // NewFrame(): the text is dynamically baked at the requested size in ImGui 1.92, so
+            // this does not touch the font atlas file or the glyph sources.
+            if (previousScale > 0.0f && scale != previousScale)
+                RescaleUi(scale);
+            ApplyGuiWindowMinimumSize(window, previousScale);
+            lastDisplay = display;
+            lastScale = scale;
+            lastUsableWidth = usableWidth;
+            lastUsableHeight = usableHeight;
+        }
+    }
+
     const std::string romPath = config["ROMPath"].ValueAs<std::string>();
     RefreshRoms(romPath, games);
     if (selectedGameIndex >= (int)g_roms.size())
         selectedGameIndex = -1;
 
+    /*
+     * Restore the list's position on the first frame this window is drawn.
+     *
+     * The selection is restored by set name rather than index, and only when nothing has been
+     * selected yet: returning from a game leaves the previous selection in place, which is what
+     * the user was looking at when they left. The filter and scroll are restored together with
+     * it, so the row that was highlighted is where the list opens.
+     */
+    if (!g_gameListStateRestored)
+    {
+        g_gameListStateRestored = true;
+
+        const std::string savedFilter = config["GuiGameListFilter"].ValueAsDefault<std::string>("");
+        std::snprintf(g_gameListFilter, sizeof(g_gameListFilter), "%s", savedFilter.c_str());
+
+        const std::string savedSet = config["GuiLastSelectedGame"].ValueAsDefault<std::string>("");
+        if (!savedSet.empty())
+        {
+            // Keep the saved name even if the set is not in the list right now (the ROM folder may
+            // be unavailable), so an exit without a selection does not erase it.
+            g_lastSelectedSet = savedSet;
+
+            if (selectedGameIndex < 0)
+            {
+                for (int i = 0; i < (int)g_roms.size(); i++)
+                {
+                    if (g_roms[i].setName == savedSet)
+                    {
+                        selectedGameIndex = i;
+                        break;
+                    }
+                }
+            }
+        }
+
+        const float savedScroll = config["GuiGameListScrollY"].ValueAsDefault<float>(0.0f);
+        if (savedScroll > 0.5f)
+        {
+            g_gameListScrollRestoreY = savedScroll;
+            g_gameListScrollRestoreFrames = 0;
+            g_gameListScrollRestorePending = true;
+        }
+
+        InfoLog("GUI: game list restored (set '%s', scroll %.1f px, filter '%s').",
+            selectedGameIndex >= 0 ? g_roms[selectedGameIndex].setName.c_str() : "<none>",
+            savedScroll, g_gameListFilter);
+    }
+
+#if defined(SUPERMODEL_PURE_VULKAN)
+    /*
+     * Developer hook, alongside SM3D_OVERLAY_OPEN in the game loop: opens the save manager for a
+     * named set on the first frame.  Useful for checking the card layout and thumbnails without
+     * driving the mouse through the game list.
+     */
+    if (!g_manageSavesOpen)
+    {
+        static bool checkedEnvironment = false;
+        if (!checkedEnvironment)
+        {
+            checkedEnvironment = true;
+            if (const char* setName = std::getenv("SM3D_SAVE_MANAGER"); setName != nullptr && *setName != '\0')
+                OpenManageSaves(setName);
+        }
+    }
+    /*
+     * Developer hook, the counterpart of SM3D_SAVE_MANAGER below: starts a named set on the first
+     * frame.  Scripted tests need to reach "the game is running" without driving the mouse through
+     * a list whose row positions depend on the window size, and this is that hook.
+     */
+    {
+        static bool checkedAutostart = false;
+        if (!checkedAutostart)
+        {
+            checkedAutostart = true;
+            if (const char* setName = std::getenv("SM3D_AUTOSTART"); setName != nullptr && *setName != '\0')
+            {
+                for (int i = 0; i < (int)g_roms.size(); ++i)
+                {
+                    if (g_roms[i].setName == setName)
+                    {
+                        selectedGameIndex = i;
+                        g_returnToManageSaves = false;
+                        saveSettings = true;
+                        exit = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /*
+     * Developer hook: start a set from a save without clicking Manage Saves -> Load.  Combined with
+     * SM3D_SAVE_MANAGER (which opens the manager first and therefore loads the card thumbnails into
+     * the settings window's Vulkan context), this reproduces the settings-window -> game transition
+     * exactly.  The path is left as an absolute path; GuiTakePendingVkState() consumes it.
+     */
+    {
+        static bool checkedLoadSave = false;
+        if (!checkedLoadSave)
+        {
+            checkedLoadSave = true;
+            if (const char* path = std::getenv("SM3D_LOAD_SAVE"); path != nullptr && *path != '\0')
+            {
+                const std::filesystem::path savePath(path);
+                std::string set = savePath.filename().string();
+                const auto dot = set.rfind('.');
+                if (dot != std::string::npos)
+                    set.resize(dot);
+
+                const int row = RomIndexForSet(set);
+                if (row >= 0)
+                {
+                    selectedGameIndex = row;
+                    g_autoLoadSave = savePath.string();
+                    if (!g_manageSavesOpen)
+                        OpenManageSaves(set);
+                    InfoLog("GUI: SM3D_LOAD_SAVE queued set '%s' from '%s'.", set.c_str(), path);
+                }
+                else
+                {
+                    ErrorLog("GUI: SM3D_LOAD_SAVE cannot find set '%s' for '%s'.", set.c_str(), path);
+                }
+            }
+        }
+    }
+#endif
+
+#if defined(SUPERMODEL_PURE_VULKAN)
+    // A minimised window or a swapchain recreation skips this frame entirely:
+    // there is no acquired image to draw into, and calling ImGui::NewFrame()
+    // without a matching Render() would leave ImGui mid-frame.
+    if (g_uiVulkan == nullptr)
+        return;
+    if (!g_uiVulkan->BeginFrame())
+    {
+        g_guiFrameSkipped = true;
+        return;
+    }
+    ImGui_ImplVulkan_NewFrame();
+#else
     ImGui_ImplOpenGL3_NewFrame();
-    ImGui_ImplSDL2_NewFrame();
+#endif
+    OSD::Platform::ImGuiPlatformNewFrame(window);
     ImGui::NewFrame();
+
+    /*
+     * Ambient backdrop, OpenGL path.
+     *
+     * The Vulkan build paints this with its own pass (UiVulkanBackend::DrawAmbientPass) because the
+     * frosted panels have to be blurred from it, which cannot be done if it is part of the same
+     * draw data they are in. There is no blur here, so the same picture is simply drawn into the
+     * background draw list and the panels fall back to a translucent tint.
+     */
+#if !defined(SUPERMODEL_PURE_VULKAN)
+    if (!classicUi)
+    {
+        const UiFrost::AmbientWash wash = UiFrost::AmbientColours();
+        const ImVec2 display = ImGui::GetIO().DisplaySize;
+        ImDrawList* background = ImGui::GetBackgroundDrawList();
+        const ImVec2 origin(0.0f, 0.0f);
+        background->AddRectFilled(origin, display,
+            ImGui::GetColorU32(ImVec4(wash.tint.x, wash.tint.y, wash.tint.z, 1.0f)));
+
+        if (selectedGameIndex >= 0 && selectedGameIndex < (int)g_roms.size())
+        {
+            const BoxartTexture art = LoadBoxart(EffectiveSet(g_roms[selectedGameIndex]));
+            if (art.texture != 0 && art.width > 0 && art.height > 0 && display.x > 0.0f && display.y > 0.0f)
+            {
+                // The same cover fit the Vulkan pass uses, so the two backends crop alike.
+                const float imageAspect = (float)art.width / (float)art.height;
+                const float screenAspect = display.x / display.y;
+                ImVec2 uv0(0.0f, 0.0f);
+                ImVec2 uv1(1.0f, 1.0f);
+                if (screenAspect > imageAspect)
+                {
+                    const float scale = imageAspect / screenAspect;
+                    uv0.y = (1.0f - scale) * 0.5f;
+                    uv1.y = 1.0f - uv0.y;
+                }
+                else
+                {
+                    const float scale = screenAspect / imageAspect;
+                    uv0.x = (1.0f - scale) * 0.5f;
+                    uv1.x = 1.0f - uv0.x;
+                }
+                background->AddImage(art.texture, origin, display, uv0, uv1);
+                // The wash, mixed over the cover the way ui_ambient.frag mixes it.
+                background->AddRectFilled(origin, display, ImGui::GetColorU32(wash.tint));
+            }
+        }
+    }
+#endif
 
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
+    /*
+     * Transparent, unless the classic theme is selected.
+     *
+     * Everything visible between the glass panels is the ambient backdrop behind the window, which
+     * is what makes the interface read as panes floating over a picture instead of a full-screen
+     * form. The panels themselves paint their own background - see the three plates below. The
+     * classic theme is that full-screen form, so it keeps an opaque window background.
+     */
+    if (!classicUi)
+        ImGui::SetNextWindowBgAlpha(0.0f);
     ImGui::Begin("Supermodel", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
 
     // Open a popup requested by the previous frame's action. Done here, once the main window is the
@@ -4180,16 +7371,19 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
     // is reserved whether or not it is showing, so the panels never change height and the buttons
     // never move when it appears - the previous fixed 44 px was also short enough that the
     // confirmation was drawn past the bottom of the content area and came out cut in half.
-    const float buttonHeight = ImGui::GetFrameHeight();
-    const float statusHeight = ImGui::GetTextLineHeight();
-    const float gap = ImGui::GetStyle().ItemSpacing.x;
-
-    const float contentWidth = ImGui::GetContentRegionAvail().x;
-
     // Interface scale, from the font size LoadUiFont() selected for the display DPI. Everything
     // below sizes itself from this rather than from raw pixels, so the same layout works at 100%
     // and at 200% Windows scaling.
-    const float uiScale = (std::max)(1.0f, ImGui::GetFontSize() / 18.0f);
+    const float uiScale = UiScale();
+
+    const float buttonHeight = ImGui::GetFrameHeight();
+    const float statusTextHeight = ImGui::GetTextLineHeight();
+    // The status line is given a little more height than its text so the ROM count is not jammed
+    // against the pane's bottom edge; the buttons and the badge are measured separately above it.
+    const float statusHeight = (std::max)(statusTextHeight, 30.0f * uiScale);
+    const float gap = ImGui::GetStyle().ItemSpacing.x;
+
+    const float contentWidth = ImGui::GetContentRegionAvail().x;
 
     /*
      * Compact mode.
@@ -4211,9 +7405,14 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
 
     // Compact mode also needs a second footer row: five buttons do not fit across a narrow window
     // once the labels are measured, and clipping "Restore Defaults" is worse than using two rows.
+    //
+    // The footer sheet also has to be tall enough to hold its own inner margin, or the buttons and
+    // the status line sit on the rounded edge of the pane - see panePad below. The classic theme has
+    // no sheet, so it keeps the original height.
+    const float footerPadding = classicUi ? 0.0f : 28.0f * uiScale;
     const float footer = compact
-        ? buttonHeight * 2.0f + statusHeight + gap * 3.0f
-        : buttonHeight + statusHeight + gap * 2.0f;
+        ? buttonHeight * 2.0f + statusHeight + gap * 3.0f + footerPadding
+        : buttonHeight + statusHeight + gap * 2.0f + footerPadding;
 
     const float topY = ImGui::GetCursorPosY();
     const float topX = ImGui::GetCursorPosX();
@@ -4223,6 +7422,46 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
         : contentWidth * 0.52f - gap * 0.5f;
     const float panelHeight = available - footer;
 
+    /*
+     * The three sheets of glass.
+     *
+     * Left column, settings column, footer. Drawn here - into the root window's draw list, before
+     * any child exists - which is what puts them underneath: a child window's draw data is appended
+     * to its parent's list when the child is closed, so anything already in that list stays below it.
+     *
+     * A gap is left between the sheets and the window edge on every side, and the panels are what the
+     * ambient backdrop shows through: that gap is the whole visual difference between "a form" and
+     * "panes floating over a picture".
+     */
+#if defined(SUPERMODEL_PURE_VULKAN)
+    const ImTextureID frost = g_uiVulkan != nullptr ? g_uiVulkan->FrostTexture() : 0;
+#else
+    const ImTextureID frost = 0;
+#endif
+    const float panelRounding = ImGui::GetStyle().WindowRounding;
+    if (!classicUi)
+    {
+        ImDrawList* root = ImGui::GetWindowDrawList();
+        const ImVec2 windowOrigin = ImGui::GetWindowPos();
+        const ImVec2 columnOrigin(windowOrigin.x + topX, windowOrigin.y + topY);
+        const float rightOriginX = columnOrigin.x + columnWidth + gap;
+        const float rightWidth = (std::max)(1.0f, contentWidth - columnWidth - gap);
+
+        UiFrost::Plate(root, frost, columnOrigin,
+            ImVec2(columnOrigin.x + columnWidth, columnOrigin.y + panelHeight),
+            panelRounding, UiFrost::Surface::Glass);
+        UiFrost::Plate(root, frost, ImVec2(rightOriginX, columnOrigin.y),
+            ImVec2(rightOriginX + rightWidth, columnOrigin.y + panelHeight),
+            panelRounding, UiFrost::Surface::Glass);
+
+        // The footer's own sheet. Its top edge is half a gap below the columns so the three read as
+        // separate panes; its bottom edge is the content area's, which is where the status line ends.
+        const float footerTop = columnOrigin.y + available - footer + gap * 0.5f;
+        UiFrost::Plate(root, frost, ImVec2(columnOrigin.x, footerTop),
+            ImVec2(columnOrigin.x + contentWidth, columnOrigin.y + available),
+            panelRounding, UiFrost::Surface::Glass);
+    }
+
     static char romBuffer[1024] = {};
     static std::string romShadow;
     if (romPath != romShadow)
@@ -4231,10 +7470,30 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
         std::snprintf(romBuffer, sizeof(romBuffer), "%s", romPath.c_str());
     }
 
+    /*
+     * Inner margin inside each pane.
+     *
+     * The plates are drawn on the content rectangle, so without this everything inside them - the ROM
+     * field, the table, the tab bar, the footer buttons - would start exactly on the rounded border.
+     * A pane whose contents touch its own edge stops reading as a sheet of glass with something on it
+     * and starts reading as a drawn box around a form, in both themes.
+     *
+     * The classic theme has no plates: its content sits directly on the window background, which
+     * already provides the margin through WindowPadding.
+     */
+    const float panePad = classicUi ? 0.0f : 16.0f * uiScale;
+    const float paneX = topX + panePad;
+    const float paneY = topY + panePad;
+    const float paneWidth = (std::max)(1.0f, columnWidth - panePad * 2.0f);
+    const float paneHeight = (std::max)(1.0f, panelHeight - panePad * 2.0f);
+    const float rightPaneX = topX + columnWidth + gap + panePad;
+    const float rightPaneWidth = (std::max)(1.0f, contentWidth - columnWidth - gap - panePad * 2.0f);
+
     // ROM row. Kept in a group so its height can be measured and the list placed below it.
+    ImGui::SetCursorPos(ImVec2(paneX, paneY));
     ImGui::BeginGroup();
     const float browseWidth = ImGui::CalcTextSize(Tr("浏览")).x + ImGui::GetStyle().FramePadding.x * 4.0f;
-    ImGui::SetNextItemWidth(columnWidth - browseWidth - gap);
+    ImGui::SetNextItemWidth(paneWidth - browseWidth - gap);
     ImGui::InputText("##ROMPath", romBuffer, sizeof(romBuffer));
     if (ImGui::IsItemDeactivatedAfterEdit())
     {
@@ -4246,7 +7505,7 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
     {
         // Seed the dialog with the directory the setting resolves to, so a relative value still
         // opens the picker in the right place.
-        std::string picked = FileSystemPath::ResolvePath(romPath);
+        std::string picked = ResolveRomPath(romPath);
         if (BrowseFolder(window, picked))
         {
             romShadow = picked;
@@ -4262,41 +7521,51 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
     // the fallback, which keeps a clicked game on screen after the pointer leaves it.
     //
     // The split is stored as a ratio rather than a pixel height: dragging the divider sets how
-    // much of the column the preview takes, and resizing the window then scales both parts
-    // proportionally. The minimum height follows the interface scale the same way the style does
-    // (LoadUiFont() uses 18 px as the unscaled size); the maximum is the half-column cap below, so
-    // the list always keeps at least half of the space.
+    // much of the column the preview takes, and resizing the window then scales both parts. The
+    // preview is capped at half the column, so the list always keeps half of it: a cover and a
+    // paragraph stop being useful well before that, while the list is the part being used.
+    // The bounds follow the interface scale the same way the style does (LoadUiFont() uses 18 px
+    // as the unscaled size).
     if (g_previewSplit < 0.0f)
     {
-        g_previewSplit = (std::max)(0.10f, (std::min)(kMaxPreviewShare,
+        g_previewSplit = (std::max)(0.10f, (std::min)(0.50f,
             config["GuiPreviewSplit"].ValueAsDefault<float>(0.42f)));
     }
-    const float splitHeight = (std::max)(1.0f, panelHeight - romRowHeight - gap * 2.0f);
+    const float splitHeight = (std::max)(1.0f, paneHeight - romRowHeight - gap * 2.0f);
     const float minPreviewHeight = (std::min)(150.0f * uiScale, splitHeight * 0.45f);
-    // The upper bound is the same half-column cap the divider uses below, so a value loaded from
-    // the config cannot open taller than a dragged one either.
-    const float maxPreviewHeight = splitHeight * kMaxPreviewShare;
+    // Half the column, not a pixel minimum: a fixed floor let the preview grow past the point where
+    // the list could still show three rows, which is what the divider is being dragged for.
+    const float minListHeight = splitHeight * 0.5f;
     float previewHeight = g_previewSplit * splitHeight;
-    previewHeight = (std::max)(minPreviewHeight, (std::min)(maxPreviewHeight, previewHeight));
+    previewHeight = (std::max)(minPreviewHeight, (std::min)(splitHeight - minListHeight, previewHeight));
     g_previewSplit = previewHeight / splitHeight;
 
-    const float previewY = topY + romRowHeight + gap;
+    const float previewY = paneY + romRowHeight + gap;
     const float listY = previewY + previewHeight + gap;
     const float listHeight = splitHeight - previewHeight;
 
     int hoveredRow = -1;
     // The list is drawn before the preview even though it sits below it, because the preview shows
     // whatever this frame's hit test found. Drawing it first avoids a one-frame lag on hover.
-    ImGui::SetCursorPos(ImVec2(topX, listY));
-    ImGui::BeginChild("GameList", ImVec2(columnWidth, listHeight), ImGuiChildFlags_Borders);
-    static char filter[128] = {};
+    ImGui::SetCursorPos(ImVec2(paneX, listY));
+    ImGui::BeginChild("GameList", ImVec2(paneWidth, listHeight),
+        classicUi ? ImGuiChildFlags_Borders : ImGuiChildFlags_AlwaysUseWindowPadding,
+        classicUi ? 0 : ImGuiWindowFlags_NoBackground);
+    if (!classicUi)
+    {
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        const ImVec2 origin = ImGui::GetWindowPos();
+        const ImVec2 size = ImGui::GetWindowSize();
+        UiFrost::Plate(draw, 0, origin, ImVec2(origin.x + size.x, origin.y + size.y),
+            ImGui::GetStyle().ChildRounding, UiFrost::Surface::Well);
+    }
     ImGui::SetNextItemWidth(-1);
-    ImGui::InputTextWithHint("##filter", Tr("搜索游戏"), filter, sizeof(filter));
-    const std::string needle = ToLowerAscii(filter);
+    ImGui::InputTextWithHint("##filter", Tr("搜索游戏"), g_gameListFilter, sizeof(g_gameListFilter));
+    const std::string needle = ToLowerAscii(g_gameListFilter);
 
     if (romPath.empty())
         UiText("请选择 ROM 目录。");
-    else if (!std::filesystem::is_directory(PathFromUtf8(FileSystemPath::ResolvePath(romPath))))
+    else if (!std::filesystem::is_directory(PathFromUtf8(ResolveRomPath(romPath))))
         UiText("这个目录不存在。");
     else if (g_roms.empty())
         UiText("目录里没有 .zip。");
@@ -4320,6 +7589,7 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
 
         if (ImGui::BeginTable("Games", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp, ImVec2(0, tableHeight)))
         {
+            // The name column carries the version too, so it needs the lion's share of the width.
             UiColumn("游戏", 0, 3.0f);
             UiColumn("ROM", ImGuiTableColumnFlags_WidthFixed, romColumnWidth);
             UiColumn("年份", ImGuiTableColumnFlags_WidthFixed, 56.0f * uiScale);
@@ -4353,11 +7623,30 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
                     ? entry.setName + Tr("  （未收录）")
                     : (version.empty() ? title : title + " (" + version + ")");
                 const std::string rowLabel = display + "##" + entry.setName;
+                // A set that cannot be started is dimmed with the theme's own secondary text colour,
+                // not a literal grey: a literal tuned for one palette is unreadable in the other,
+                // and this row is exactly where someone looks for the reason a game will not launch.
                 const bool dimRow = !entry.supported;
                 if (dimRow)
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.490f, 0.475f, 0.447f, 1.00f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
                 if (ImGui::Selectable(rowLabel.c_str(), selectedGameIndex == row, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick))
                     selectedGameIndex = row;
+                // Unsupported sets look like rows but cannot be started, so only supported ones
+                // advertise themselves with the hand pointer.
+                if (!dimRow)
+                    HandOver();
+#if defined(SUPERMODEL_PURE_VULKAN)
+                if (ImGui::BeginPopupContextItem())
+                {
+                    if (ImGui::MenuItem(Tr("管理存档...")))
+                    {
+                        selectedGameIndex = row;
+                        OpenManageSaves(entry.setName);
+                    }
+                    HandOver();
+                    ImGui::EndPopup();
+                }
+#endif
                 if (dimRow)
                     ImGui::PopStyleColor();
                 // The row can be clipped in a narrow window, so hovering shows the whole line. The
@@ -4371,11 +7660,12 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
                     if (entry.supported)
                         ImGui::SetTooltip("%s", display.c_str());
                     else
-                        DrawWrappedTooltip(Tr("Supermodel 的 Games.xml 里没有这个 ROM 集的定义，无法启动。\n同系列的其他版本可能已经在列表里了。"));
+                        DrawWrappedTooltip(Tr("没能从这个包里认出 Model 3 游戏（可能缺文件）。\n同系列的其他版本可能已经在列表里了。"));
                 }
                 if (rowHovered && ImGui::IsMouseDoubleClicked(0))
                 {
                     selectedGameIndex = row;
+                    g_returnToManageSaves = false;
                     saveSettings = true;
                     exit = true;
                 }
@@ -4385,17 +7675,59 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
                 if (entry.year > 0)
                     ImGui::Text("%d", entry.year);
             }
+
+            /*
+             * Restore the scroll position now that the rows above have told the table how tall it
+             * is. On the first frame after the window opens the table's content extent is still
+             * unknown at BeginTable(), so a SetScrollY() there would clamp to zero; applying it
+             * after the rows and keeping the pending flag until the position sticks is what makes
+             * the list open exactly where it was left. Nothing is recorded until the restore is
+             * finished, or the zero from the first frame would overwrite the saved value.
+             */
+            if (g_gameListScrollRestorePending)
+            {
+                ImGui::SetScrollY(g_gameListScrollRestoreY);
+                g_gameListScrollRestoreFrames++;
+                const float applied = ImGui::GetScrollY();
+                if ((g_gameListScrollRestoreFrames >= 2 &&
+                        std::fabs(applied - g_gameListScrollRestoreY) <= 1.0f) ||
+                    g_gameListScrollRestoreFrames >= 4)
+                    g_gameListScrollRestorePending = false;
+            }
+            if (!g_gameListScrollRestorePending)
+                g_gameListScrollY = ImGui::GetScrollY();
+
             ImGui::EndTable();
         }
     }
     ImGui::EndChild();
 
-    // The preview and its divider are drawn at every window size.
+    if (selectedGameIndex >= 0 && selectedGameIndex < (int)g_roms.size())
+        g_lastSelectedSet = g_roms[selectedGameIndex].setName;
+
     const int previewIndex = hoveredRow >= 0 ? hoveredRow : selectedGameIndex;
     const RomEntry* previewEntry =
         (previewIndex >= 0 && previewIndex < (int)g_roms.size()) ? &g_roms[previewIndex] : nullptr;
-    ImGui::SetCursorPos(ImVec2(topX, previewY));
-    DrawGamePreview(previewEntry, columnWidth, previewHeight);
+    ImGui::SetCursorPos(ImVec2(paneX, previewY));
+    DrawGamePreview(previewEntry, paneWidth, previewHeight);
+
+#if defined(SUPERMODEL_PURE_VULKAN)
+    /*
+     * The ambient backdrop follows the selection, not the hover.
+     *
+     * Hovering would make the wallpaper change every time the pointer crosses a row, and each change
+     * re-records the whole blur chain - a flickering background for a list that is being browsed.
+     * Clicking is deliberate, rare, and worth one blur pass. Set here rather than at the top of the
+     * frame so that the backdrop this frame is drawn against already belongs to the new selection.
+     */
+    if (g_uiVulkan != nullptr)
+    {
+        const RomEntry* ambient = (!classicUi && selectedGameIndex >= 0 && selectedGameIndex < (int)g_roms.size())
+            ? &g_roms[selectedGameIndex] : nullptr;
+        g_uiVulkan->SetAmbientTexture(
+            ambient != nullptr ? LoadBoxart(EffectiveSet(*ambient)).texture : 0);
+    }
+#endif
 
     /*
      * Divider between the preview and the list.
@@ -4407,8 +7739,8 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
      * pointer at worst.
      */
     const float handleHeight = (std::max)(gap, 10.0f * uiScale);
-    ImGui::SetCursorPos(ImVec2(topX, previewY + previewHeight + (gap - handleHeight) * 0.5f));
-    ImGui::InvisibleButton("##PreviewSplitter", ImVec2(columnWidth, handleHeight));
+    ImGui::SetCursorPos(ImVec2(paneX, previewY + previewHeight + (gap - handleHeight) * 0.5f));
+    ImGui::InvisibleButton("##PreviewSplitter", ImVec2(paneWidth, handleHeight));
     const bool splitterHovered = ImGui::IsItemHovered();
     const bool splitterActive = ImGui::IsItemActive();
     if (splitterHovered || splitterActive)
@@ -4417,7 +7749,7 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
     {
         const float next = previewHeight + io.MouseDelta.y;
         g_previewSplit = (std::max)(minPreviewHeight,
-            (std::min)(maxPreviewHeight, next)) / splitHeight;
+            (std::min)(splitHeight - minListHeight, next)) / splitHeight;
     }
     {
         // A short centred bar makes the otherwise invisible strip discoverable, and brightens
@@ -4427,7 +7759,7 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
         const ImVec2 rectMax = ImGui::GetItemRectMax();
         const float centreX = (rectMin.x + rectMax.x) * 0.5f;
         const float centreY = (rectMin.y + rectMax.y) * 0.5f;
-        const float gripWidth = (std::min)(columnWidth * 0.12f, 48.0f * uiScale);
+        const float gripWidth = (std::min)(paneWidth * 0.12f, 48.0f * uiScale);
         const ImU32 colour = ImGui::GetColorU32(splitterActive ? ImGuiCol_SeparatorActive
             : (splitterHovered ? ImGuiCol_SeparatorHovered : ImGuiCol_Separator));
         draw->AddLine(ImVec2(centreX - gripWidth, centreY), ImVec2(centreX + gripWidth, centreY),
@@ -4436,7 +7768,7 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
 
     // Right column: back up to the top of the content area, which is what moves the tab bar up past
     // the ROM row. The width is left as "the rest" so the two columns always meet the right edge.
-    ImGui::SetCursorPos(ImVec2(topX + columnWidth + gap, topY));
+    ImGui::SetCursorPos(ImVec2(rightPaneX, paneY));
     /*
      * Always reserve the vertical scrollbar.
      *
@@ -4446,8 +7778,18 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
      * Being permanently present keeps the content width, the tabs and their arrows fixed across
      * tab switches. An unused scrollbar is a small price for a stable target.
      */
-    ImGui::BeginChild("Settings", ImVec2(0, panelHeight), ImGuiChildFlags_Borders,
-        ImGuiWindowFlags_AlwaysVerticalScrollbar);
+    /*
+     * No recess behind the settings column.
+     *
+     * The whole column is one scrolling body, so a translucent well over its entire sheet would
+     * simply darken the glass it is already sitting on - stacking a 34% tint over the sheet's 72%,
+     * which leaves almost none of the blur visible. The tab bar and the rows provide the structure
+     * here instead. The two left-hand children do get wells: they are sub-regions of their sheet, and
+     * a recess is what separates "the cover" from "the list" inside one pane.
+     */
+    ImGui::BeginChild("Settings", ImVec2(rightPaneWidth, paneHeight),
+        classicUi ? ImGuiChildFlags_Borders : ImGuiChildFlags_AlwaysUseWindowPadding,
+        ImGuiWindowFlags_AlwaysVerticalScrollbar | (classicUi ? 0 : ImGuiWindowFlags_NoBackground));
     /*
      * Shrink the tabs to fit rather than scrolling them.
      *
@@ -4456,8 +7798,6 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
      * fault. Seven tabs fit here once narrowed to TabMinWidthShrink; Mixed only falls back to
      * scrolling if the window is made narrower than that.
      */
-    // Compact mode keeps the full tab labels and scrolls instead of truncating them: at this width
-    // the settings panel is wide enough for the page, but not for seven tabs at their natural size.
     const ImGuiTabBarFlags tabFlags = compact
         ? ImGuiTabBarFlags_FittingPolicyScroll
         : ImGuiTabBarFlags_FittingPolicyMixed;
@@ -4480,18 +7820,70 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
             UiSep("高级设置");
             DrawAdvancedSettingsPanel(config, false);
 
-            ImGui::EndTabItem();
-        }
-        if (UiTabItem("画面"))
-        {
+            /*
+             * The remaining Video-group keys - window behaviour, frame limit, refresh rate, display
+             * number, console, white flash - are runtime options rather than picture options. They
+             * sat on the 画面 page only because that is the group they belong to in the ini, which
+             * left that page a list of unrelated switches with the actual picture settings at the
+             * bottom. The picture settings have hand-written controls and stay on 画面.
+             */
+            UiSep("显示与运行");
             UpdateTempValues(config, "Video", true);
             CreateControls(config, "Video");
             UpdateTempValues(config, "Video", false);
 
-            // After the write-back above, deliberately: UpdateTempValues(..., false) copies every
-            // Video key out of the temp-value store it snapshotted a moment ago, so anything this
-            // section sets before that point would be silently reverted to its pre-edit value.
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+            // Last on the page: it is the one section here that can be switched while a game is
+            // running, so it belongs next to the runtime options rather than above them.
+            DrawHDTextureSettings(config, false);
+#endif
+
+            ImGui::EndTabItem();
+        }
+        if (UiTabItem("画面"))
+        {
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+            DrawPresentationCadenceSettings(config, window);
+#endif
+            // Hand-written picture settings only: colour, 2D scaling, the CRT filter, the widescreen
+            // background (which decides whether there are side bars at all) and the cabinet backdrop
+            // that fills them.
+            DrawPictureModeSettings(config);
+
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+            DrawCrtFilterSettings(config);
+            DrawLightGunBorderSettings(config);
+#endif
+
+            /*
+             * Above the backdrop, because the two are alternatives for the same area: with this on,
+             * the game's own 2D background is stretched across the bars, so the backdrop has nothing
+             * left to fill.
+             */
+            UiSep("宽屏背景");
+            {
+                // Labelled with what the switch does rather than repeating the section title, and built
+                // like WidgetLabel() does so the visible part follows the interface language while the
+                // ##id keeps the widget's identity stable across a language change.
+                const std::string wideLabel = std::string(Tr("用游戏背景填满两侧")) + "##WideBackground";
+                bool wideBackground = config["WideBackground"].ValueAsDefault<bool>(false);
+                if (UiCheckbox(wideLabel.c_str(), &wideBackground))
+                    config.Set("WideBackground", wideBackground);
+            }
+            HelpMarker(
+                "把游戏底部的 2D 背景层横向拉满，填掉宽屏两侧的黑边。");
+            // Same warning the in-game advanced panel shows, repeated here because this page is
+            // where the setting is actually changed: the blue bars look like a renderer fault
+            // until it is clear that the stretched 2D layer is what fills them.
+            if (!config["WideScreen"].ValueAsDefault<bool>(false) &&
+                config["WideBackground"].ValueAsDefault<bool>(false))
+            {
+                UiTextWarn("「宽屏背景」已开启：2D 背景仍会拉伸铺满窗口，所以取消宽屏后四周不是黑边。要黑边请关掉「宽屏背景」。");
+            }
+
+#if !defined(SUPERMODEL_OPENGL_ONLY)
             DrawBezelSettings(config, window);
+#endif
 
             ImGui::EndTabItem();
         }
@@ -4565,6 +7957,14 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
             UpdateTempValues(config, "Sensitivity", true);
 
             UiSep("力反馈");
+            /*
+             * The master switch lives on the Common page, and without it nothing on this page does
+             * anything: each drive board calls Disable() in Init() when ForceFeedback is off, so the
+             * emulated board never sends a single effect. Say so here rather than leaving a page of
+             * sliders that look live and do nothing.
+             */
+            if (!config["ForceFeedback"].ValueAsDefault<bool>(false))
+                UiTextWarn("先在「常用」页勾选「力反馈」，这一页的设置才会生效。");
             CreateControls(config, "ForceFeedback");
 
             UiSep("灵敏度");
@@ -4573,17 +7973,35 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
             UpdateTempValues(config, "ForceFeedback", false);
             UpdateTempValues(config, "Sensitivity", false);
 
-            ImGui::Spacing();
-            if (UiButton("校准摇杆"))
+            UiSep("手柄转向");
             {
-                if (inputs == nullptr)
-                    inputs = GetInputSystem(config, window);
-                if (inputs)
-                {
-                    inputs->CalibrateJoysticks();
-                    inputs->StoreToConfig(&config);
-                }
+                static const char* smoothingItems[] = {
+                    "关闭（原始 1:1）", "轻度（保留转向手感）",
+                    "中度（推荐手柄）", "强力（最平稳）"
+                };
+                static const char* smoothingTr[4];
+                int smoothing = config["GamepadSteeringSmoothing"].ValueAsDefault<int>(0);
+                if (smoothing < 0 || smoothing > 3)
+                    smoothing = 0;
+                if (ComboRow(Tr("摇杆转向平滑##GamepadSteeringSmoothing"), &smoothing,
+                    UiItems(smoothingItems, 4, smoothingTr), 4))
+                    config.Set("GamepadSteeringSmoothing", smoothing);
             }
+            HelpMarker(
+                "把手柄摇杆的阶跃输入压平，模拟方向盘阻尼。\n"
+                "关闭：原始输入。\n"
+                "轻度 / 中度 / 强力：约 35 / 50 / 75ms 平滑，依次更稳。\n"
+                "只影响转向轴；真实方向盘建议关闭。");
+
+            ImGui::Spacing();
+            /*
+             * There used to be a "Calibrate Sticks" button here that called
+             * CInputs::CalibrateJoysticks() directly. That routine prompts on stdout and reads keys
+             * through the input system, and a GUI build has no console to put the prompts in: from
+             * here it printed into nothing and waited for a reply the user could not see. Say where
+             * it lives instead of leaving a button that appears to do nothing.
+             */
+            UiTextDim("摇杆/方向盘轴校准是命令行功能：用 -config-inputs 启动后按 B。手柄的轴由 SDL 归一化，通常不需要校准。");
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
@@ -4609,7 +8027,8 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
         // Compact mode puts three buttons on the first row and two on the second, so the share is
         // computed per row rather than across all five.
         const int perRow = compact ? 3 : footerCount;
-        const float evenShare = (ImGui::GetContentRegionAvail().x - gap * (perRow - 1)) / (float)perRow;
+        const float footerAvail = (std::max)(1.0f, contentWidth - panePad * 2.0f);
+        const float evenShare = (footerAvail - gap * (perRow - 1)) / (float)perRow;
 
         // Text completeness comes first, so the labels set the floor. Above that the buttons grow to
         // share the row evenly, which is what the window has room for; the cap keeps them from
@@ -4622,11 +8041,13 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
 
         // Put the cursor on the button line explicitly. The panels above were sized against the
         // footer height, and letting the cursor follow the child windows would place the row
-        // wherever they happened to end.
-        const float buttonsY = topY + available - footer + gap * 0.5f;
+        // wherever they happened to end. The pane's own inner margin is added here so the buttons
+        // and the status line sit inside the sheet rather than on its rounded edge.
+        const float buttonsY = topY + available - footer + gap * 0.5f + panePad;
         const float secondRowY = buttonsY + buttonHeight + gap;
-        const float statusY = topY + available - statusHeight - gap * 0.5f;
-        ImGui::SetCursorPos(ImVec2(topX, buttonsY));
+        const float statusY = topY + available - panePad - statusHeight;
+        const float statusTextY = statusY + (statusHeight - statusTextHeight) * 0.5f;
+        ImGui::SetCursorPos(ImVec2(paneX, buttonsY));
 
         const ImVec2 buttonSize(buttonWidth, 0);
 
@@ -4636,6 +8057,9 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
                 ImGui::OpenPopup("NoGame");
             else
             {
+                // Started from the list, so Escape returns to the list - not to a manager that was
+                // not part of this launch.
+                g_returnToManageSaves = false;
                 saveSettings = true;
                 exit = true;
             }
@@ -4647,6 +8071,9 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
         ImGui::SameLine();
         if (UiButton(footerLabels[2], buttonSize))
             ImGui::OpenPopup("LoadSettings");
+        // Right edge of the first footer row. Non-compact mode has every button here; compact mode
+        // has three, and the badge shares this row rather than the shorter second one.
+        const float firstRowRight = ImGui::GetItemRectMax().x;
         if (compact)
             ImGui::SetCursorPos(ImVec2(topX, secondRowY));
         else
@@ -4660,12 +8087,45 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
         // The ROM count lives on the reserved line below the buttons rather than inside the list,
         // where it cost the table a row. A transient save/load note shares the same line, to its
         // right. The line is reserved whether or not the note is showing, so nothing moves.
-        ImGui::SetCursorPos(ImVec2(topX, statusY));
+        //
+        // The Ko-fi badge goes on the button line, right-aligned in the pane, so it shares the
+        // buttons' baseline instead of hanging lower on the status line. The first row's right edge
+        // is the test for whether that row has room: in the compact two-row layout the badge sits
+        // beside the three buttons of the first row, not beside the shorter second one. When even
+        // that is too tight the badge falls back to the status line, where the text is clipped so it
+        // cannot run underneath.
+        const float kofiWidth = KofiBadgeWidth();
+        const float kofiX = paneX + (contentWidth - panePad * 2.0f) - kofiWidth;
+        const float kofiScreenX = ImGui::GetWindowPos().x + kofiX;
+        const float buttonsRight = compact ? firstRowRight : ImGui::GetItemRectMax().x;
+        const bool kofiOnButtonRow = kofiScreenX > buttonsRight + gap;
+        const bool showKofi = kofiOnButtonRow || kofiX > paneX + 80.0f * uiScale;
+
+        ImGui::SetCursorPos(ImVec2(paneX, statusTextY));
+        const ImVec2 statusScreen = ImGui::GetCursorScreenPos();
+        if (showKofi && !kofiOnButtonRow)
+        {
+            ImGui::PushClipRect(statusScreen,
+                ImVec2(kofiScreenX - gap, statusScreen.y + statusTextHeight), true);
+        }
         UiTextDim("找到 %d 个 ROM", (int)g_roms.size());
         if (ImGui::GetTime() - g_statusAt < 3.0 && !g_statusNote.empty())
         {
             ImGui::SameLine(0.0f, ImGui::GetStyle().ItemSpacing.x * 2.0f);
             UiTextDim("%s", g_statusNote.c_str());
+        }
+        if (showKofi && !kofiOnButtonRow)
+            ImGui::PopClipRect();
+
+        if (kofiOnButtonRow)
+        {
+            ImGui::SetCursorPos(ImVec2(kofiX, buttonsY));
+            DrawKofiBadge(kofiWidth, buttonHeight);
+        }
+        else if (showKofi)
+        {
+            ImGui::SetCursorPos(ImVec2(kofiX, statusY));
+            DrawKofiBadge(kofiWidth, statusHeight);
         }
     }
 
@@ -4829,20 +8289,34 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
         ImGui::EndPopup();
     }
 
+#if defined(SUPERMODEL_PURE_VULKAN)
+    // Drawn inside the settings window, next to the other modals. A popup's identity is derived from
+    // the ID of the window that is current when it is opened, so opening it under "Supermodel" and
+    // then looking it up after ImGui::End() made the lookup miss every frame and the window never
+    // appeared.
+    DrawManageSavesModal(selectedGameIndex, exit, saveSettings);
+#endif
+
     ImGui::End();
 
     ImGui::Render();
+#if defined(SUPERMODEL_PURE_VULKAN)
+    if (g_uiVulkan != nullptr)
+        g_uiVulkan->Render(ImGui::GetDrawData());
+    g_guiFramePresented = true;
+#else
     glViewport(0, 0, (int)io.DisplaySize.x, (int)io.DisplaySize.y);
     glClearColor(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
     glClear(GL_COLOR_BUFFER_BIT);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+#endif
 }
 
-static float GetDPIScale(SDL_Window* window)
+static float GetDPIScale(OSD::Platform::Window* window)
 {
 #if defined(__APPLE__)
     /*
-     * macOS windows are measured in points, and SDL reports the Retina difference separately as
+     * macOS windows are measured in points, and the Retina difference is reported separately as
      * the drawable/window ratio that ImGui's framebuffer scale already uses. Applying the display
      * DPI here as well scaled every control a second time (about 1.5x on a Retina panel), which
      * made the interface too large for its layout and clipped the right-hand column.
@@ -4850,134 +8324,615 @@ static float GetDPIScale(SDL_Window* window)
     (void)window;
     return 1.0f;
 #else
-    int displayIndex = SDL_GetWindowDisplayIndex(window);
-    float ddpi = 96.0f;
-    if (SDL_GetDisplayDPI(displayIndex, &ddpi, nullptr, nullptr) != 0 || ddpi < 1.0f)
-        ddpi = 96.0f;
-    return ddpi / 96.0f;
+    if (window == nullptr)
+        return 1.0f;
+
+    const float scale = OSD::Platform::GetDisplayContentScale(OSD::Platform::GetWindowDisplay(window));
+    return scale > 0.0f ? scale : 1.0f;
 #endif
+}
+
+/*
+ * Re-apply the settings window's minimum size for the display it currently occupies.
+ *
+ * 1280x720 are the layout's own minimum (the smallest two-column layout that does not clip);
+ * 1280x800 is the default window size, used when the display has room for it. On Windows the
+ * interface is scaled by the monitor's content scale, so the pixel floor grows with it; on macOS
+ * the window is measured in points and the factor stays 1.0. The floor is a client-area size,
+ * while the limit that matters is the outer window: the work area has to hold the client area
+ * plus the title bar and borders.
+ *
+ * Both halves have to be recomputed when the window moves or the display changes. The minimum is
+ * set once at creation otherwise, so a window dragged from a 150% 4K monitor to a 100% 1080p one
+ * keeps the 150% floor (1920x1080 physical). That is taller than the second screen's work area,
+ * and because the platform enforces it the window can no longer be made to fit. On a content
+ * scale change the window is reset to the default 1280x800 in layout units, scaled for the new
+ * display - a window that merely moved between two displays of the same scale keeps its size
+ * and is only clamped to the new work area.
+ */
+static void ApplyGuiWindowMinimumSize(OSD::Platform::Window* window, float previousScale)
+{
+    if (!OSD::Platform::IsWindowValid(window))
+        return;
+
+    const float scale = (std::max)(1.0f, GetDPIScale(window));
+    int minWidth = (int)(1280.0f * scale);
+    int minHeight = (int)(720.0f * scale);
+
+    int borderLeft = 0, borderTop = 0, borderRight = 0, borderBottom = 0;
+    OSD::Platform::GetWindowBordersSize(window, &borderLeft, &borderTop, &borderRight, &borderBottom);
+
+    OSD::Platform::DisplayInfo info{};
+    const bool haveArea =
+        OSD::Platform::GetDisplayInfoById(OSD::Platform::GetWindowDisplay(window), &info) &&
+        info.usableBounds.width > 0 && info.usableBounds.height > 0;
+
+    int areaWidth = 0;
+    int areaHeight = 0;
+    if (haveArea)
+    {
+        areaWidth = info.usableBounds.width - borderLeft - borderRight;
+        areaHeight = info.usableBounds.height - borderTop - borderBottom;
+        if (areaWidth > 0)
+            minWidth = (std::min)(minWidth, areaWidth);
+        if (areaHeight > 0)
+            minHeight = (std::min)(minHeight, areaHeight);
+    }
+
+    OSD::Platform::SetWindowMinimumSize(window, minWidth, minHeight);
+
+    if (haveArea && areaWidth > 0 && areaHeight > 0 && !OSD::Platform::IsWindowMaximized(window))
+    {
+        int width = 0, height = 0;
+        OSD::Platform::GetWindowSize(window, &width, &height);
+
+        int targetWidth = width;
+        int targetHeight = height;
+
+        /*
+         * A DPI change is not a resize. The window was comfortable at its old logical size, and
+         * keeping its physical size across the move would make it fill the new screen (150% to
+         * 100%) or shrink to a postage stamp (100% to 200%). Reset to the default size in layout
+         * units, scaled for the new display. A pure move between two displays of the same scale
+         * keeps the user's size and is only clamped to the work area.
+         */
+        if (previousScale > 0.0f && std::fabs(previousScale - scale) > 0.01f)
+        {
+            targetWidth = (int)(1280.0f * scale);
+            targetHeight = (int)(800.0f * scale);
+        }
+
+        targetWidth = (std::max)(minWidth, (std::min)(targetWidth, areaWidth));
+        targetHeight = (std::max)(minHeight, (std::min)(targetHeight, areaHeight));
+        if (targetWidth != width || targetHeight != height)
+            OSD::Platform::SetWindowSize(window, targetWidth, targetHeight);
+    }
+
+    InfoLog("GUI minimum window size: %dx%d (scale %.2f, work area %dx%d, borders %d/%d/%d/%d).",
+        minWidth, minHeight, scale, info.usableBounds.width, info.usableBounds.height,
+        borderLeft, borderTop, borderRight, borderBottom);
+}
+
+/*
+ * The palette, shared by ApplyUiTheme() and the frosted-glass drawing below.
+ *
+ * A struct rather than a pile of locals because two of the things the interface needs are not ImGui
+ * style colours and cannot be read back out of the style: the glass tint applied over the blurred
+ * backdrop, and the specular rim. Keeping them beside the rest of the palette is what stops the two
+ * from drifting apart the first time one of them is retuned.
+ *
+ * Neither palette contains pure black or pure white. Both are tuned to be looked at for an hour next
+ * to a running arcade game: #EAE6DF on #1A1C20 rather than #FFFFFF on #000000, an amber accent rather
+ * than the saturated blue a stock ImGui theme ships, and borders at 6-10% white so they read as the
+ * edge of a sheet of glass instead of a drawn line.
+ */
+namespace
+{
+struct UiPalette
+{
+	// Over the blurred backdrop. The alpha is how much of the blur survives, so this is the single
+	// knob that decides whether the effect reads as frosted glass or as a slightly see-through panel.
+	ImVec4 glassTint;
+	ImVec4 popupTint;
+	ImVec4 wellTint;
+	// What ImGui fills a window with when the caller has not drawn a plate: modals, tooltips and the
+	// statistics readout. Alpha is high because there is no backdrop behind those.
+	ImVec4 windowSolid;
+	ImVec4 rimTop;
+	ImVec4 rimSide;
+
+	ImVec4 surface;
+	ImVec4 popup;
+	ImVec4 field;
+	ImVec4 ink;
+	ImVec4 inkDim;
+	ImVec4 line;
+	ImVec4 lineSoft;
+	ImVec4 accent;
+	ImVec4 accentSoft;
+	ImVec4 hover;
+	ImVec4 pressed;
+	ImVec4 button;
+	// Button hover is its own token because the shared `hover` is only a few units away from
+	// `button` in the light theme - the tabs highlight with the accent, the footer and Browse
+	// buttons looked completely inert. The classic theme keeps the old value.
+	ImVec4 buttonHover;
+
+	// Ambient backdrop wash for the settings window; see UiFrost::AmbientColours().
+	ImVec4 backdropTint;
+	float backdropSaturation = 0.55f;
+	float backdropExposure = 0.85f;
+	float backdropVignette = 0.55f;
+};
+
+UiPalette g_palette;
+// Light by default: the interface is a game launcher that people browse for a while, and a warm
+// paper pane is easier to sit in front of than a dark one for that. The dark theme is one combo box
+// away and takes effect immediately.
+UiTheme g_theme = UiTheme::WarmPaper;
+
+UiPalette MakePalette(UiTheme theme)
+{
+	UiPalette p;
+	if (theme == UiTheme::Classic)
+	{
+		/*
+		 * The interface as it was before the frosted-glass rework, value for value.
+		 *
+		 * Not a compromise between the old and new looks: this is the old one, so that somebody who
+		 * preferred it gets exactly what they had - the same paper, the same blue accent, the same
+		 * opaque panels. The glass tokens are filled in as opaque paper so nothing that reads them by
+		 * accident can produce a translucent panel, and the rim is transparent because no plate is
+		 * drawn in this theme at all.
+		 */
+		p.glassTint      = ImVec4(0.965f, 0.957f, 0.937f, 1.00f); // #F6F4EF
+		p.popupTint      = ImVec4(0.992f, 0.988f, 0.973f, 1.00f);
+		p.wellTint       = ImVec4(0.984f, 0.980f, 0.965f, 1.00f);
+		p.windowSolid    = ImVec4(0.965f, 0.957f, 0.937f, 1.00f);
+		p.rimTop         = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+		p.rimSide        = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+		p.surface        = ImVec4(0.984f, 0.980f, 0.965f, 1.00f); // #FBFAF6
+		p.popup          = ImVec4(0.992f, 0.988f, 0.973f, 1.00f); // #FDFCF8
+		p.field          = ImVec4(1.000f, 1.000f, 1.000f, 1.00f);
+		p.ink            = ImVec4(0.165f, 0.157f, 0.141f, 1.00f); // #2A2824
+		p.inkDim         = ImVec4(0.490f, 0.475f, 0.447f, 1.00f); // #7D796F
+		p.line           = ImVec4(0.867f, 0.847f, 0.808f, 1.00f); // #DDD8CE
+		p.lineSoft       = ImVec4(0.906f, 0.890f, 0.855f, 1.00f); // #E7E3DA
+		p.accent         = ImVec4(0.102f, 0.388f, 0.780f, 1.00f); // #1A63C7
+		p.accentSoft     = ImVec4(0.890f, 0.929f, 0.988f, 1.00f); // #E3EDFC
+		p.hover          = ImVec4(0.941f, 0.933f, 0.914f, 1.00f); // #F0EEE9
+		p.pressed        = ImVec4(0.902f, 0.890f, 0.863f, 1.00f); // #E6E3DC
+		p.button         = ImVec4(0.933f, 0.922f, 0.898f, 1.00f); // #EEEBE5
+		p.buttonHover    = p.hover;
+		// No backdrop at all in this theme; the window is an opaque sheet.
+		p.backdropTint   = ImVec4(0.965f, 0.957f, 0.937f, 0.0f);
+		p.backdropSaturation = 0.0f;
+		p.backdropExposure = 1.0f;
+		p.backdropVignette = 0.0f;
+		return p;
+	}
+
+	if (theme == UiTheme::WarmDark)
+	{
+		// Warm dark glass. A rock-grey tint at 72% over the blur, muted amber accent, and a warm
+		// off-white for text.
+		p.glassTint      = ImVec4(0.102f, 0.110f, 0.125f, 0.72f); // rgba(26, 28, 32, 0.72)
+		p.popupTint      = ImVec4(0.118f, 0.129f, 0.153f, 0.86f);
+		p.wellTint       = ImVec4(0.055f, 0.063f, 0.078f, 0.34f);
+		p.windowSolid    = ImVec4(0.094f, 0.102f, 0.122f, 0.95f);
+		p.rimTop         = ImVec4(1.000f, 1.000f, 1.000f, 0.14f);
+		p.rimSide        = ImVec4(1.000f, 1.000f, 1.000f, 0.06f);
+		p.surface        = ImVec4(0.149f, 0.161f, 0.188f, 0.55f); // rgba(38, 41, 48, 0.55)
+		p.popup          = ImVec4(0.125f, 0.137f, 0.161f, 0.98f);
+		p.field          = ImVec4(0.173f, 0.188f, 0.220f, 0.55f);
+		p.ink            = ImVec4(0.918f, 0.902f, 0.875f, 1.00f); // #EAE6DF
+		p.inkDim         = ImVec4(0.604f, 0.588f, 0.557f, 1.00f); // #9A968E
+		p.line           = ImVec4(1.000f, 1.000f, 1.000f, 0.10f);
+		p.lineSoft       = ImVec4(1.000f, 1.000f, 1.000f, 0.06f);
+		p.accent         = ImVec4(0.878f, 0.624f, 0.353f, 1.00f); // #E09F5A
+		p.accentSoft     = ImVec4(0.878f, 0.624f, 0.353f, 0.20f);
+		p.hover          = ImVec4(0.204f, 0.220f, 0.259f, 0.70f); // rgba(52, 56, 66, 0.70)
+		p.pressed        = ImVec4(0.259f, 0.278f, 0.322f, 0.85f);
+		p.button         = ImVec4(0.188f, 0.204f, 0.235f, 0.62f);
+		p.buttonHover    = ImVec4(0.255f, 0.270f, 0.300f, 0.82f);
+		p.backdropTint   = ImVec4(0.102f, 0.110f, 0.125f, 0.62f);
+		p.backdropSaturation = 0.55f;
+		p.backdropExposure = 0.80f;
+		p.backdropVignette = 0.55f;
+		return p;
+	}
+
+	/*
+	 * Warm eye-care light. Alabaster rather than white.
+	 *
+	 * Pure white is the obvious light-theme choice and the wrong one for a list somebody reads for ten
+	 * minutes at a time: it glares, and every grey rule becomes a hard line. These are the values from
+	 * the design note - a warm off-white pane at 78%, linen containers, and a terracotta accent that
+	 * stays legible on all of it. Nothing in the palette is #FFFFFF and nothing is #000000.
+	 */
+	p.glassTint      = ImVec4(0.957f, 0.941f, 0.910f, 0.78f); // rgba(244, 240, 232, 0.78)
+	p.popupTint      = ImVec4(0.980f, 0.969f, 0.945f, 0.93f);
+	// A recess inside a paper pane: slightly deeper than the pane itself, not darker in hue.
+	p.wellTint       = ImVec4(0.886f, 0.863f, 0.820f, 0.42f);
+	p.windowSolid    = ImVec4(0.957f, 0.941f, 0.910f, 0.97f);
+	// Warm grey inward line plus a bright top edge: on a pale pane the outline has to come from the
+	// dark side or it disappears, while the 1px highlight still reads as a reflection.
+	p.rimTop         = ImVec4(1.000f, 1.000f, 1.000f, 0.65f);
+	p.rimSide        = ImVec4(0.235f, 0.216f, 0.176f, 0.10f); // rgba(60, 55, 45, 0.10)
+	p.surface        = ImVec4(0.925f, 0.906f, 0.867f, 0.65f); // rgba(236, 231, 221, 0.65)
+	p.popup          = ImVec4(0.980f, 0.969f, 0.945f, 0.98f);
+	p.field          = ImVec4(0.886f, 0.863f, 0.820f, 0.70f); // rgba(226, 220, 209, 0.70)
+	p.ink            = ImVec4(0.149f, 0.145f, 0.133f, 1.00f); // #262522
+	p.inkDim         = ImVec4(0.431f, 0.416f, 0.388f, 1.00f); // #6E6A63
+	p.line           = ImVec4(0.235f, 0.216f, 0.176f, 0.10f);
+	p.lineSoft       = ImVec4(0.235f, 0.216f, 0.176f, 0.06f);
+	p.accent         = ImVec4(0.784f, 0.427f, 0.231f, 1.00f); // #C86D3B
+	p.accentSoft     = ImVec4(0.784f, 0.427f, 0.231f, 0.16f);
+	p.hover          = ImVec4(0.847f, 0.820f, 0.769f, 0.88f); // rgba(216, 209, 196, 0.88)
+	p.pressed        = ImVec4(0.800f, 0.769f, 0.714f, 0.95f); // rgba(204, 196, 182, 0.95)
+	p.button         = ImVec4(0.863f, 0.835f, 0.788f, 0.80f); // rgba(220, 213, 201, 0.80)
+	// 12% of the terracotta accent: the same hue the tab hover uses, without turning the button
+	// into the selected state. The old `hover` was only ~4/255 away from `button` here.
+	p.buttonHover    = ImVec4(0.854f, 0.786f, 0.721f, 0.92f);
+	/*
+	 * The cover wash stays light: it is the pane that frosts the picture, not this.
+	 *
+	 * Washing the backdrop toward paper at a high weight and then putting a 78% paper pane over it
+	 * leaves the cover contributing a few percent - which is exactly the flat, textureless result the
+	 * frosted panes are supposed to avoid. The wash only has to make the artwork abstract; the blur
+	 * and the pane tint do the rest.
+	 */
+	p.backdropTint   = ImVec4(0.957f, 0.941f, 0.910f, 0.30f);
+	p.backdropSaturation = 0.55f;
+	p.backdropExposure = 0.92f;
+	p.backdropVignette = 0.20f;
+	return p;
+}
+} // namespace
+
+void SetUiTheme(UiTheme theme)
+{
+	if (theme == UiTheme::WarmDark)
+		g_theme = UiTheme::WarmDark;
+	else if (theme == UiTheme::Classic)
+		g_theme = UiTheme::Classic;
+	else
+		g_theme = UiTheme::WarmPaper;
+}
+
+UiTheme GetUiTheme()
+{
+	return g_theme;
+}
+
+bool UiThemeIsDark()
+{
+	return g_theme == UiTheme::WarmDark;
+}
+
+bool UiThemeIsClassic()
+{
+	return g_theme == UiTheme::Classic;
 }
 
 void ApplyUiTheme()
 {
     ImGuiStyle& style = ImGui::GetStyle();
     ImVec4* c = style.Colors;
+    g_palette = MakePalette(g_theme);
+    const UiPalette& p = g_palette;
+    const bool classic = (g_theme == UiTheme::Classic);
 
-    /*
-     * Warm paper rather than pure white.
-     *
-     * Pure white is the obvious light-theme choice and the wrong one for a window someone keeps
-     * open in a dim room next to a running game: it glares, and every grey border becomes a hard
-     * line. A very slightly warm off-white lowers the brightness without tinting the game artwork
-     * shown alongside it, and white input fields still read as raised.
-     */
-    const ImVec4 paper      = ImVec4(0.965f, 0.957f, 0.937f, 1.00f); // #F6F4EF
-    const ImVec4 surface    = ImVec4(0.984f, 0.980f, 0.965f, 1.00f); // #FBFAF6
-    const ImVec4 popup      = ImVec4(0.992f, 0.988f, 0.973f, 1.00f); // #FDFCF8
-    const ImVec4 field      = ImVec4(1.000f, 1.000f, 1.000f, 1.00f);
-    const ImVec4 ink        = ImVec4(0.165f, 0.157f, 0.141f, 1.00f); // #2A2824
-    const ImVec4 inkDim     = ImVec4(0.490f, 0.475f, 0.447f, 1.00f); // #7D796F
-    const ImVec4 line       = ImVec4(0.867f, 0.847f, 0.808f, 1.00f); // #DDD8CE
-    const ImVec4 lineSoft   = ImVec4(0.906f, 0.890f, 0.855f, 1.00f); // #E7E3DA
-    const ImVec4 accent     = ImVec4(0.102f, 0.388f, 0.780f, 1.00f); // #1A63C7
-    const ImVec4 accentSoft = ImVec4(0.890f, 0.929f, 0.988f, 1.00f); // #E3EDFC
-    const ImVec4 hover      = ImVec4(0.941f, 0.933f, 0.914f, 1.00f); // #F0EEE9
-    const ImVec4 pressed    = ImVec4(0.902f, 0.890f, 0.863f, 1.00f); // #E6E3DC
-    const ImVec4 button     = ImVec4(0.933f, 0.922f, 0.898f, 1.00f); // #EEEBE5
-
-    c[ImGuiCol_Text]                  = ink;
-    c[ImGuiCol_TextDisabled]          = inkDim;
-    c[ImGuiCol_WindowBg]              = paper;
-    c[ImGuiCol_ChildBg]               = surface;
-    c[ImGuiCol_PopupBg]               = popup;
-    c[ImGuiCol_Border]                = line;
+    c[ImGuiCol_Text]                  = p.ink;
+    c[ImGuiCol_TextDisabled]          = p.inkDim;
+    c[ImGuiCol_WindowBg]              = p.windowSolid;
+    c[ImGuiCol_ChildBg]               = p.surface;
+    c[ImGuiCol_PopupBg]               = p.popup;
+    c[ImGuiCol_Border]                = p.line;
     c[ImGuiCol_BorderShadow]          = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
-    c[ImGuiCol_FrameBg]               = field;
-    c[ImGuiCol_FrameBgHovered]        = hover;
-    c[ImGuiCol_FrameBgActive]         = pressed;
-    c[ImGuiCol_TitleBg]               = paper;
-    c[ImGuiCol_TitleBgActive]         = paper;
-    c[ImGuiCol_TitleBgCollapsed]      = paper;
-    c[ImGuiCol_MenuBarBg]             = paper;
+    c[ImGuiCol_FrameBg]               = p.field;
+    c[ImGuiCol_FrameBgHovered]        = p.hover;
+    c[ImGuiCol_FrameBgActive]         = p.pressed;
+    c[ImGuiCol_TitleBg]               = p.windowSolid;
+    c[ImGuiCol_TitleBgActive]         = p.windowSolid;
+    c[ImGuiCol_TitleBgCollapsed]      = p.windowSolid;
+    c[ImGuiCol_MenuBarBg]             = p.windowSolid;
     c[ImGuiCol_ScrollbarBg]           = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
-    c[ImGuiCol_ScrollbarGrab]         = ImVec4(0.788f, 0.769f, 0.729f, 1.00f);
-    c[ImGuiCol_ScrollbarGrabHovered]  = ImVec4(0.706f, 0.686f, 0.643f, 1.00f);
-    c[ImGuiCol_ScrollbarGrabActive]   = accent;
-    c[ImGuiCol_CheckMark]             = accent;
-    c[ImGuiCol_SliderGrab]            = accent;
-    c[ImGuiCol_SliderGrabActive]      = ImVec4(0.078f, 0.310f, 0.639f, 1.00f);
-    c[ImGuiCol_Button]                = button;
-    c[ImGuiCol_ButtonHovered]         = accentSoft;
-    c[ImGuiCol_ButtonActive]          = ImVec4(0.831f, 0.886f, 0.973f, 1.00f);
-    c[ImGuiCol_Header]                = accentSoft;
-    c[ImGuiCol_HeaderHovered]         = ImVec4(0.851f, 0.902f, 0.976f, 1.00f);
-    c[ImGuiCol_HeaderActive]          = ImVec4(0.800f, 0.867f, 0.961f, 1.00f);
-    c[ImGuiCol_Separator]             = line;
-    c[ImGuiCol_SeparatorHovered]      = ImVec4(0.510f, 0.659f, 0.878f, 1.00f);
-    c[ImGuiCol_SeparatorActive]       = accent;
+    c[ImGuiCol_ScrollbarGrab]         = ImVec4(p.inkDim.x, p.inkDim.y, p.inkDim.z, 0.45f);
+    c[ImGuiCol_ScrollbarGrabHovered]  = ImVec4(p.inkDim.x, p.inkDim.y, p.inkDim.z, 0.70f);
+    c[ImGuiCol_ScrollbarGrabActive]   = p.accent;
+    c[ImGuiCol_CheckMark]             = p.accent;
+    c[ImGuiCol_SliderGrab]            = p.accent;
+    c[ImGuiCol_SliderGrabActive]      = ImVec4(p.accent.x * 1.10f, p.accent.y * 1.10f, p.accent.z * 1.10f, 1.00f);
+    c[ImGuiCol_Button]                = p.button;
+    c[ImGuiCol_ButtonHovered]         = p.buttonHover;
+    c[ImGuiCol_ButtonActive]          = p.pressed;
+    c[ImGuiCol_Header]                = p.accentSoft;
+    c[ImGuiCol_HeaderHovered]         = ImVec4(p.accent.x, p.accent.y, p.accent.z, UiThemeIsDark() ? 0.30f : 0.22f);
+    c[ImGuiCol_HeaderActive]          = ImVec4(p.accent.x, p.accent.y, p.accent.z, UiThemeIsDark() ? 0.40f : 0.30f);
+    c[ImGuiCol_Separator]             = p.line;
+    c[ImGuiCol_SeparatorHovered]      = ImVec4(p.accent.x, p.accent.y, p.accent.z, 0.60f);
+    c[ImGuiCol_SeparatorActive]       = p.accent;
     c[ImGuiCol_ResizeGrip]            = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
-    c[ImGuiCol_ResizeGripHovered]     = accentSoft;
-    c[ImGuiCol_ResizeGripActive]      = accent;
-    c[ImGuiCol_InputTextCursor]       = ink;
-    c[ImGuiCol_TabHovered]            = accentSoft;
-    c[ImGuiCol_Tab]                   = button;
-    c[ImGuiCol_TabSelected]           = surface;
-    c[ImGuiCol_TabSelectedOverline]   = accent;
-    c[ImGuiCol_TabDimmed]             = ImVec4(0.949f, 0.941f, 0.922f, 1.00f);
-    c[ImGuiCol_TabDimmedSelected]     = surface;
-    c[ImGuiCol_TabDimmedSelectedOverline] = ImVec4(0.710f, 0.686f, 0.635f, 1.00f);
-    c[ImGuiCol_PlotLines]             = accent;
-    c[ImGuiCol_PlotLinesHovered]      = ImVec4(0.078f, 0.310f, 0.639f, 1.00f);
-    c[ImGuiCol_PlotHistogram]         = accent;
-    c[ImGuiCol_PlotHistogramHovered]  = ImVec4(0.078f, 0.310f, 0.639f, 1.00f);
-    c[ImGuiCol_TableHeaderBg]         = ImVec4(0.941f, 0.933f, 0.914f, 1.00f);
-    c[ImGuiCol_TableBorderStrong]     = line;
-    c[ImGuiCol_TableBorderLight]      = lineSoft;
+    c[ImGuiCol_ResizeGripHovered]     = p.accentSoft;
+    c[ImGuiCol_ResizeGripActive]      = p.accent;
+    c[ImGuiCol_InputTextCursor]       = p.ink;
+    c[ImGuiCol_TabHovered]            = c[ImGuiCol_HeaderHovered];
+    c[ImGuiCol_Tab]                   = p.button;
+    c[ImGuiCol_TabSelected]           = p.surface;
+    c[ImGuiCol_TabSelectedOverline]   = p.accent;
+    c[ImGuiCol_TabDimmed]             = ImVec4(p.button.x, p.button.y, p.button.z, p.button.w * 0.55f);
+    c[ImGuiCol_TabDimmedSelected]     = p.surface;
+    c[ImGuiCol_TabDimmedSelectedOverline] = ImVec4(p.inkDim.x, p.inkDim.y, p.inkDim.z, 0.55f);
+    c[ImGuiCol_PlotLines]             = p.accent;
+    c[ImGuiCol_PlotLinesHovered]      = ImVec4(p.accent.x * 1.10f, p.accent.y * 1.10f, p.accent.z * 1.10f, 1.00f);
+    c[ImGuiCol_PlotHistogram]         = p.accent;
+    c[ImGuiCol_PlotHistogramHovered]  = ImVec4(p.accent.x * 1.10f, p.accent.y * 1.10f, p.accent.z * 1.10f, 1.00f);
+    c[ImGuiCol_TableHeaderBg]         = ImVec4(p.ink.x, p.ink.y, p.ink.z, UiThemeIsDark() ? 0.06f : 0.05f);
+    c[ImGuiCol_TableBorderStrong]     = p.line;
+    c[ImGuiCol_TableBorderLight]      = p.lineSoft;
     c[ImGuiCol_TableRowBg]            = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
-    c[ImGuiCol_TableRowBgAlt]         = ImVec4(0.165f, 0.157f, 0.141f, 0.035f);
-    c[ImGuiCol_TextLink]              = accent;
-    c[ImGuiCol_TextSelectedBg]        = ImVec4(0.812f, 0.878f, 0.973f, 1.00f);
-    c[ImGuiCol_TreeLines]             = line;
-    c[ImGuiCol_DragDropTarget]        = accent;
-    c[ImGuiCol_DragDropTargetBg]      = ImVec4(0.102f, 0.388f, 0.780f, 0.15f);
-    c[ImGuiCol_UnsavedMarker]         = accent;
-    c[ImGuiCol_NavCursor]             = accent;
-    c[ImGuiCol_NavWindowingHighlight] = ImVec4(0.102f, 0.388f, 0.780f, 0.70f);
-    c[ImGuiCol_NavWindowingDimBg]     = ImVec4(0.100f, 0.090f, 0.080f, 0.20f);
-    c[ImGuiCol_ModalWindowDimBg]      = ImVec4(0.100f, 0.090f, 0.080f, 0.28f);
+    c[ImGuiCol_TableRowBgAlt]         = ImVec4(p.ink.x, p.ink.y, p.ink.z, 0.035f);
+    c[ImGuiCol_TextLink]              = p.accent;
+    c[ImGuiCol_TextSelectedBg]        = ImVec4(p.accent.x, p.accent.y, p.accent.z, 0.30f);
+    c[ImGuiCol_TreeLines]             = p.line;
+    c[ImGuiCol_DragDropTarget]        = p.accent;
+    c[ImGuiCol_DragDropTargetBg]      = ImVec4(p.accent.x, p.accent.y, p.accent.z, 0.15f);
+    c[ImGuiCol_UnsavedMarker]         = p.accent;
+    c[ImGuiCol_NavCursor]             = p.accent;
+    c[ImGuiCol_NavWindowingHighlight] = ImVec4(p.accent.x, p.accent.y, p.accent.z, 0.70f);
+    c[ImGuiCol_NavWindowingDimBg]     = ImVec4(0.02f, 0.02f, 0.03f, UiThemeIsDark() ? 0.25f : 0.18f);
+    // Warm brown rather than black behind a modal: a black scrim over warm paper reads as a hole.
+    // The classic theme keeps the near-black it always had, because that is what it looked like.
+    c[ImGuiCol_ModalWindowDimBg]      = UiThemeIsDark()
+        ? ImVec4(0.02f, 0.02f, 0.03f, 0.45f)
+        : (classic ? ImVec4(0.100f, 0.090f, 0.080f, 0.28f) : ImVec4(0.235f, 0.216f, 0.176f, 0.22f));
 
     // Airy but not loose: more spacing than ImGui's defaults, which are tuned for dense tool UIs.
-    style.WindowPadding = ImVec2(20.0f, 18.0f);
-    style.FramePadding = ImVec2(12.0f, 7.0f);
+    // The vertical figures are what give a form breathing room without making it scroll, and the
+    // padding is generous because every panel here is a rounded sheet with content on it - anything
+    // closer to the border reads as a box drawn around a form.
+    //
+    // The classic theme keeps the tighter figures it was designed with: it has no glass panes, so
+    // its content sits directly on the window's own background and does not need the extra ring.
+    style.WindowPadding = classic ? ImVec2(20.0f, 18.0f) : ImVec2(18.0f, 16.0f);
+    style.FramePadding = classic ? ImVec2(12.0f, 7.0f) : ImVec2(10.0f, 6.0f);
     style.CellPadding = ImVec2(10.0f, 8.0f);
-    style.ItemSpacing = ImVec2(12.0f, 9.0f);
+    style.ItemSpacing = classic ? ImVec2(12.0f, 9.0f) : ImVec2(10.0f, 9.0f);
     style.ItemInnerSpacing = ImVec2(8.0f, 6.0f);
     style.IndentSpacing = 20.0f;
     style.ScrollbarSize = 12.0f;
     style.GrabMinSize = 12.0f;
 
     style.WindowBorderSize = 0.0f;
-    style.ChildBorderSize = 1.0f;
+    /*
+     * No borders on children or popups in the glass themes: the specular rim drawn by
+     * UiFrost::Plate() is the edge, and an ImGui border on top of it would be a second, hard line 1px
+     * outside it. The classic theme has no rim, so it keeps the 1px child border it was built with -
+     * that border is what separates the list and the settings panes from the window.
+     *
+     * Controls do get a hairline in the glass themes. Without one a combo, an input field and a small
+     * button are told apart from the pane behind them by fill colour alone, and on the light theme
+     * the two fills are within a few percent of each other - the save-state table's Save/Load buttons
+     * all but vanish. The line is the theme's border token: 10% warm grey on paper, 10% white on glass.
+     */
+    style.ChildBorderSize = classic ? 1.0f : 0.0f;
     style.PopupBorderSize = 1.0f;
-    style.FrameBorderSize = 0.0f;
+    style.FrameBorderSize = classic ? 0.0f : 1.0f;
     style.TabBorderSize = 0.0f;
     style.TabBarBorderSize = 0.0f;
     style.TabBarOverlineSize = 2.0f;
 
+    /*
+     * Corner radii, following the proportions Apple's own panels use: the larger the surface, the
+     * larger the radius, so a window's corner is visibly rounder than a button's rather than the
+     * same arc scaled up. These are unscaled; RescaleUi() multiplies them by the display scale.
+     */
     style.WindowRounding = 14.0f;
-    style.ChildRounding = 12.0f;
-    style.FrameRounding = 8.0f;
-    style.PopupRounding = 12.0f;
-    style.ScrollbarRounding = 8.0f;
-    style.GrabRounding = 8.0f;
-    style.TabRounding = 9.0f;
+    style.ChildRounding = classic ? 12.0f : 10.0f;
+    style.FrameRounding = classic ? 8.0f : 7.0f;
+    style.GrabRounding = classic ? 8.0f : 6.0f;
+    style.PopupRounding = classic ? 12.0f : 10.0f;
+    style.ScrollbarRounding = classic ? 8.0f : 6.0f;
+    style.TabRounding = classic ? 9.0f : 8.0f;
+
+    /*
+     * Antialiasing and curve smoothness.
+     *
+     * The default tessellation budget (0.30) is chosen for tool UIs where a corner is eight pixels
+     * across; at a 14px radius it leaves visible facets, which is exactly the cheap look the rounded
+     * corners are supposed to avoid. 0.10 costs a few more vertices per arc and no measurable time.
+     *
+     * The three AntiAliased flags are ImGui's defaults, set explicitly because the theme is also
+     * applied to the in-game overlay's context and a future default change should not silently make
+     * the two surfaces disagree.
+     */
+    style.CircleTessellationMaxError = 0.10f;
+    style.AntiAliasedLines = true;
+    style.AntiAliasedLinesUseTex = true;
+    style.AntiAliasedFill = true;
 
     style.WindowTitleAlign = ImVec2(0.0f, 0.5f);
     style.SeparatorTextBorderSize = 1.0f;
     style.SeparatorTextAlign = ImVec2(0.0f, 0.5f);
-    style.SeparatorTextPadding = ImVec2(0.0f, 8.0f);
+    style.SeparatorTextPadding = classic ? ImVec2(0.0f, 8.0f) : ImVec2(0.0f, 9.0f);
     style.SelectableTextAlign = ImVec2(0.0f, 0.0f);
     style.DisabledAlpha = 0.45f;
+}
+
+UiFrost::AmbientWash UiFrost::AmbientColours()
+{
+	AmbientWash wash;
+	wash.tint = g_palette.backdropTint;
+	wash.saturation = g_palette.backdropSaturation;
+	wash.exposure = g_palette.backdropExposure;
+	wash.vignette = g_palette.backdropVignette;
+	return wash;
+}
+
+void UiFrost::Plate(ImDrawList* draw, ImTextureID backdrop, const ImVec2& pMin, const ImVec2& pMax,
+	float rounding, Surface surface, float alpha)
+{
+	if (draw == nullptr)
+		return;
+
+	const float width = pMax.x - pMin.x;
+	const float height = pMax.y - pMin.y;
+	if (width <= 0.5f || height <= 0.5f)
+		return;
+
+	// ImGui builds the corner arcs from a radius it does not clamp; a radius larger than half the
+	// shorter side makes the path fold back on itself.
+	const float radius = (std::max)(0.0f, (std::min)(rounding, 0.5f * (std::min)(width, height)));
+
+	/*
+	 * The plate replaces the window background, and a window's body runs with the draw list's clip
+	 * rect already narrowed to the padded inner rectangle. Pushing the plate's own rectangle is what
+	 * stops the corners and the 1px rim from being clipped away - the symptom otherwise is a rounded
+	 * panel with square inner corners.
+	 */
+	draw->PushClipRect(pMin, pMax, false);
+
+	/*
+	 * The blurred frame, sampled with screen-mapped uv.
+	 *
+	 * This is the whole trick that lets one texture serve every panel: the backdrop is a copy of the
+	 * frame in screen space, so a panel at (x, y) reads exactly the part of it that was behind that
+	 * panel. The alternative - a per-panel texture or a separate capture - would need one pass per
+	 * panel and a scissor per pass.
+	 */
+	if (backdrop != 0 && surface != Surface::Well && alpha > 0.0f)
+	{
+		const ImVec2 display = ImGui::GetIO().DisplaySize;
+		if (display.x > 0.0f && display.y > 0.0f)
+		{
+			const ImVec2 uvMin(pMin.x / display.x, pMin.y / display.y);
+			const ImVec2 uvMax(pMax.x / display.x, pMax.y / display.y);
+			const ImU32 tint = IM_COL32(255, 255, 255, (int)(255.0f * (std::min)(1.0f, (std::max)(0.0f, alpha))));
+			draw->AddImageRounded(backdrop, pMin, pMax, uvMin, uvMax, tint, radius, ImDrawFlags_None);
+		}
+	}
+
+	ImVec4 tint = surface == Surface::Well ? g_palette.wellTint
+		: (surface == Surface::Popup ? g_palette.popupTint : g_palette.glassTint);
+	tint.w *= alpha;
+	draw->AddRectFilled(pMin, pMax, ImGui::GetColorU32(tint), radius);
+
+	/*
+	 * Specular rim.
+	 *
+	 * A 1px border all round at 6% white plus a brighter line along the top edge at 14%: the light
+	 * in the reference material comes from above, so the top edge catches it and the sides barely
+	 * reflect anything. Drawn inside the plate, so the tint does not cover it. A well has no rim -
+	 * it is a recess, and a highlight on a recess reads as a raised edge.
+	 */
+	if (surface != Surface::Well && alpha > 0.0f)
+	{
+		const float inset = 0.5f;
+		const ImVec2 rimMin(pMin.x + inset, pMin.y + inset);
+		const ImVec2 rimMax(pMax.x - inset, pMax.y - inset);
+		ImVec4 side = g_palette.rimSide;
+		side.w *= alpha;
+		draw->AddRect(rimMin, rimMax, ImGui::GetColorU32(side),
+			(std::max)(0.0f, radius - inset), ImDrawFlags_None, 1.0f);
+
+		// The top edge, stopping where the corner arcs begin: running it into the arc draws a hard
+		// horizontal stub across the curve.
+		const float topFrom = rimMin.x + radius;
+		const float topTo = rimMax.x - radius;
+		if (topTo > topFrom)
+		{
+			ImVec4 top = g_palette.rimTop;
+			top.w *= alpha;
+			draw->AddLine(ImVec2(topFrom, rimMin.y), ImVec2(topTo, rimMin.y),
+				ImGui::GetColorU32(top), 1.0f);
+		}
+	}
+
+	draw->PopClipRect();
+}
+
+namespace
+{
+// Per-control hover weights, keyed by ImGui ID. Bounded so a long session that creates IDs
+// dynamically cannot grow it without limit; the map is only a set of 0..1 floats, so clearing it
+// costs one frame of transition rather than anything visible.
+std::unordered_map<ImGuiID, float>& HoverWeights()
+{
+	static std::unordered_map<ImGuiID, float> weights;
+	return weights;
+}
+}
+
+float UiHoverBegin(const char* label)
+{
+	if (label == nullptr)
+		return 0.0f;
+
+	auto& weights = HoverWeights();
+	const ImGuiID id = ImGui::GetID(label);
+	auto it = weights.find(id);
+	if (it == weights.end())
+	{
+		if (weights.size() > 4096)
+			weights.clear();
+		it = weights.emplace(id, 0.0f).first;
+	}
+	return it->second;
+}
+
+void UiHoverEnd(const char* label, bool hovered)
+{
+	if (label == nullptr)
+		return;
+
+	auto& weights = HoverWeights();
+	const ImGuiID id = ImGui::GetID(label);
+	auto it = weights.find(id);
+	if (it == weights.end())
+		return;
+
+	/*
+	 * Exponential approach with a 40 ms time constant, which reaches 95% in 120 ms - the figure the
+	 * interface is specified in. Frame-rate independent, so a 240 Hz present and a 57 Hz simulation
+	 * produce the same fade, and dt is clamped so a hitch cannot snap it.
+	 */
+	const float dt = (std::min)(ImGui::GetIO().DeltaTime, 0.1f);
+	const float k = 1.0f - std::exp(-dt / 0.040f);
+	const float target = hovered ? 1.0f : 0.0f;
+	it->second += (target - it->second) * k;
+	if (std::fabs(target - it->second) < 0.002f)
+		it->second = target;
+}
+
+ImVec4 UiHoverBlend(const ImVec4& base, const ImVec4& hot, float weight)
+{
+	if (weight <= 0.0f)
+		return base;
+	if (weight >= 1.0f)
+		return hot;
+	return ImVec4(base.x + (hot.x - base.x) * weight,
+		base.y + (hot.y - base.y) * weight,
+		base.z + (hot.z - base.z) * weight,
+		base.w + (hot.w - base.w) * weight);
+}
+
+/*
+ * Re-apply the interface at a new monitor scale, between frames.
+ *
+ * ImGui 1.92 bakes glyphs at the requested size on demand, so the font atlas does not have to be
+ * rebuilt: setting FontSizeBase is enough, and the next NewFrame() rasterises the sizes the layout
+ * actually asks for. ApplyUiTheme() puts every padding and rounding back to its base value first,
+ * otherwise ScaleAllSizes() would compound on every monitor change.
+ */
+static void RescaleUi(float scale)
+{
+    ApplyUiTheme();
+    if (scale > 1.05f)
+        ImGui::GetStyle().ScaleAllSizes(scale);
+    ImGui::GetStyle().FontSizeBase = 18.0f * scale;
+    ImGui::GetStyle().FontScaleMain = 1.0f;
+    InfoLog("GUI: interface rescaled to %.2fx for the new display.", scale);
 }
 
 /*
@@ -5007,30 +8962,37 @@ static const ImWchar* UiGlyphRanges(ImFontAtlas* atlas)
 
 #if !defined(_WIN32) && !defined(__APPLE__)
 /*
- * Asks Fontconfig for a Simplified Chinese sans-serif face.
+ * Asks Fontconfig for every Simplified Chinese sans-serif face it knows, best first.
  *
  * The short list below covers the usual Noto and WenQuanYi locations, but a distribution is free to
- * install its CJK fonts anywhere. Fontconfig already knows where they are - it is what the desktop
- * itself uses - so querying it catches those layouts without linking against Fontconfig or
- * shipping a font. Returns an empty string when fc-match is not installed or finds nothing.
+ * install its CJK fonts anywhere - and to rank something this build cannot read first. That is not
+ * hypothetical: on openSUSE Tumbleweed the best match is NotoSansCJKsc-VF.otf, a CFF2 variable font,
+ * and handing it to the rasteriser aborted the program at start-up (Issue #5).
+ *
+ * So the ranked list is walked and the first face that passes the probe wins: Fontconfig still decides
+ * the order, compatibility decides where to stop. Bounded, because every candidate is a file read and
+ * a parse, and a machine with a hundred CJK faces should not spend a second on them.
  */
-static std::string FindCjkFontWithFontconfig()
+static std::vector<std::string> FindCjkFontsWithFontconfig(int limit)
 {
-    FILE* pipe = popen("fc-match -f '%{file}' 'sans-serif:lang=zh-cn' 2>/dev/null", "r");
+    std::vector<std::string> fonts;
+
+    FILE* pipe = popen("fc-match -s -f '%{file}\\n' 'sans-serif:lang=zh-cn' 2>/dev/null", "r");
     if (pipe == nullptr)
-        return {};
+        return fonts;
 
-    std::string path;
     char buffer[1024];
-    while (fgets(buffer, sizeof(buffer), pipe) != nullptr)
-        path += buffer;
+    while ((int)fonts.size() < limit && fgets(buffer, sizeof(buffer), pipe) != nullptr)
+    {
+        std::string path(buffer);
+        while (!path.empty() && (path.back() == '\n' || path.back() == '\r' || path.back() == ' '))
+            path.pop_back();
+        if (!path.empty())
+            fonts.push_back(std::move(path));
+    }
 
-    if (pclose(pipe) != 0)
-        return {};
-
-    while (!path.empty() && (path.back() == '\n' || path.back() == '\r' || path.back() == ' '))
-        path.pop_back();
-    return path;
+    pclose(pipe);
+    return fonts;
 }
 #endif
 
@@ -5059,16 +9021,27 @@ void LoadUiFont(ImGuiIO& io, float scale)
         "/Library/Fonts/Arial Unicode.ttf",
     };
 #else
+    /*
+     * TrueType outlines first, then CFF, then whatever Fontconfig offers.
+     *
+     * The probe below checks every candidate before use, so this order is about quality of fit rather
+     * than compatibility: WenQuanYi, Droid and the AR PL collections are TrueType and stay crisp at
+     * interface sizes, while the Noto CJK files are CFF. Variable fonts - the "-VF" files - are
+     * deliberately absent: they use the CFF2 table, which the rasteriser cannot read at all.
+     */
     const char* paths[] = {
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        "/usr/share/fonts/wqy-microhei/wqy-microhei.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/wqy-zenhei/wqy-zenhei.ttc",
+        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+        "/usr/share/fonts/truetype/arphic/uming.ttc",
+        "/usr/share/fonts/truetype/arphic/ukai.ttc",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-        "/usr/share/fonts/wqy-microhei/wqy-microhei.ttc",
-        "/usr/share/fonts/wqy-zenhei/wqy-zenhei.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
     };
 #endif
 
@@ -5079,12 +9052,34 @@ void LoadUiFont(ImGuiIO& io, float scale)
         if (path == nullptr || path[0] == '\0' || !std::filesystem::exists(path))
             return false;
 
+        /*
+         * Ask the rasteriser before handing the file over.
+         *
+         * ImGui asserts when stb_truetype cannot parse the data, and that assert is fatal: one
+         * unsupported system font ended the program during start-up, before any window appeared
+         * (Issue #5, a CFF2 variable font chosen by Fontconfig). Skipping the file and trying the next
+         * candidate is the only reasonable answer, and naming the file and the reason in the log means
+         * a report like that one is answered by the log alone.
+         */
+        const FontProbeResult probe = ProbeFontFile(path, 0);
+        if (!probe.usable)
+        {
+            InfoLog("GUI: skipping font '%s' - %s.", path, probe.reason);
+            return false;
+        }
+
         ImFontConfig cfg;
         cfg.FontNo = 0;              // first face in a .ttc; PingFang.ttc starts with SC Regular
         cfg.OversampleH = 2;
         cfg.OversampleV = 1;
         cfg.PixelSnapH = false;
-        return io.Fonts->AddFontFromFileTTF(path, size, &cfg, ranges) != nullptr;
+        if (io.Fonts->AddFontFromFileTTF(path, size, &cfg, ranges) == nullptr)
+            return false;
+
+        // One line naming the face in use. A font report can then be answered from the log, which is
+        // also how the probe's skips above make sense next to a launch that worked.
+        InfoLog("GUI: interface font '%s'.", path);
+        return true;
     };
 
     for (const char* path : paths)
@@ -5092,13 +9087,22 @@ void LoadUiFont(ImGuiIO& io, float scale)
             return;
 
 #if !defined(_WIN32) && !defined(__APPLE__)
-    // Tried last: a known-good Noto/WenQuanYi path wins, and an absent Fontconfig just returns an
-    // empty string. This is what catches a distribution that installs its CJK fonts elsewhere.
-    const std::string fontconfigFont = FindCjkFontWithFontconfig();
-    if (addFont(fontconfigFont.c_str()))
-        return;
+    // Tried last: Fontconfig knows where this distribution put its CJK fonts and in what order it
+    // wants them used; the probe decides which of those this build can actually read.
+    for (const std::string& candidate : FindCjkFontsWithFontconfig(8))
+        if (addFont(candidate.c_str()))
+            return;
 #endif
 
+    /*
+     * Nothing usable. The built-in face has no CJK glyphs, so Chinese text would be blank boxes -
+     * which looks like an encoding bug unless the reason is stated.
+     */
+    InfoLog("GUI: no usable CJK system font found; the built-in face has no Chinese glyphs, so Chinese "
+            "text will not render.");
+#if !defined(_WIN32) && !defined(__APPLE__)
+    InfoLog("GUI: install one to fix it - for example fonts-wqy-microhei, or a non-variable Noto Sans CJK.");
+#endif
     io.Fonts->AddFontDefaultVector();
 }
 
@@ -5106,8 +9110,13 @@ struct GuiState
 {
     GuiState() : fullConfig("Global"), config("Global") {}
 
-    SDL_Window* window = nullptr;
-    SDL_GLContext glContext = nullptr;
+    OSD::Platform::Window* window = nullptr;
+#if defined(SUPERMODEL_PURE_VULKAN)
+    // Owns the device and swapchain for the settings window for the whole run.
+    Vulkan3D::CVulkanContext* vkContext = nullptr;
+#else
+    OSD::Platform::GLContext* glContext = nullptr;
+#endif
     std::string configPath;
     Util::Config::Node fullConfig;
     Util::Config::Node config;
@@ -5117,86 +9126,177 @@ struct GuiState
     std::shared_ptr<CInputs> inputs;
     KeyBindState kb{};
     bool saveSettings = true;
+    // False after the first GuiRunOnce() call. A later call means the player has returned from a
+    // game, and the in-game panel may have written settings straight to the file in the meantime.
+    bool firstRun = true;
+    // True while the start-up artwork is on screen over the still hidden window. Cleared once the
+    // first frame has been presented and the window has been revealed.
+    bool splashPending = false;
+    // True once the window has been put on screen during start-up. Only meaningful while
+    // splashPending is set: it keeps the early-reveal fallback from showing the window twice.
+    bool windowShown = false;
 };
+
+/*
+ * Fill the window's two config nodes from a settings file.
+ *
+ * GuiCreate uses this for the initial read. GuiRunOnce uses it again after a game, because the
+ * in-game panel's Apply writes straight to the file: without this the window would keep showing the
+ * values it had before the game, and on the next save it would write those stale values back over
+ * what the panel persisted.
+ *
+ * The renderer override and the portable ROM-path repair live here rather than at the two call
+ * sites, so a reload cannot silently drop them.
+ */
+static void LoadGuiConfig(GuiState& state, const Util::Config::Node& fileConfig)
+{
+    state.fullConfig = fileConfig;
+    state.config = Util::Config::Node("Global");
+    Util::Config::MergeINISections(&state.config, DefaultConfig(), state.fullConfig);
+
+#if defined(SUPERMODEL_PURE_VULKAN)
+    // There is no OpenGL renderer in this executable.  Force the saved configuration rather than
+    // carrying a stale New3DEngine/Legacy3D choice back into the file on the next save.
+    state.config.Set("Vulkan3DEngine", true);
+#endif
+
+    /*
+     * Portable ROM folder.  A user who keeps the game zips in a rom/, roms/, romset/ or romsets/
+     * folder next to the executable should not have to point the interface at it again after every
+     * update - and on a fresh install the historical C:/Downloads default is often not where they
+     * put them.  The folder is only adopted when the configured path is missing or is still the
+     * old stock default; a path the user chose deliberately is left alone even when the volume is
+     * temporarily unavailable.
+     *
+     * The value stored is relative ("roms/") so the whole installation can be moved.  ResolveRomPath()
+     * anchors it to the executable on every platform, including Linux, where the settings file
+     * itself lives under XDG.
+     */
+    {
+        const std::string configured = state.config["ROMPath"].ValueAsDefault<std::string>("");
+        std::string trimmed = configured;
+        while (!trimmed.empty() && (trimmed.back() == ' ' || trimmed.back() == '\t'))
+            trimmed.pop_back();
+
+        const std::string lower = ToLowerAscii(trimmed);
+        const bool legacyDefault = lower == "c:/downloads" || lower == "c:\\downloads";
+#if defined(__APPLE__)
+        // A drive-letter path can never name anything on macOS. Treating it as a stale setting
+        // covers both the old stock default (C:/Downloads) and a configuration file copied over
+        // from a Windows machine.
+        const bool windowsDrivePath = lower.size() >= 2 && lower[1] == ':' &&
+            lower[0] >= 'a' && lower[0] <= 'z';
+#else
+        const bool windowsDrivePath = false;
+#endif
+        std::error_code error;
+        const bool usable = !trimmed.empty() &&
+            std::filesystem::is_directory(PathFromUtf8(ResolveRomPath(trimmed)), error) && !error;
+
+        if (!usable || legacyDefault)
+        {
+            std::string portable = FindPortableRomFolder(true);
+            if (portable.empty() && !usable)
+                portable = FindPortableRomFolder(false);
+            if (!portable.empty())
+            {
+                if (portable != configured)
+                {
+                    InfoLog("GUI: using the portable ROM folder '%s' instead of '%s'.",
+                        portable.c_str(), configured.c_str());
+                }
+                state.config.Set("ROMPath", portable);
+                // Also correct the copy that is written back when the window is merely closed, so
+                // the repair survives even without an explicit save.
+                state.fullConfig.Set("ROMPath", portable);
+            }
+            else if (!usable && (trimmed.empty() || legacyDefault || windowsDrivePath))
+            {
+                const std::string fallback = FileSystemPath::GetDefaultRomPath();
+                if (!fallback.empty() && fallback != configured)
+                {
+                    InfoLog("GUI: ROM path '%s' is unavailable; using '%s'.",
+                        configured.c_str(), fallback.c_str());
+                    state.config.Set("ROMPath", fallback);
+                    state.fullConfig.Set("ROMPath", fallback);
+                }
+            }
+        }
+    }
+}
 
 GuiState* GuiCreate(const std::string& configPath, const Util::Config::Node& fileConfig)
 {
     std::unique_ptr<GuiState> state(new GuiState());
+    // Startup milestones, in milliseconds from entry. Cheap, and the only way to tell a slow
+    // Vulkan device from a slow font or game-list step when someone reports a slow launch.
+    const auto startupClock = std::chrono::steady_clock::now();
+    const auto startupMs = [&startupClock]()
+    {
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - startupClock).count();
+    };
     state->configPath = configPath;
     g_settingsPath = configPath;        // seeds the "Save as" dialog with the file in use
-    state->fullConfig = fileConfig;
-    Util::Config::MergeINISections(&state->config, DefaultConfig(), state->fullConfig);
+    LoadGuiConfig(*state, fileConfig);
+
+    // Before any ImGui context exists, so the first ApplyUiTheme() builds the right palette.
+    // 0 = warm paper (light), 1 = warm dark, 2 = the interface as it was before the glass rework.
+    {
+        const int themeValue = state->config["UITheme"].ValueAsDefault<int>(0);
+        SetUiTheme(themeValue == 1 ? UiTheme::WarmDark
+            : (themeValue == 2 ? UiTheme::Classic : UiTheme::WarmPaper));
+    }
 
     /*
-     * A settings file written before this build recorded the old Windows default, "C:/Downloads".
-     * On macOS that is a relative path that does not exist, so the game list started out empty and
-     * the reason was invisible. Replace that one value - and only that one - with the ROMs folder
-     * next to the executable; a path the user chose deliberately is left alone even when the volume
-     * is temporarily unavailable.
+     * Answer "the covers do not show" before anything asks for one.
+     *
+     * The directory is derived from the executable's own path, so this line also states where the
+     * program is looking - which distinguishes a copied-out executable from a machine whose WIC has
+     * no WebP decoder. Logged here rather than on the first lookup because the preview only asks for
+     * a cover once a game is selected, and the answer is wanted even when nothing is selected.
      */
-#if defined(__APPLE__)
-    {
-        const std::string configured = state->config["ROMPath"].ValueAsDefault<std::string>("");
-        std::string trimmed = configured;
-        while (!trimmed.empty() && (trimmed.back() == ' ' || trimmed.back() == '\t'))
-            trimmed.pop_back();
-        const std::string lower = ToLowerAscii(trimmed);
-        // A drive-letter path can never name anything on this platform. Treating it as a stale
-        // setting covers both the old stock default (C:/Downloads) and a configuration file copied
-        // over from a Windows machine.
-        const bool windowsDrivePath = lower.size() >= 2 && lower[1] == ':' &&
-            lower[0] >= 'a' && lower[0] <= 'z';
-        std::error_code error;
-        const bool usable = !trimmed.empty() &&
-            std::filesystem::is_directory(PathFromUtf8(FileSystemPath::ResolvePath(trimmed)), error) && !error;
-        if (!usable && (trimmed.empty() || windowsDrivePath))
-        {
-            const std::string fallback = FileSystemPath::GetDefaultRomPath();
-            if (!fallback.empty())
-            {
-                state->config.Set("ROMPath", fallback);
-                // Also correct the copy that is written back when the window is merely closed, so
-                // the repair survives even without an explicit save.
-                state->fullConfig.Set("ROMPath", fallback);
-            }
-        }
-    }
-#endif
+    LogBoxartDirectory();
 
-    SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "system");
-    if (SDL_Init(SDL_INIT_VIDEO) < 0) {
-        std::cerr << "SDL could not initialize! Error: " << SDL_GetError() << std::endl;
+    OSD::Platform::SetDPIAwareness();
+    if (!OSD::Platform::Initialize(OSD::Platform::Subsystem_Video)) {
+        std::cerr << "SDL could not initialize! Error: " << OSD::Platform::GetError() << std::endl;
         return nullptr;
     }
 
 #ifdef __APPLE__
-    // SDL has created NSApplication by now. The interface is always the light theme, so make the
-    // native title bar and the file pickers light as well instead of following Dark Mode.
-    OSXFileDialogs::ApplyLightAppearance();
+    // SDL has created NSApplication by now. Match the native title bar and the file pickers to the
+    // interface theme instead of letting them follow the system independently.
+    if (UiThemeIsDark())
+        OSXFileDialogs::ApplyDarkAppearance();
+    else
+        OSXFileDialogs::ApplyLightAppearance();
 #endif
 
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
-    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
-    SDL_WindowFlags window_flags = (SDL_WindowFlags)(SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_INPUT_FOCUS);
+#if !defined(SUPERMODEL_PURE_VULKAN)
+    OSD::Platform::GLAttributes glAttributes;
+    glAttributes.majorVersion = 4;
+    glAttributes.minorVersion = 1;
+    glAttributes.coreProfile = true;
+    glAttributes.doubleBuffer = true;
+    glAttributes.depthSize = 24;
+    glAttributes.stencilSize = 8;
+    OSD::Platform::SetGLAttributes(glAttributes);
+#endif
 
     // Default window size, in client-area pixels (the title bar and borders are added on top, so
-    // the frame ends up a little larger). 1280x800 fits comfortably on a 1080p screen without
-    // needing to be resized on first run.
+    // the frame ends up a little larger). 1280x800 is the comfortable size when the work area has
+    // room for it; on a 1080p display at 150% the whole logical screen is only 1280x720, so the
+    // per-display clamp in ApplyGuiWindowMinimumSize() brings this down instead.
     int windowWidth = 1280;
     int windowHeight = 800;
     {
         int displayIndex = 0;
         // Query the display DPI up front so the diagnostic line below always reports the real
         // value, even when a saved size means the scaling is not used.
-        float ddpi = 96.0f;
-        float ddpiScale = 1.0f;
-        if (SDL_GetDisplayDPI(displayIndex, &ddpi, nullptr, nullptr) == 0 && ddpi >= 1.0f)
-            ddpiScale = ddpi / 96.0f;
-
+        float ddpiScale = OSD::Platform::GetDisplayContentScale(
+            OSD::Platform::GetDisplayIdForIndex(displayIndex));
+        if (ddpiScale < 1.0f)
+            ddpiScale = 1.0f;
 #if defined(__APPLE__)
         // SDL sizes macOS windows in points; the Retina factor applies to the drawable, not to the
         // window. Scaling the request by the display DPI would ask for a window 1.5x too large.
@@ -5230,73 +9330,146 @@ GuiState* GuiCreate(const std::string& configPath, const Util::Config::Node& fil
 
         // Clamp to something usable: never smaller than a sane minimum, never larger than the
         // desktop work area (the saved size may come from a since-disconnected display).
+        //
+        // 1280x720 logical pixels is the smallest layout the two columns can render without
+        // clipping; 1280x800 is the default size, used when the display has room for it. The
+        // same floor is applied to a size saved on another display, so a window restored from
+        // a 1024x768 machine is grown instead of opening below the minimum.
         const int minWidth = (int)(1280.0f * ddpiScale);
         const int minHeight = (int)(720.0f * ddpiScale);
         if (windowWidth < minWidth) windowWidth = minWidth;
         if (windowHeight < minHeight) windowHeight = minHeight;
 
-        SDL_Rect usable{};
-        if (SDL_GetDisplayUsableBounds(displayIndex, &usable) == 0)
+        OSD::Platform::Rect usable{};
+        OSD::Platform::DisplayInfo displayInfo;
+        if (OSD::Platform::GetDisplayInfo(displayIndex, &displayInfo))
+            usable = displayInfo.usableBounds;
+        if (usable.width > 0 && usable.height > 0)
         {
-            if (windowWidth > usable.w) windowWidth = usable.w;
-            if (windowHeight > usable.h) windowHeight = usable.h;
+            if (windowWidth > usable.width) windowWidth = usable.width;
+            if (windowHeight > usable.height) windowHeight = usable.height;
         }
 
         // Record how the size was arrived at. Window geometry problems are otherwise hard to
         // diagnose remotely, and this shows at a glance whether DPI scaling or the work-area clamp
         // is responsible for a size the user did not expect.
         InfoLog("GUI window: %dx%d (saved %dx%d, display DPI scale %.2f, usable area %dx%d).",
-            windowWidth, windowHeight, savedWidth, savedHeight, (float)ddpiScale, usable.w, usable.h);
+            windowWidth, windowHeight, savedWidth, savedHeight, (float)ddpiScale, usable.width, usable.height);
     }
 
-    state->window = SDL_CreateWindow(SUPERMODEL_TITLE_FULL, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, windowWidth, windowHeight, window_flags);
+    OSD::Platform::WindowDesc windowDesc;
+    windowDesc.title = SUPERMODEL_TITLE_FULL;
+    windowDesc.width = windowWidth;
+    windowDesc.height = windowHeight;
+    windowDesc.flags =
+#if defined(SUPERMODEL_PURE_VULKAN)
+        OSD::Platform::WindowFlag_Vulkan |
+#else
+        OSD::Platform::WindowFlag_OpenGL |
+#endif
+#ifdef _WIN32
+        // Created hidden, and shown once the start-up artwork has been replaced by a real frame.
+        // Renderer set-up takes a moment, and a visible window during it is a black rectangle.
+        OSD::Platform::WindowFlag_Hidden |
+#endif
+        OSD::Platform::WindowFlag_Resizable |
+        OSD::Platform::WindowFlag_HighDPI;
+    state->window = OSD::Platform::CreatePlatformWindow(windowDesc);
     if (!state->window) {
-        std::cerr << "Window could not be created! Error: " << SDL_GetError() << std::endl;
-        SDL_Quit();
+        std::cerr << "Window could not be created! Error: " << OSD::Platform::GetError() << std::endl;
+        OSD::Platform::Shutdown();
         return nullptr;
     }
     // Has to come after creation: SDL installs its own default icon while creating the window.
     SetWindowIcon(state->window);
+    InfoLog("GUI: window created (%.0f ms).", startupMs());
 
     /*
      * Minimum window size.
      *
      * The interface is two columns of fixed minimum content: the game list (with the cover-art
      * preview above it) and the settings panel. Below 1280x720 logical pixels the settings column
-     * clips its controls and the list runs out of room for a readable game name, so SDL enforces
-     * that floor from here on and the window cannot be dragged into a state the layout cannot
-     * render. 1280x720 is also the smallest resolution the emulator is expected to run at.
+     * clips its controls and the list runs out of room for a readable game name, so the platform
+     * enforces that floor and the window cannot be dragged into a state the layout cannot render.
      *
-     * The floor is capped to the desktop work area. On a small screen at high scaling - a
-     * 1366x768 laptop at 150%, for example - 1280x720 logical is larger than the screen, and a
-     * minimum that cannot be satisfied would leave part of the window off-screen. In that case the
-     * window may be as small as the work area, and compact mode narrows the columns to fit.
+     * The floor is per display and is capped to the work area minus the window frame; see
+     * ApplyGuiWindowMinimumSize(). This call covers the display the window is created on, and
+     * the frame loop re-applies it when the window moves to another one.
      */
-    {
-        const float minScale = (std::max)(1.0f, GetDPIScale(state->window));
-        int minWidth = (int)(1280.0f * minScale);
-        int minHeight = (int)(720.0f * minScale);
-        SDL_Rect usable{};
-        if (SDL_GetDisplayUsableBounds(SDL_GetWindowDisplayIndex(state->window), &usable) == 0)
-        {
-            minWidth = (std::min)(minWidth, (int)usable.w);
-            minHeight = (std::min)(minHeight, (int)usable.h);
-        }
-        SDL_SetWindowMinimumSize(state->window, minWidth, minHeight);
-        InfoLog("GUI minimum window size: %dx%d (scale %.2f).", minWidth, minHeight, minScale);
-    }
+    ApplyGuiWindowMinimumSize(state->window);
 
-    state->glContext = SDL_GL_CreateContext(state->window);
-    if (!state->glContext) {
-        std::cerr << "OpenGL context could not be created! Error: " << SDL_GetError() << std::endl;
-        SDL_DestroyWindow(state->window);
-        SDL_Quit();
+    /*
+     * Process-lifetime UI state. GuiCreate() runs once, but resetting it here makes a second
+     * create (a test, or a future restart-in-process path) behave like a fresh launch instead of
+     * inheriting the previous window's list position.
+     */
+    g_gameListStateRestored = false;
+    g_gameListScrollRestorePending = false;
+    g_gameListScrollRestoreFrames = 0;
+    g_gameListScrollY = 0.0f;
+    g_gameListFilter[0] = '\0';
+    g_lastSelectedSet.clear();
+    g_returnToManageSaves = false;
+    g_returnToManageSavesSet.clear();
+
+    // A rate saved on a faster display is clamped once, now that the window's display is known.
+    ClampSavedFixedRefreshRate(state->config, state->fullConfig, state->window);
+
+    g_guiFramePresented = false;
+#if defined(SUPERMODEL_PURE_VULKAN)
+    g_guiFrameSkipped = false;
+#endif
+#ifdef _WIN32
+    // The artwork is sized to this window's frame and owned by it, so nothing has to be undone if
+    // one of the set-ups below fails. When it cannot be shown the window is simply revealed now,
+    // which is the behaviour before any of this existed.
+    state->splashPending = OSD::Windows::ShowStartupSplash(state->window);
+    if (!state->splashPending)
+        OSD::Platform::ShowWindow(state->window);
+#endif
+    InfoLog("GUI: splash %s (%.0f ms).", state->splashPending ? "shown" : "unavailable", startupMs());
+
+#if defined(SUPERMODEL_PURE_VULKAN)
+    /*
+     * The settings window owns its own Vulkan context for the whole run, the same way the GL build
+     * keeps one GL context alive across game sessions.  It is independent of the game's context:
+     * this window is hidden while a game runs, and its swapchain is not touched then.
+     */
+    state->vkContext = new Vulkan3D::CVulkanContext();
+    if (state->vkContext->InitDevice(state->window,
+            state->config["VkValidation"].ValueAsDefault<bool>(false),
+            true,
+            state->config["VulkanDevice"].ValueAsDefault<std::string>(""),
+            true,
+            "ui") != Result::OKAY)
+    {
+        ErrorLog("GUI: the Vulkan settings window could not create its device.");
+        delete state->vkContext;
+        state->vkContext = nullptr;
+        OSD::Platform::DestroyWindow(state->window);
+        OSD::Platform::Shutdown();
         return nullptr;
     }
 
-    SDL_GL_MakeCurrent(state->window, state->glContext);
-    SDL_GL_SetSwapInterval(1);
-    RaiseSettingsWindow(state->window);
+    VkPhysicalDeviceProperties deviceProperties = {};
+    vkGetPhysicalDeviceProperties(state->vkContext->PhysicalDevice(), &deviceProperties);
+    s_glRendererName.assign(deviceProperties.deviceName);
+    InfoLog("Vulkan: settings window context is on \"%s\".", s_glRendererName.c_str());
+#else
+    state->glContext = OSD::Platform::CreateGLContext(state->window);
+    if (!state->glContext) {
+        std::cerr << "OpenGL context could not be created! Error: " << OSD::Platform::GetError() << std::endl;
+        OSD::Platform::DestroyWindow(state->window);
+        OSD::Platform::Shutdown();
+        return nullptr;
+    }
+
+    OSD::Platform::MakeGLContextCurrent(state->window, state->glContext);
+    OSD::Platform::SetGLSwapInterval(1);
+    // Skipped while the start-up artwork is up: this is what would put the still empty window on
+    // screen. GuiRunOnce() reveals it after the first frame instead.
+    if (!state->splashPending)
+        RaiseSettingsWindow(state->window);
     glewExperimental = GL_TRUE;
     glewInit();
 
@@ -5320,6 +9493,18 @@ GuiState* GuiCreate(const std::string& configPath, const Util::Config::Node& fil
         s_glRendererName.assign(reinterpret_cast<const char*>(glRenderer));
         InfoLog("OpenGL: settings window context is on \"%s\".", s_glRendererName.c_str());
     }
+#endif
+    InfoLog("GUI: renderer context ready (%.0f ms).", startupMs());
+    /*
+     * The window stays hidden while the start-up artwork is up.
+     *
+     * It used to be revealed here, because a Vulkan swapchain cannot reliably acquire an image from
+     * a hidden window and on some drivers the first frame then failed until the splash's five-second
+     * deadline. That cost every other driver a black window standing behind the artwork: the frame
+     * needs a few hundred milliseconds to arrive, and the artwork is smaller than the window, so the
+     * empty client area showed around it. GuiRunOnce() now reveals the window after the first
+     * presented frame, and falls back to showing it early only if acquiring really does fail.
+     */
 
     // The settings window is driven with the mouse and keyboard only. Gamepad navigation is
     // deliberately not enabled: with a pad connected, ImGui's gamepad support takes over the
@@ -5341,8 +9526,26 @@ GuiState* GuiCreate(const std::string& configPath, const Util::Config::Node& fil
     if (scale > 1.05f)
         ImGui::GetStyle().ScaleAllSizes(scale);
 
-    ImGui_ImplSDL2_InitForOpenGL(state->window, state->glContext);
+    OSD::Platform::ImGuiPlatformInit(state->window);
+#if defined(SUPERMODEL_PURE_VULKAN)
+    g_uiVulkan = new OSD::SDL3App::UiVulkanBackend();
+    auto uiBackend = g_uiVulkan->Init(state->window, *state->vkContext);
+    if (!uiBackend)
+    {
+        ErrorLog("GUI: %s", uiBackend.error().c_str());
+        delete g_uiVulkan;
+        g_uiVulkan = nullptr;
+        OSD::Platform::ImGuiPlatformShutdown();
+        ImGui::DestroyContext();
+        delete state->vkContext;
+        state->vkContext = nullptr;
+        OSD::Platform::DestroyWindow(state->window);
+        OSD::Platform::Shutdown();
+        return nullptr;
+    }
+#else
     ImGui_ImplOpenGL3_Init("#version 410");
+#endif
 
     std::string xmlFile = ResolveDataFileSetting(state->config["GameXMLFile"].ValueAs<std::string>(), "Games.xml");
     state->loader.reset(new GameLoader(xmlFile));
@@ -5352,6 +9555,7 @@ GuiState* GuiCreate(const std::string& configPath, const Util::Config::Node& fil
     g_romFolderCached.clear();
     g_roms.clear();
 
+    InfoLog("GUI: interface ready (%.0f ms).", startupMs());
     return state.release();
 }
 
@@ -5361,47 +9565,129 @@ std::vector<std::string> GuiRunOnce(GuiState* state)
     if (!state || !state->window)
         return romFiles;
 
+    /*
+     * Returning from a game: re-read the settings file before drawing anything.
+     *
+     * The in-game panel's Apply writes its values straight to the file, and the window's config nodes
+     * still hold the values from before the session. Without this the Picture tab showed stale
+     * numbers and the next save wrote them back over the panel's changes. The first call already has
+     * the state GuiCreate built; reading it again would only be redundant work.
+     */
+#if defined(SUPERMODEL_PURE_VULKAN)
+    const bool returningFromGame = !state->firstRun;
+#endif
+    if (!state->firstRun)
+    {
+        Util::Config::Node fileConfig("Global");
+        if (!Util::Config::FromINIFile(&fileConfig, state->configPath))
+            LoadGuiConfig(*state, fileConfig);
+    }
+    state->firstRun = false;
+
     // The game session leaves its own GL context current (or none at all), so re-establish ours
     // before touching any ImGui/GL state.
-    SDL_GL_MakeCurrent(state->window, state->glContext);
-    RaiseSettingsWindow(state->window);
+#if !defined(SUPERMODEL_PURE_VULKAN)
+    OSD::Platform::MakeGLContextCurrent(state->window, state->glContext);
+#else
+    /*
+     * Point volk back at this window's instance and device.
+     *
+     * volk's entry points are process-wide. The game session created its own context, which
+     * rebound them, and that context has just been destroyed - so they still refer to the loader
+     * trampolines of a dead instance, and the first instance-level call this window makes (present)
+     * faults inside ntdll. Doing it here covers every return to the settings window: after a game,
+     * after the artwork, after an aborted session.
+     */
+    if (state->vkContext != nullptr)
+        state->vkContext->RebindFunctionPointers();
+#endif
+    // On the first call the start-up artwork is still covering the window. Showing the window here
+    // would expose the empty client area it exists to hide, so the reveal waits until a frame has
+    // been drawn - see the end of the loop below.
+    bool splashPending = state->splashPending;
+    if (!splashPending)
+        RaiseSettingsWindow(state->window);
+    // Safety net: if no frame is presented at all (a minimised window, say), the artwork must not
+    // stay in front of the interface forever.
+    const auto splashStart = std::chrono::steady_clock::now();
+    const auto splashDeadline = splashStart + std::chrono::seconds(5);
     // Make sure the pointer is usable when the window comes back. ImGui's gamepad support used to
     // hide it, and that is disabled now.
     //
-    // This alone would not be enough. SDL_ShowCursor only moves SDL's own visibility flag, and a
+    // This alone would not be enough. SetCursorVisible only moves SDL's own visibility flag, and a
     // fullscreen game hides the pointer through the Win32 display count instead (see
     // CDirectInputSystem::SetMouseVisibility), which SDL cannot influence. RunGameSession restores
     // that count once the game's session ends, which is where it is safe to reach the input system.
-    SDL_ShowCursor(SDL_ENABLE);
+    OSD::Platform::SetCursorVisible(true);
 
     // A pad may have been plugged in while the game was running; make sure it is picked up.
     g_controllerDetected = false;
 
     ImGuiIO& io = ImGui::GetIO();
     auto& games = state->loader->GetGames();
+    g_gameLoader = state->loader.get();
+
+#if defined(SUPERMODEL_PURE_VULKAN)
+    /*
+     * Return to Manage Saves when the session was started from it.
+     *
+     * The popup is closed on the way into the game (a modal over a hidden window would keep the
+     * list from being used when the user comes back), so reopening it is what restores the
+     * context. OpenManageSaves() also reloads the cards, which is what refreshes their thumbnails
+     * and timestamps after a session that may have written a new save or renamed one.
+     */
+    if (returningFromGame && g_returnToManageSaves && !g_returnToManageSavesSet.empty())
+    {
+        g_returnToManageSaves = false;
+        InfoLog("GUI: returning from a session started in Manage Saves; reopening '%s'.",
+            g_returnToManageSavesSet.c_str());
+        OpenManageSaves(g_returnToManageSavesSet);
+    }
+#endif
 
     bool running = true;
     bool exit = false;
     bool closed = false;
-    SDL_Event event{};
+#if defined(SUPERMODEL_PURE_VULKAN)
+    bool windowResized = false;
+#endif
     while (running) {
 
-        while (SDL_PollEvent(&event)) {
-            ImGui_ImplSDL2_ProcessEvent(&event);
-            if (event.type == SDL_QUIT) {
+        OSD::Platform::BeginInputFrame();
+        OSD::Platform::Event event;
+        while (OSD::Platform::PollEvent(&event)) {
+            OSD::Platform::ImGuiPlatformProcessEvent(event);
+            if (event.type == OSD::Platform::EventType::Quit ||
+                event.type == OSD::Platform::EventType::WindowClose) {
                 // Closing the GUI window ends the application; settings are still written out
                 // unless the user was mid-edit.
                 closed = true;
                 running = false;
                 break;
             }
-            // Plugging or unplugging a pad invalidates the cached detection; ImGui's backend rescans
-            // on these events too, so navigation picks the device up without a restart.
-            if (event.type == SDL_CONTROLLERDEVICEADDED || event.type == SDL_CONTROLLERDEVICEREMOVED)
+            // Plugging or unplugging a pad invalidates the cached detection; the platform event
+            // drain reports it, so navigation picks the device up without a restart.
+            if (event.type == OSD::Platform::EventType::GamepadAdded ||
+                event.type == OSD::Platform::EventType::GamepadRemoved ||
+                event.type == OSD::Platform::EventType::GamepadRemapped)
                 g_controllerDetected = false;
+#if defined(SUPERMODEL_PURE_VULKAN)
+            // Rebuilding immediately would invalidate an image that might still be in flight.  The
+            // flag is applied once the event queue has been drained, before the next frame begins.
+            if (event.type == OSD::Platform::EventType::WindowResized)
+                windowResized = true;
+#endif
         }
         if (closed)
             break;
+
+#if defined(SUPERMODEL_PURE_VULKAN)
+        if (windowResized && state->vkContext != nullptr)
+        {
+            windowResized = false;
+            state->vkContext->RecreateSwapchain();
+        }
+#endif
 
         GUI(io, state->config, games, state->selectedGame, exit, state->saveSettings, state->window, state->inputs, state->kb);
 
@@ -5416,7 +9702,47 @@ std::vector<std::string> GuiRunOnce(GuiState* state)
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        SDL_GL_SwapWindow(state->window);
+#if !defined(SUPERMODEL_PURE_VULKAN)
+        OSD::Platform::SwapWindow(state->window);
+        g_guiFramePresented = true;
+#endif
+
+#if defined(SUPERMODEL_PURE_VULKAN)
+        /*
+         * Reveal the window early only if the driver will not allocate an image while it is hidden.
+         *
+         * The normal path keeps it hidden until a frame has been presented, so the artwork is never
+         * replaced by an empty client area. A driver that refuses to acquire from a hidden window
+         * never gets that far, and without this it would sit here until the five-second deadline - the
+         * slow launch the early reveal used to cause for everyone. Doing it on the first skipped
+         * frame keeps both cases to one reveal.
+         */
+        if (splashPending && !state->windowShown && g_guiFrameSkipped)
+        {
+            state->windowShown = true;
+            OSD::Platform::ShowWindow(state->window);
+            InfoLog("Splash: revealing the window early; it could not acquire a frame while hidden.");
+        }
+        g_guiFrameSkipped = false;
+#endif
+
+        if (splashPending &&
+            (g_guiFramePresented || std::chrono::steady_clock::now() > splashDeadline))
+        {
+            splashPending = false;
+            state->splashPending = false;
+            state->windowShown = true;
+            // Removed first, then the window is raised over where it was: both happen without
+            // returning to the message loop, so nothing flashes between the two.
+#ifdef _WIN32
+            OSD::Windows::HideStartupSplash();
+#endif
+            RaiseSettingsWindow(state->window);
+            InfoLog("Splash: %s after %.2f s.",
+                g_guiFramePresented ? "replaced by the first presented frame"
+                                    : "removed by the safety deadline",
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - splashStart).count());
+        }
 
         if (exit)
             break;
@@ -5444,7 +9770,7 @@ std::vector<std::string> GuiRunOnce(GuiState* state)
     // takes, so the value round-trips exactly.
     int windowWidth = 0;
     int windowHeight = 0;
-    SDL_GetWindowSize(state->window, &windowWidth, &windowHeight);
+    OSD::Platform::GetWindowSize(state->window, &windowWidth, &windowHeight);
 
     if (!closed && state->saveSettings) {
         if (windowWidth > 0 && windowHeight > 0) {
@@ -5453,6 +9779,7 @@ std::vector<std::string> GuiRunOnce(GuiState* state)
         }
         if (g_previewSplit > 0.0f)
             state->config.Set("GuiPreviewSplit", g_previewSplit);
+        SaveGameListPreferences(state->config, state->selectedGame);
         Util::Config::CopyINISection(&state->fullConfig, state->config);
         // "Save as" redirects just this one write. The destination is cleared afterwards so a later
         // plain save goes back to the standard file instead of silently continuing to overwrite the
@@ -5470,6 +9797,10 @@ std::vector<std::string> GuiRunOnce(GuiState* state)
         state->fullConfig.Set("GuiWindowHeight", windowHeight);
         if (g_previewSplit > 0.0f)
             state->fullConfig.Set("GuiPreviewSplit", g_previewSplit);
+        // Same idea for the game-list position: it is a UI preference, not part of the edited
+        // settings, so it goes into the file directly rather than through the config the user
+        // declined to save.
+        SaveGameListPreferences(state->fullConfig, state->selectedGame);
         Util::Config::WriteINIFile(state->configPath, state->fullConfig, TimestampedConfigFileComment("Updated window size."));
     }
 
@@ -5477,8 +9808,10 @@ std::vector<std::string> GuiRunOnce(GuiState* state)
     // interface is still there when the game is quit.
     if (!closed)
     {
-        SDL_GL_MakeCurrent(state->window, nullptr);
-        SDL_HideWindow(state->window);
+#if !defined(SUPERMODEL_PURE_VULKAN)
+        OSD::Platform::MakeGLContextCurrent(state->window, nullptr);
+#endif
+        OSD::Platform::HideWindow(state->window);
     }
 
     return romFiles;
@@ -5491,13 +9824,33 @@ void GuiDestroy(GuiState* state)
 
     if (state->window)
     {
-        SDL_GL_MakeCurrent(state->window, state->glContext);
+#ifdef _WIN32
+        // Normally already gone by now; this covers the window being closed while the artwork was
+        // still up, and the early returns in GuiCreate() that never reach GuiRunOnce().
+        OSD::Windows::HideStartupSplash();
+#endif
+#if defined(SUPERMODEL_PURE_VULKAN)
+        ReleaseSaveCards();
+        ReleaseBoxartTextures();
+        if (g_uiVulkan != nullptr)
+        {
+            g_uiVulkan->Shutdown();
+            delete g_uiVulkan;
+            g_uiVulkan = nullptr;
+        }
+        OSD::Platform::ImGuiPlatformShutdown();
+        ImGui::DestroyContext();
+        delete state->vkContext;
+        state->vkContext = nullptr;
+#else
+        OSD::Platform::MakeGLContextCurrent(state->window, state->glContext);
         ReleaseBoxartTextures();
         ImGui_ImplOpenGL3_Shutdown();
-        ImGui_ImplSDL2_Shutdown();
+        OSD::Platform::ImGuiPlatformShutdown();
         ImGui::DestroyContext();
-        SDL_GL_DeleteContext(state->glContext);
-        SDL_DestroyWindow(state->window);
+        OSD::Platform::DestroyGLContext(state->glContext);
+#endif
+        OSD::Platform::DestroyWindow(state->window);
     }
 
     delete state;

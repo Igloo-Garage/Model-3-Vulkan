@@ -29,17 +29,47 @@ call :build real3d.vert real3d_vert vert
 if errorlevel 1 exit /b 1
 call :build real3d.frag real3d_frag frag
 if errorlevel 1 exit /b 1
+call :build real3d_oit.frag real3d_oit_frag frag
+if errorlevel 1 exit /b 1
+call :build oit_resolve.vert oit_resolve_vert vert
+if errorlevel 1 exit /b 1
+call :build oit_resolve.frag oit_resolve_frag frag
+if errorlevel 1 exit /b 1
+call :build scene_composite.vert scene_composite_vert vert
+if errorlevel 1 exit /b 1
+call :build scene_composite.frag scene_composite_frag frag
+if errorlevel 1 exit /b 1
+call :build scene_composite_ms.frag scene_composite_ms_frag frag
+if errorlevel 1 exit /b 1
 call :build composite.vert composite_vert vert
 if errorlevel 1 exit /b 1
 call :build composite.frag composite_frag frag
 if errorlevel 1 exit /b 1
 call :build texdecode.comp texdecode_comp comp
 if errorlevel 1 exit /b 1
+call :build los.comp los_comp comp
+if errorlevel 1 exit /b 1
 call :build fog.vert fog_vert vert
 if errorlevel 1 exit /b 1
 call :build fog.frag fog_frag frag
 if errorlevel 1 exit /b 1
 call :build post.frag post_frag frag
+if errorlevel 1 exit /b 1
+call :build crosshair.vert crosshair_vert vert
+if errorlevel 1 exit /b 1
+call :build crosshair.frag crosshair_frag frag
+if errorlevel 1 exit /b 1
+call :build border.vert border_vert vert
+if errorlevel 1 exit /b 1
+call :build border.frag border_frag frag
+if errorlevel 1 exit /b 1
+call :build ui_blur_down.frag ui_blur_down_frag frag
+if errorlevel 1 exit /b 1
+call :build ui_blur_up.frag ui_blur_up_frag frag
+if errorlevel 1 exit /b 1
+call :build ui_frost.frag ui_frost_frag frag
+if errorlevel 1 exit /b 1
+call :build ui_ambient.frag ui_ambient_frag frag
 if errorlevel 1 exit /b 1
 echo Shader headers written to Src\Graphics\Vulkan3D\Shaders
 exit /b 0
@@ -55,7 +85,9 @@ rem to load. The backend runs on either, and 1.2 with the dynamic rendering and 
 rem extensions is supported on purpose - see ClassifyDevice in VulkanContext.cpp - so requiring
 rem maintenance4 for the shaders alone would shut those devices out at shader-module creation, with an
 rem error that points at the shader rather than at the version. SPIR-V 1.5 loads on both.
-"%GLSLANG%" -V --target-env vulkan1.2 -o "%SPV%" "%SRC%"
+rem -I lets the shared scene shader body live in real3d_common.glsl. See GL_GOOGLE_include_directive
+rem at the top of real3d.frag and real3d_oit.frag. glslang requires the path to follow -I with no space.
+"%GLSLANG%" -V --target-env vulkan1.2 -ISrc\Graphics\Vulkan3D\Shaders -o "%SPV%" "%SRC%"
 if errorlevel 1 exit /b 1
 powershell -NoLogo -Command ^
   "$bytes = [System.IO.File]::ReadAllBytes('%SPV%');" ^

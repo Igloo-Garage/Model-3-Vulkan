@@ -33,7 +33,11 @@
 #include "InputSystem.h"
 #include "InputTypes.h"
 #include "Game.h"
+#include "Model3/Model3Timing.h"
+#include <algorithm>
+#include <cmath>
 #include <cstdarg>
+#include <cstdlib>
 #include <vector>
 #include <string>
 #include <iostream>
@@ -42,6 +46,8 @@ using namespace std;
 CInputs::CInputs(std::shared_ptr<CInputSystem> system)
   : m_system(system)
 {
+	const char* steeringProbe = std::getenv("SM3D_STEER_PROBE");
+	m_steeringProbe = steeringProbe != nullptr && steeringProbe[0] == '1' && steeringProbe[1] == '\0';
 	// UI controls are hard coded here, everything else is initialized to NONE so that it can be loaded from
 	// the config file.
 
@@ -69,6 +75,8 @@ CInputs::CInputs(std::shared_ptr<CInputSystem> system)
 	uiToggleOverlay    = AddSwitchInput("UIToggleOverlay",    "Settings Overlay",      Game::INPUT_UI, "KEY_TAB");
 	// The key above Tab, so the two are together on the keyboard and neither is a key a game wants.
 	uiToggleStatsOsd   = AddSwitchInput("UIToggleStatsOsd",   "Statistics Overlay",    Game::INPUT_UI, "KEY_BACKQUOTE");
+	uiToggleVrr        = AddSwitchInput("UIToggleVrr",        "VRR 1x / 2x",           Game::INPUT_UI, "KEY_F8");
+	uiReloadHDTextures = AddSwitchInput("UIReloadHDTextures", "Reload HD Textures",    Game::INPUT_UI, "KEY_F4");
 #ifdef SUPERMODEL_DEBUGGER
 	uiEnterDebugger    = AddSwitchInput("UIEnterDebugger",    "Enter Debugger",        Game::INPUT_UI, "KEY_ALT+KEY_B");
 #endif
@@ -436,6 +444,8 @@ void CInputs::LoadFromConfig(const Util::Config::Node &config)
 	const int defaultView = config["VRDefaultView"].ValueAsDefault<int>(2);
 	m_vrDefaultIndex = (defaultView >= 0 && defaultView <= 3) ? defaultView : 2;
 	m_vrCycleIndex = m_vrDefaultIndex;
+
+	SetGamepadSteeringSmoothing(config["GamepadSteeringSmoothing"].ValueAsDefault<int>(0));
 
 	for (auto& i : m_inputs) {
 		i->LoadFromConfig(config);
@@ -899,7 +909,150 @@ bool CInputs::Poll(const Game *game, unsigned dispX, unsigned dispY, unsigned di
 			m_vrCycleIndex = (m_vrCycleIndex + 1) & 3;
 	}
 
-	return true;
+	  return true;
+}
+
+void CInputs::PollPointerLate(const Game *game)
+{
+  // Nothing to do for a game without guns, and that is the common case: skipping here keeps the
+  // extra OS call off every other game's frame.
+  if (game == nullptr ||
+      !(game->inputs & (Game::INPUT_GUN1 | Game::INPUT_GUN2 | Game::INPUT_ANALOG_GUN1 | Game::INPUT_ANALOG_GUN2)))
+    return;
+
+  if (m_gameInputSuppressed)
+    return;
+
+  // Ask the backend for a fresh position before anything reads the axes again.
+  m_system->RefreshPointer();
+
+  /*
+   * Only the inputs whose source is the pointer itself are re-polled.
+   *
+   * They are all analog axes, so re-polling them cannot produce a second press or release: those
+   * edges live on switch sources, which are deliberately left alone.
+   */
+  auto repoll = [](const std::shared_ptr<CAxisInput>& input)
+  {
+    if (input)
+      input->Poll();
+  };
+
+  for (int player = 0; player < 2; player++)
+  {
+    repoll(gunX[player]);
+    repoll(gunY[player]);
+    repoll(analogGunX[player]);
+    repoll(analogGunY[player]);
+  }
+}
+
+namespace
+{
+	struct SteeringSmoothingPreset
+	{
+		double tau;      // first-order time constant, seconds
+		double maxStep;  // maximum normalized change per 57.524 Hz frame
+		double gamma;    // response curve exponent
+	};
+
+	// Index 0 is unused: off bypasses the filter entirely.
+	const SteeringSmoothingPreset s_steeringSmoothing[4] = {
+		{ 0.000, 1.00, 1.00 },
+		{ 0.035, 0.16, 1.25 },
+		{ 0.050, 0.10, 1.50 },
+		{ 0.075, 0.07, 1.70 },
+	};
+}
+
+void CInputs::SetGamepadSteeringSmoothing(int preset)
+{
+	preset = std::clamp(preset, 0, 3);
+	if (preset == m_gamepadSteeringSmoothing)
+		return;
+
+	m_gamepadSteeringSmoothing = preset;
+	m_steeringFilterValid = false;   // start from the current physical position, without a sweep
+	m_steeringFiltered = 0.0;
+
+	if (preset == 0)
+		InfoLog("Input: gamepad steering smoothing off.");
+	else
+		InfoLog("Input: gamepad steering smoothing preset %d (%.0f ms filter, %.0f%% full lock per frame, gamma %.2f).",
+			preset, s_steeringSmoothing[preset].tau * 1000.0,
+			s_steeringSmoothing[preset].maxStep * 100.0, s_steeringSmoothing[preset].gamma);
+}
+
+void CInputs::FilterSteering()
+{
+	if (m_gamepadSteeringSmoothing <= 0 || steering == nullptr)
+		return;
+
+	const double raw = steering->SignedFraction();
+	const SteeringSmoothingPreset& preset = s_steeringSmoothing[m_gamepadSteeringSmoothing];
+	double target = raw;
+
+	/*
+	 * Test hook: SM3D_STEER_FORCE=<signed fraction> replaces the sampled axis. It exists so the
+	 * step response can be checked (and the probe read) without a physical pad; it is not a
+	 * configuration option and is ignored unless the variable is set.
+	 */
+	const char* forced = std::getenv("SM3D_STEER_FORCE");
+	if (forced != nullptr && forced[0] != '\0')
+		target = std::clamp((double)std::atof(forced), -1.0, 1.0);
+
+	// Centre-precision curve. Apply it before the first sample too, so enabling smoothing while the
+	// stick is held off-centre does not write one uncorrected value.
+	const double curved = std::copysign(std::pow(std::fabs(target), preset.gamma), target);
+
+	if (!m_steeringFilterValid)
+	{
+		m_steeringFiltered = curved;
+		m_steeringFilterValid = true;
+	}
+	else
+	{
+		const double dt = 1.0 / kModel3StepHz;
+		const double follow = dt / (preset.tau + dt);
+		double step = (curved - m_steeringFiltered) * follow;
+		step = std::clamp(step, -preset.maxStep, preset.maxStep);
+		// Never overshoot the target when the remaining error is smaller than the rate cap.
+		if (std::fabs(step) > std::fabs(curved - m_steeringFiltered))
+			step = curved - m_steeringFiltered;
+		m_steeringFiltered += step;
+	}
+
+	steering->SetSignedFraction(m_steeringFiltered);
+
+	++m_steeringProbeFrame;
+	if (m_steeringProbe && ((m_steeringProbeFrame % 30) == 0 ||
+		std::fabs(m_steeringFiltered - curved) > 0.01))
+		InfoLog("SteerProbe: raw=%.3f curved=%.3f filtered=%.3f value=%u preset=%d.",
+			raw, curved, m_steeringFiltered, (unsigned)steering->value, m_gamepadSteeringSmoothing);
+}
+
+void CInputs::PollGameInputsLate(const Game *game)
+{
+  // The panel is open: game inputs hold their last value, exactly as Poll() leaves them.
+  if (m_gameInputSuppressed)
+    return;
+
+  // Fresh keys, pads and mice. Events are not drained here - they belong to the frame's Poll().
+  m_system->RefreshState();
+
+  const uint32_t gameFlags = game ? game->inputs : Game::INPUT_ALL;
+  for (auto it = m_inputs.begin(); it != m_inputs.end(); ++it)
+  {
+    // UI inputs were sampled and consumed at the top of the frame. Re-polling them here would move
+    // prevValue onto value and swallow the edge for anything that reads it after this point.
+    if ((*it)->IsUIInput())
+      continue;
+    if ((*it)->gameFlags & gameFlags)
+      (*it)->Poll();
+  }
+
+  if (game != nullptr && (game->inputs & Game::INPUT_VEHICLE))
+    FilterSteering();
 }
 
 void CInputs::DumpState(const Game *game)

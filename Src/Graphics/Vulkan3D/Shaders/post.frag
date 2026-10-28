@@ -46,6 +46,7 @@ layout(push_constant) uniform PushConstants
 	float gain;                 // Brightness compensation, 1.0 = unchanged.
 	int   glowLevels;           // Mip levels accumulated for the glow (0 disables it).
 	int   glowThreshold;        // Luma (0..100) a level must exceed before it contributes to the glow.
+	int   crtColors;            // Regional CRT colour preset, 0 = off, 1..5 = the SuperAA matrices.
 } pc;
 
 #define FXAA_EDGE_THRESHOLD       (1.0 / 8.0)
@@ -255,7 +256,16 @@ vec3 ApplyMask(vec2 pixel, vec3 colour)
 	// bright pixels light a big area of phosphor, dark ones a small spec. The range is kept fairly
 	// wide rather than narrow, because a mask that only opens up on highlights takes most of the
 	// picture's light away - see the note on gain in post.frag.
-	float luma = Luma(colour);
+	//
+	// The brightness is sampled at the *cell* centre, not at this output pixel. A phosphor dot is
+	// one dot: it is lit by one beam current, so the whole cell must share one hole size. Driving
+	// the radius from the per-pixel colour instead made adjacent pixels inside one cell disagree,
+	// and on a finely detailed surface - Daytona 2's waterfall, rock faces, foliage - that turned
+	// the texture's own high-frequency detail into per-pixel red/green/blue speckle. It looked like
+	// blue noise over the artwork, and it moved as the camera did. Sampling the cell centre is both
+	// what the tube does and what keeps the mask free of colour noise.
+	vec2 cellCentrePixel = (cellIndex + 0.5) * scale;
+	float luma = Luma(Fetch(cellCentrePixel / pc.resolution));
 	float radius = 0.24 + 0.28 * clamp(luma, 0.0, 1.0);
 	float softness = 0.16;
 
@@ -317,12 +327,107 @@ vec3 ApplyCrt(vec2 pixel, vec3 colour)
 	return result;
 }
 
+/*
+ * Regional CRT colour adaptation, ported from the OpenGL path (SuperAA.cpp).
+ *
+ * Colour temperature and gamut are properties of the tube, so they belong before the scanline and
+ * mask stages: those model the beam and the phosphor, which sit between the signal and the glass.
+ * Earlier still would be wrong as well - FXAA and the glow expect the picture they are given - but
+ * the mask reacts to brightness, so correcting after it would feed the mask a colour the tube never
+ * produced.
+ *
+ * The matrices convert a Japanese/European/American broadcast gamut to sRGB, the space the rest of
+ * the pipeline works in. They are the same five matrices, in the same order and with the same
+ * meaning as the OpenGL shader, taken from the colour matrix adaptations by danmons (see
+ * retrorgb.com/colour-malarkey.html). "linear *= matrix" deliberately mirrors the OpenGL
+ * expression: the constructor arguments fill columns, and GLSL's vector-times-matrix convention is
+ * part of what the ported values were computed for.
+ *
+ * Presets 1 and 2 decode with the tube's own gamma (2.5 / 2.25) because those monitors were not
+ * sRGB; the BT.601 presets decode as sRGB. All of them encode back to sRGB for output.
+ */
+vec3 SrgbEncode(vec3 colour)
+{
+	vec3 low = colour * 12.92;
+	vec3 high = 1.055 * pow(max(colour, vec3(0.0)), vec3(1.0 / 2.4)) - 0.055;
+	return mix(high, low, lessThanEqual(colour, vec3(0.0031308)));
+}
+
+vec3 SrgbDecode(vec3 colour)
+{
+	vec3 low = colour * (1.0 / 12.92);
+	vec3 high = pow((colour + 0.055) / 1.055, vec3(2.4));
+	return mix(high, low, lessThanEqual(colour, vec3(0.04045)));
+}
+
+mat3 CrtColourMatrix(int mode)
+{
+	if (mode == 1)
+	{
+		// ARI/D93 (JP) -> sRGB(D65)
+		return mat3(1.3272128334714093, -0.3802108879412366, -0.1003607696463202,
+					-0.0241848600268417, 0.9544506228550125, 0.0807358585208939,
+					-0.0239585810555497, -0.0409736005706461, 1.4076563728858242);
+	}
+	if (mode == 2)
+	{
+		// PVM_20M2U/D93 (JP) -> sRGB(D65)
+		return mat3(0.9241392201737613, -0.0690701363506526, -0.0084279079392561,
+					0.0231962420140721, 0.9729221778325590, 0.0148832015024337,
+					-0.0054875731998806, 0.0098220960740544, 1.3383896683854550);
+	}
+	if (mode == 3)
+	{
+		// BT601_525/D93 (JP) -> sRGB(D65)
+		return mat3(0.7822490684754086, 0.0506168576073398, 0.0137752498011040,
+					0.0147968947158740, 0.9741745313046067, 0.0220301953285839,
+					-0.0013501205469208, -0.0044076726925543, 1.3484819844991036);
+	}
+	if (mode == 4)
+	{
+		// BT601_525/D65 (US) -> sRGB(D65)
+		return mat3(0.9395420637732393, 0.0501813568598678, 0.0102765793668928,
+					0.0177722231435608, 0.9657928624969044, 0.0164349143595347,
+					-0.0016215999431855, -0.0043697496597356, 1.0059913496029214);
+	}
+	if (mode == 5)
+	{
+		// BT601_625/D65 (EUR, AUS) -> sRGB(D65)
+		return mat3(1.0440432087628346, -0.0440432087628348, 0.0000000000000001,
+					0.0000000000000000, 1.0000000000000002, 0.0000000000000000,
+					0.0000000000000000, 0.0117933782840052, 0.9882066217159947);
+	}
+	return mat3(1.0);
+}
+
+vec3 ApplyCrtColour(vec3 colour)
+{
+	if (pc.crtColors <= 0)
+		return colour;
+
+	// The pow() and the sRGB curves are only defined on [0, 1]; the composite is an 8-bit UNORM
+	// image, so clamping here cannot lose anything a real signal could carry.
+	vec3 linear = clamp(colour, 0.0, 1.0);
+	if (pc.crtColors == 1)
+		linear = pow(linear, vec3(2.5));
+	else if (pc.crtColors == 2)
+		linear = pow(linear, vec3(2.25));
+	else
+		linear = SrgbDecode(linear);
+
+	linear *= CrtColourMatrix(pc.crtColors);
+	return SrgbEncode(linear);
+}
+
 void main()
 {
 	vec2 texel = 1.0 / pc.resolution;
 	vec2 pixel = vUv * pc.resolution;
 
 	vec3 colour = pc.fxaaEnabled > 0.0 ? ApplyFxaa(vUv, texel) : Fetch(vUv);
+
+	// Tube colour response, before the beam and mask stages below. See ApplyCrtColour.
+	colour = ApplyCrtColour(colour);
 
 	// The glow is taken from the pre-mask image. Physically the halo originates in the lit phosphor
 	// and then spreads through the glass, so adding it after the mask is both the right order and

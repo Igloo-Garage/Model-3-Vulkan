@@ -33,9 +33,60 @@
 
 #include "Supermodel.h"
 #include "Inputs/Input.h"
+#include "OSD/Platform/PlatformInput.h"
+// Only for the SDL_SCANCODE_* constants in the key table below. They number USB HID usage ids in
+// both SDL versions, so the table itself is backend-neutral.
+#include "SDLIncludes.h"
 
 #include <vector>
+#include <cstring>
+#include <cmath>
+#include <cstdlib>
+#include <cstdio>
 using namespace std;
+
+/*
+ * Optional light-gun probe, enabled with SM3D_GUN_PROBE=1.
+ *
+ * The crosshair is built from the late pointer sample, while the game is fed by the snapshot taken
+ * at the simulation step. Those are two different code paths, and on Windows they can disagree
+ * without anything looking wrong: the late sample asks the OS for the cursor, the per-device table
+ * is maintained from raw-input deltas. This prints both, once a second, so the disagreement is a
+ * number in the log instead of a guess made from a screenshot.
+ */
+static const bool s_logGunProbe = (std::getenv("SM3D_GUN_PROBE") != nullptr);
+
+static bool GunProbeDue()
+{
+  static OSD::Platform::Nanoseconds last = 0;
+  const OSD::Platform::Nanoseconds now = OSD::Platform::Now();
+  if (last != 0 && now - last < 1000000000)
+    return false;
+  last = now;
+  return true;
+}
+
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+//
+// How long a pad rumble pulse lasts. The value is re-issued once per frame for as long as the drive
+// board keeps the vibration level above zero (see ServicePadVibration), so this only has to outlast
+// the longest frame gap - a stalled frame must not let the motor stop and restart.
+static constexpr unsigned kVibrationPulseMs = 500;
+
+/*
+ * Optional input probe, enabled with SM3D_PAD_PROBE=1.
+ *
+ * Prints every button, hat and significant axis change with the pad index and, in game-controller
+ * mode, the normalised name SDL mapped the press to. "The pad is connected but the game does not
+ * react" is otherwise a guess: this shows whether the device reports the press at all and whether
+ * it reached the standard layout the "standard" preset is written against. Axes are reported in
+ * 0.25 steps so a sweeping stick cannot fill the log faster than it can be read.
+ *
+ * Each pad is also rumbled once when it is opened, so the same run answers "which pad is this line"
+ * and "do its motors work" without waiting for a game to drive them.
+ */
+static const bool s_logPadInput = (std::getenv("SM3D_PAD_PROBE") != nullptr);
+#endif
 
 SDLKeyMapStruct CSDLInputSystem::s_keyMap[] =
 {
@@ -175,21 +226,29 @@ CSDLInputSystem::CSDLInputSystem(const Util::Config::Node& config, bool useGameC
     m_keyState(nullptr),
     m_mouseX(0),
     m_mouseY(0),
+    m_mouseXF(0.0f),
+    m_mouseYF(0.0f),
     m_mouseZ(0),
     m_mouseWheelDir(0),
-    m_mouseButtons(0),
-    sdlConstForceMax(0),
+    m_mouseButtons(0)
+#if defined(SUPERMODEL_PLATFORM_SDL2)
+    , sdlConstForceMax(0),
     sdlSelfCenterMax(0),
     sdlFrictionMax(0),
     sdlVibrateMax(0)
+#endif
 {
+#if defined(SUPERMODEL_PLATFORM_SDL2)
   memset(&eff, 0, sizeof(SDL_HapticEffect));
+#endif
 }
 
 CSDLInputSystem::~CSDLInputSystem()
 {
   CloseJoysticks();
 }
+
+#if defined(SUPERMODEL_PLATFORM_SDL2)
 
 void CSDLInputSystem::OpenJoysticks()
 {
@@ -432,8 +491,228 @@ bool CSDLInputSystem::OpenJoystickAt(int joyNum)
   return true;
 }
 
+#else  // SDL3
+
 /*
- * Closes the entry at 'index', removing it from all four parallel vectors.
+ * SDL3 device path.
+ *
+ * The platform layer owns the SDL gamepad handles; this class only keeps the ids and the binding
+ * metadata. Everything the SDL2 code does with raw SDL calls - opening, counting axes, rumble -
+ * is a Platform call here, which is what keeps the two backends from drifting apart.
+ */
+void CSDLInputSystem::OpenJoysticks()
+{
+  const int count = OSD::Platform::GetGamepadCount();
+  InfoLog("Input: %d game controller(s) reported by SDL.", count);
+  for (int joyNum = 0; joyNum < count; joyNum++)
+    OpenJoystickAt(joyNum);
+}
+
+bool CSDLInputSystem::OpenJoystickAt(int joyNum)
+{
+  OSD::Platform::GamepadInfo info;
+  if (!OSD::Platform::GetGamepadInfo(joyNum, &info) || info.id == OSD::Platform::kInvalidGamepad)
+    return false;
+
+  if (m_useGameController && !info.isGamepad)
+  {
+    InfoLog("Joystick %d is not a recognised game controller; skipping it. Per-device bindings "
+            "need an input system that reports raw buttons.\n", joyNum + 1);
+    return false;
+  }
+
+  // Already open? A hot-plug event can arrive for a device enumerated at start-up, and opening it
+  // twice would add a second entry for the same pad.
+  for (OSD::Platform::GamepadId open : m_instanceIds)
+  {
+    if (open == info.id)
+      return false;
+  }
+
+  if (!OSD::Platform::OpenGamepad(info.id))
+  {
+    ErrorLog("Unable to open joystick device %d - skipping joystick.\n", joyNum + 1);
+    return false;
+  }
+
+  JoyDetails joyDetails;
+  strncpy(joyDetails.name, info.name, MAX_NAME_LENGTH);
+  joyDetails.name[MAX_NAME_LENGTH] = '\0';
+
+  if (m_useGameController)
+  {
+    // Same figure the SDL2 game-controller path reports: the standard layout, not the raw device.
+    joyDetails.numAxes = 6;
+    joyDetails.numPOVs = 4;
+    joyDetails.numButtons = 16;
+  }
+  else
+  {
+    joyDetails.numAxes = info.numAxes;
+    joyDetails.numPOVs = info.numHats;
+    joyDetails.numButtons = info.numButtons;
+  }
+
+  // SDL3 exposes rumble but not the effect-based haptics SDL2 has, so force feedback is limited to
+  // what SetGamepadRumble() can express. The bindings still report the capability so that the
+  // settings UI can say what will actually happen.
+  joyDetails.hasFFeedback = info.isGamepad && info.hasRumble;
+
+  for (int axisNum = 0; axisNum < NUM_JOY_AXES; axisNum++)
+  {
+    joyDetails.hasAxis[axisNum] = joyDetails.numAxes > axisNum;
+    joyDetails.axisHasFF[axisNum] = joyDetails.hasFFeedback && (axisNum == AXIS_X || axisNum == AXIS_Y);
+    strcpy(joyDetails.axisName[axisNum], CInputSystem::GetDefaultAxisName(axisNum));
+  }
+
+  m_joyDetails.push_back(joyDetails);
+  m_instanceIds.push_back(info.id);
+  m_gamepadIds.push_back(info.id);
+  m_padVibration.push_back(0.0f);
+
+  // One line per device, because "the pad does nothing" has two very different causes: SDL never saw
+  // it (nothing here), or it was opened but the bindings do not match what the pad reports. The raw
+  // capability figures are what makes the second case diagnosable - a pad with no X/Y is not a
+  // driving wheel, and 16 buttons on the standard layout is the synthetic count, not the real one.
+  InfoLog("Input: joystick %d '%s' - %u axes, %u buttons, %u hat(s), %s, rumble %s.",
+    (int)m_joyDetails.size(), joyDetails.name, (unsigned)info.numAxes, (unsigned)info.numButtons,
+    (unsigned)info.numHats, info.isGamepad ? "game controller" : "raw joystick",
+    info.hasRumble ? "yes" : "no");
+
+  // Seed the cached state without reporting it: the first diff would otherwise log every resting
+  // hat as if it had just moved there.
+  OSD::Platform::GamepadState initial;
+  if (!OSD::Platform::GetGamepadState(info.id, &initial))
+    initial = OSD::Platform::GamepadState();
+  m_gamepadStates.resize(m_gamepadIds.size());
+  m_gamepadStates.back() = initial;
+
+  if (s_logPadInput && joyDetails.hasFFeedback)
+  {
+    OSD::Platform::SetGamepadRumble(info.id, 0.6f, 0.6f, 400);
+    InfoLog("Input: pad %d rumble test fired (400 ms).", (int)m_joyDetails.size());
+  }
+  return true;
+}
+
+/*
+ * Optional input probe. See the declaration at the top of the SDL3 block.
+ */
+static const char* PadButtonName(unsigned button)
+{
+  using OSD::Platform::PadButton;
+  switch (static_cast<PadButton>(button))
+  {
+    case PadButton::South:         return "A/South";
+    case PadButton::East:          return "B/East";
+    case PadButton::West:          return "X/West";
+    case PadButton::North:         return "Y/North";
+    case PadButton::Back:          return "Back";
+    case PadButton::Guide:         return "Guide";
+    case PadButton::Start:         return "Start";
+    case PadButton::LeftStick:     return "LStick";
+    case PadButton::RightStick:    return "RStick";
+    case PadButton::LeftShoulder:  return "LB";
+    case PadButton::RightShoulder: return "RB";
+    case PadButton::DPadUp:        return "Up";
+    case PadButton::DPadDown:      return "Down";
+    case PadButton::DPadLeft:      return "Left";
+    case PadButton::DPadRight:     return "Right";
+    case PadButton::Misc1:         return "Misc1";
+    case PadButton::Paddle1:       return "Paddle1";
+    case PadButton::Paddle2:       return "Paddle2";
+    case PadButton::Paddle3:       return "Paddle3";
+    case PadButton::Paddle4:       return "Paddle4";
+    case PadButton::Touchpad:      return "Touchpad";
+    default:                       return "?";
+  }
+}
+
+static const char* PadAxisName(unsigned axis)
+{
+  using OSD::Platform::PadAxis;
+  switch (static_cast<PadAxis>(axis))
+  {
+    case PadAxis::LeftX:        return "LX";
+    case PadAxis::LeftY:        return "LY";
+    case PadAxis::RightX:       return "RX";
+    case PadAxis::RightY:       return "RY";
+    case PadAxis::LeftTrigger:  return "LT";
+    case PadAxis::RightTrigger: return "RT";
+    default:                    return "?";
+  }
+}
+
+static void LogPadChanges(int pad, bool standardLayout,
+  const OSD::Platform::GamepadState& before, const OSD::Platform::GamepadState& after)
+{
+  if (!s_logPadInput)
+    return;
+
+  const uint32_t rawChanged = before.buttons ^ after.buttons;
+  for (unsigned b = 0; b < OSD::Platform::kMaxGamepadButtons; b++)
+  {
+    if (rawChanged & (1u << b))
+      InfoLog("Input: pad %d raw button %u %s.", pad + 1, b,
+        (after.buttons & (1u << b)) ? "down" : "up");
+  }
+
+  if (standardLayout)
+  {
+    const uint32_t changed = before.standardButtons ^ after.standardButtons;
+    for (unsigned b = 0; b < OSD::Platform::kPadButtonCount; b++)
+    {
+      if (changed & (1u << b))
+        InfoLog("Input: pad %d %s %s.", pad + 1, PadButtonName(b),
+          (after.standardButtons & (1u << b)) ? "down" : "up");
+    }
+
+    for (unsigned a = 0; a < OSD::Platform::kPadAxisCount; a++)
+    {
+      if (std::fabs(after.standardAxes[a] - before.standardAxes[a]) >= 0.25f)
+        InfoLog("Input: pad %d %s = %.2f.", pad + 1, PadAxisName(a), after.standardAxes[a]);
+    }
+  }
+  else
+  {
+    for (unsigned a = 0; a < OSD::Platform::kMaxGamepadAxes; a++)
+    {
+      if (std::fabs(after.axes[a] - before.axes[a]) >= 0.25f)
+        InfoLog("Input: pad %d axis %u = %.2f.", pad + 1, a, after.axes[a]);
+    }
+  }
+
+  for (unsigned h = 0; h < OSD::Platform::kMaxGamepadHats; h++)
+  {
+    if (before.hats[h] != after.hats[h])
+      InfoLog("Input: pad %d hat %u = %d.", pad + 1, h, (int)after.hats[h]);
+  }
+}
+
+/*
+ * Reads every open device once.
+ *
+ * Platform::GetGamepadState() is not a cached getter: it walks the device's axes, buttons and hats.
+ * Doing that per binding meant dozens of device reads per frame, so this is the one place that
+ * touches the devices and everything else reads m_gamepadStates.
+ */
+void CSDLInputSystem::RefreshGamepadStates()
+{
+  m_gamepadStates.resize(m_gamepadIds.size());
+  for (size_t i = 0; i < m_gamepadIds.size(); i++)
+  {
+    OSD::Platform::GamepadState next;
+    if (!OSD::Platform::GetGamepadState(m_gamepadIds[i], &next))
+      next = OSD::Platform::GamepadState();
+    LogPadChanges((int)i, m_useGameController, m_gamepadStates[i], next);
+    m_gamepadStates[i] = next;
+  }
+}
+
+#endif  // SUPERMODEL_PLATFORM_SDL2
+
+/*
+ * Closes the entry at 'index', removing it from every parallel vector.
  *
  * Written as erase() on each vector rather than clear(): the old CloseJoysticks() called clear()
  * inside the loop, which emptied the vectors on the first iteration and then read past the end on
@@ -445,6 +724,7 @@ void CSDLInputSystem::CloseJoystickEntry(int index)
   if (index < 0 || index >= (int)m_joyDetails.size())
     return;
 
+#if defined(SUPERMODEL_PLATFORM_SDL2)
   const JoyDetails& joyDetails = m_joyDetails[index];
   if (joyDetails.hasFFeedback && m_SDLHapticDatas[index].SDLhaptic != nullptr)
   {
@@ -478,9 +758,22 @@ void CSDLInputSystem::CloseJoystickEntry(int index)
   m_joyDetails.erase(m_joyDetails.begin() + index);
   m_SDLHapticDatas.erase(m_SDLHapticDatas.begin() + index);
   m_instanceIds.erase(m_instanceIds.begin() + index);
+
+#else
+
+  OSD::Platform::CloseGamepad(m_gamepadIds[index]);
+  m_gamepadIds.erase(m_gamepadIds.begin() + index);
+  if (index < (int)m_padVibration.size())
+    m_padVibration.erase(m_padVibration.begin() + index);
+  if (index < (int)m_gamepadStates.size())
+    m_gamepadStates.erase(m_gamepadStates.begin() + index);
+  m_joyDetails.erase(m_joyDetails.begin() + index);
+  m_instanceIds.erase(m_instanceIds.begin() + index);
+
+#endif
 }
 
-bool CSDLInputSystem::CloseJoystickAt(SDL_JoystickID instanceId)
+bool CSDLInputSystem::CloseJoystickAt(OSD::Platform::GamepadId instanceId)
 {
   for (int i = 0; i < (int)m_instanceIds.size(); i++)
   {
@@ -506,6 +799,18 @@ void CSDLInputSystem::CloseJoysticks()
 
 bool CSDLInputSystem::InitializeSystem()
 {
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+  if (!OSD::Platform::Initialize(OSD::Platform::Subsystem_Gamepad))
+  {
+    ErrorLog("Unable to initialize the gamepad subsystem (%s).\n", OSD::Platform::GetError());
+    return false;
+  }
+
+  // Haptics are optional: a machine with no force-feedback device must still be able to run, and
+  // OpenHaptics() reports the absence per device when a game actually asks for an effect.
+  if (!OSD::Platform::Initialize(OSD::Platform::Subsystem_Haptic))
+    InfoLog("Force feedback is unavailable (%s).\n", OSD::Platform::GetError());
+#else
   // Make sure joystick subsystem is initialized and joystick events are enabled
   if (m_useGameController)
   {
@@ -523,6 +828,7 @@ bool CSDLInputSystem::InitializeSystem()
     }
     SDL_JoystickEventState(SDL_ENABLE);
   }
+#endif
 
   // Open attached joysticks
   OpenJoysticks();
@@ -548,13 +854,31 @@ const char *CSDLInputSystem::GetKeyName(int keyIndex)
 
 bool CSDLInputSystem::IsKeyPressed(int kbdNum, int keyIndex) const
 {
-  // Get SDL key for given index and check if currently pressed
-  SDL_Keycode sdlKey = s_keyMap[keyIndex].sdlKey;
-  return !!m_keyState[sdlKey];
+  if (m_keyState == nullptr || keyIndex < 0 || keyIndex >= (int)NUM_SDL_KEYS)
+    return false;
+
+  OSD::Platform::Scancode sdlKey = s_keyMap[keyIndex].sdlKey;
+  return m_keyState[sdlKey] != 0;
 }
 
 int CSDLInputSystem::GetMouseAxisValue(int mseNum, int axisNum) const
 {
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+  // A concrete mouse number reads that device; ANY_MOUSE keeps using the system cursor below.
+  if (mseNum >= 0)
+  {
+    if (mseNum >= (int)m_mouseStates.size())
+      return 0;
+
+    switch (axisNum)
+    {
+      case AXIS_X: return (int)m_mouseStates[mseNum].x;
+      case AXIS_Y: return (int)m_mouseStates[mseNum].y;
+      default:     return 0;
+    }
+  }
+#endif
+
   // Return value for given mouse axis
   switch (axisNum)
   {
@@ -565,6 +889,90 @@ int CSDLInputSystem::GetMouseAxisValue(int mseNum, int axisNum) const
   }
 }
 
+float CSDLInputSystem::GetMouseAxisValueFloat(int mseNum, int axisNum) const
+{
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+  if (mseNum >= 0)
+  {
+    if (mseNum >= (int)m_mouseStates.size())
+      return 0.0f;
+
+    switch (axisNum)
+    {
+      case AXIS_X: return m_mouseStates[mseNum].x;
+      case AXIS_Y: return m_mouseStates[mseNum].y;
+      default:     return 0.0f;
+    }
+  }
+#endif
+
+  // Sub-pixel variant, used only by the absolute (light-gun) axes. m_mouseXF/m_mouseYF hold the
+  // unrounded position, so a slow aim moves in fractions of a pixel instead of whole ones.
+  switch (axisNum)
+  {
+    case AXIS_X: return m_mouseXF;
+    case AXIS_Y: return m_mouseYF;
+    case AXIS_Z: return (float)m_mouseZ;
+    default:     return 0.0f;
+  }
+}
+
+void CSDLInputSystem::RefreshPointer()
+{
+  /*
+   * Called immediately before the frame is emulated, after the in-game panel has been built and
+   * the renderer has recorded its commands - the last moment at which a pointer position can
+   * still reach this frame.
+   *
+   * Relative mode is skipped: there the pointer is being fed back by the application and the OS
+   * cursor position is meaningless, so the accumulated deltas in the snapshot are the truth.
+   */
+  if (OSD::Platform::Input().relativeMouse)
+    return;
+
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+  // Drain packets from the raw thread first, then refresh the per-device snapshots below.
+  OSD::Platform::RefreshPerDeviceMouse();
+#endif
+
+  float x = 0.0f;
+  float y = 0.0f;
+  if (!OSD::Platform::SamplePointerNow(&x, &y))
+    return;
+
+  	m_mouseXF = x;
+  	m_mouseYF = y;
+  	m_mouseX = static_cast<int>(x);
+  	m_mouseY = static_cast<int>(y);
+
+  #if defined(SUPERMODEL_PLATFORM_SDL3)
+  	if (s_logGunProbe && GunProbeDue())
+  	{
+  		char device[64] = "(none)";
+  		if (!m_mouseStates.empty())
+  			snprintf(device, sizeof(device), "%.1f,%.1f", m_mouseStates[0].x, m_mouseStates[0].y);
+  		InfoLog("GunProbe: late pointer %.1f,%.1f; per-device %s (%d); display %ux%u at %u,%u.",
+  			x, y, device, (int)m_mouseStates.size(), m_dispW, m_dispH, m_dispX, m_dispY);
+  	}
+  #endif
+
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+  // With one device the per-device table follows the cursor, so late sampling has to update it too
+  // or MOUSE1_* bindings would read the position from the top of the frame. With several devices
+  // the raw path has just updated them; copy the fresh values into the frame's snapshot.
+  if (m_mouseStates.size() == 1)
+  {
+    m_mouseStates[0].x = x;
+    m_mouseStates[0].y = y;
+  }
+  else
+  {
+    for (size_t i = 0; i < m_mouseStates.size(); i++)
+      OSD::Platform::GetMouseStateByIndex((int)i, &m_mouseStates[i]);
+  }
+#endif
+}
+
 int CSDLInputSystem::GetMouseWheelDir(int mseNum) const
 {
   // Return wheel value
@@ -573,14 +981,33 @@ int CSDLInputSystem::GetMouseWheelDir(int mseNum) const
 
 bool CSDLInputSystem::IsMouseButPressed(int mseNum, int butNum) const
 {
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+  if (mseNum >= 0)
+  {
+    if (mseNum >= (int)m_mouseStates.size())
+      return false;
+
+    const uint32_t mask = m_mouseStates[mseNum].buttons;
+    switch (butNum)
+    {
+      case 0:  return !!(mask & OSD::Platform::MouseButton_Left);
+      case 1:  return !!(mask & OSD::Platform::MouseButton_Middle);
+      case 2:  return !!(mask & OSD::Platform::MouseButton_Right);
+      case 3:  return !!(mask & OSD::Platform::MouseButton_X1);
+      case 4:  return !!(mask & OSD::Platform::MouseButton_X2);
+      default: return false;
+    }
+  }
+#endif
+
   // Return value for given mouse button
   switch (butNum)
   {
-    case 0:  return !!(m_mouseButtons & SDL_BUTTON_LMASK);
-    case 1:  return !!(m_mouseButtons & SDL_BUTTON_MMASK);
-    case 2:  return !!(m_mouseButtons & SDL_BUTTON_RMASK);
-    case 3:  return !!(m_mouseButtons & SDL_BUTTON_X1MASK);
-    case 4:  return !!(m_mouseButtons & SDL_BUTTON_X2MASK);
+    case 0:  return !!(m_mouseButtons & OSD::Platform::MouseButton_Left);
+    case 1:  return !!(m_mouseButtons & OSD::Platform::MouseButton_Middle);
+    case 2:  return !!(m_mouseButtons & OSD::Platform::MouseButton_Right);
+    case 3:  return !!(m_mouseButtons & OSD::Platform::MouseButton_X1);
+    case 4:  return !!(m_mouseButtons & OSD::Platform::MouseButton_X2);
     default: return false;
   }
 }
@@ -604,6 +1031,30 @@ int CSDLInputSystem::GetJoyAxisValue(int joyNum, int axisNum) const
   if (!JoyNumValid(joyNum))
     return 0;
 
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+  // The platform layer normalises every axis to [-1, 1] and triggers to [0, 1]; the input system's
+  // contract is SDL2's raw range, so scale back on the way out.
+  if (joyNum >= (int)m_gamepadStates.size())
+    return 0;
+  const OSD::Platform::GamepadState& state = m_gamepadStates[joyNum];
+
+  if (m_useGameController)
+  {
+    switch (axisNum) {
+      case AXIS_X:  return (int)(state.standardAxes[(unsigned)OSD::Platform::PadAxis::LeftX] * 32767.0f);
+      case AXIS_Y:  return (int)(state.standardAxes[(unsigned)OSD::Platform::PadAxis::LeftY] * 32767.0f);
+      case AXIS_Z:  return (int)(state.standardAxes[(unsigned)OSD::Platform::PadAxis::LeftTrigger] * 32767.0f);
+      case AXIS_RX: return (int)(state.standardAxes[(unsigned)OSD::Platform::PadAxis::RightX] * 32767.0f);
+      case AXIS_RY: return (int)(state.standardAxes[(unsigned)OSD::Platform::PadAxis::RightY] * 32767.0f);
+      case AXIS_RZ: return (int)(state.standardAxes[(unsigned)OSD::Platform::PadAxis::RightTrigger] * 32767.0f);
+      default:      return 0;
+    }
+  }
+
+  if (axisNum >= (int)OSD::Platform::kMaxGamepadAxes)
+    return 0;
+  return (int)(state.axes[axisNum] * 32767.0f);
+#else
   // Get raw joystick axis value for given joystick from SDL (values range from -32768 to 32767)
   if (m_useGameController)
   {
@@ -621,6 +1072,7 @@ int CSDLInputSystem::GetJoyAxisValue(int joyNum, int axisNum) const
     SDL_Joystick *joystick = m_joysticks[joyNum];
     return SDL_JoystickGetAxis(joystick, axisNum);
   }
+#endif
 }
 
 bool CSDLInputSystem::IsJoyPOVInDir(int joyNum, int povNum, int povDir) const
@@ -628,6 +1080,39 @@ bool CSDLInputSystem::IsJoyPOVInDir(int joyNum, int povNum, int povDir) const
   if (!JoyNumValid(joyNum))
     return false;
 
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+  if (joyNum >= (int)m_gamepadStates.size())
+    return false;
+  const OSD::Platform::GamepadState& state = m_gamepadStates[joyNum];
+
+  if (m_useGameController)
+  {
+    using OSD::Platform::PadButton;
+    switch (povDir)
+    {
+      case POV_UP:    return !!(state.standardButtons & OSD::Platform::PadButtonBit(PadButton::DPadUp));
+      case POV_DOWN:  return !!(state.standardButtons & OSD::Platform::PadButtonBit(PadButton::DPadDown));
+      case POV_LEFT:  return !!(state.standardButtons & OSD::Platform::PadButtonBit(PadButton::DPadLeft));
+      case POV_RIGHT: return !!(state.standardButtons & OSD::Platform::PadButtonBit(PadButton::DPadRight));
+      default:        return false;
+    }
+  }
+
+  if (povNum < 0 || povNum >= (int)OSD::Platform::kMaxGamepadHats)
+    return false;
+
+  // The backend reports the hat as an angle, so a diagonal counts for both of its directions -
+  // which is what SDL's hat bitmask does on the SDL2 path.
+  const int hat = state.hats[povNum];
+  switch (povDir)
+  {
+    case POV_UP:    return hat == 0 || hat == 45 || hat == 315;
+    case POV_DOWN:  return hat == 180 || hat == 135 || hat == 225;
+    case POV_LEFT:  return hat == 270 || hat == 225 || hat == 315;
+    case POV_RIGHT: return hat == 90 || hat == 45 || hat == 135;
+    default:        return false;
+  }
+#else
   // Get current joystick POV-hat value for given joystick and POV number from SDL and check if pointing in required direction
   if (m_useGameController)
   {
@@ -654,6 +1139,7 @@ bool CSDLInputSystem::IsJoyPOVInDir(int joyNum, int povNum, int povDir) const
     }
     return false;
   }
+#endif
 }
 
 bool CSDLInputSystem::IsJoyButPressed(int joyNum, int butNum) const
@@ -661,6 +1147,48 @@ bool CSDLInputSystem::IsJoyButPressed(int joyNum, int butNum) const
   if (!JoyNumValid(joyNum))
     return false;
 
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+  if (joyNum >= (int)m_gamepadStates.size())
+    return false;
+  const OSD::Platform::GamepadState& state = m_gamepadStates[joyNum];
+
+  if (m_useGameController)
+  {
+    /*
+     * Same button order the SDL2 path exposes, so an existing JOY1_BUTTONn binding keeps meaning
+     * the same physical button on a pad when the SDL2 binary is swapped for the SDL3 one. The order
+     * is deliberately not PadButton's enum order.
+     */
+    using OSD::Platform::PadButton;
+    PadButton button;
+    switch (butNum)
+    {
+      case 0:  button = PadButton::South;          break;
+      case 1:  button = PadButton::East;           break;
+      case 2:  button = PadButton::West;           break;
+      case 3:  button = PadButton::North;          break;
+      case 4:  button = PadButton::LeftShoulder;   break;
+      case 5:  button = PadButton::RightShoulder;  break;
+      case 6:  button = PadButton::Back;           break;
+      case 7:  button = PadButton::Start;          break;
+      case 8:  button = PadButton::LeftStick;      break;
+      case 9:  button = PadButton::RightStick;     break;
+      case 10: button = PadButton::Paddle1;        break;
+      case 11: button = PadButton::Paddle2;        break;
+      case 12: button = PadButton::Guide;          break;
+      case 13: button = PadButton::Paddle3;        break;
+      case 14: button = PadButton::Paddle4;        break;
+      case 15: button = PadButton::Misc1;          break;
+      case 16: button = PadButton::Touchpad;       break;
+      default: return false;
+    }
+    return !!(state.standardButtons & OSD::Platform::PadButtonBit(button));
+  }
+
+  if (butNum < 0 || butNum >= (int)OSD::Platform::kMaxGamepadButtons)
+    return false;
+  return !!(state.buttons & (1u << butNum));
+#else
   // Get current joystick button state for given joystick and button number from SDL
   if (m_useGameController)
   {
@@ -692,10 +1220,69 @@ bool CSDLInputSystem::IsJoyButPressed(int joyNum, int butNum) const
     SDL_Joystick *joystick = m_joysticks[joyNum];
     return !!SDL_JoystickGetButton(joystick, butNum);
   }
+#endif
 }
 
 bool CSDLInputSystem::ProcessForceFeedbackCmd(int joyNum, int axisNum, ForceFeedbackCmd ffCmd)
 {
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+  /*
+   * SDL3 splits rumble and effect-based haptics into two subsystems. The wheel effects go through
+   * PlatformInput's haptic API, which opens SDL_Haptic lazily on the first command; rumble stays
+   * on the gamepad API. The scaling keys are the same ones the SDL2 path uses, so an existing ini
+   * keeps its tuning.
+   */
+  if (!JoyNumValid(joyNum))
+    return false;
+
+  // Counted for the periodic summary: it is the only way to tell "the game never asks for force
+  // feedback" from "the request is being sent and the device ignores it".
+  if (ffCmd.id >= 0 && ffCmd.id < 4)
+    ++m_ffbCounts[ffCmd.id];
+
+  switch (ffCmd.id)
+  {
+    case FFStop:
+      StopAllEffect(joyNum);
+      return true;
+
+    case FFConstantForce:
+      sdlConstForceMax = m_config["SDLConstForceMax"].ValueAs<unsigned>();
+      if (sdlConstForceMax == 0)
+        return false;
+      if (ffCmd.force == 0.0f)
+        StopConstanteforce(joyNum);
+      else if (ffCmd.force > 0.0f)
+        ConstantForceEffect(ffCmd.force * (float)(sdlConstForceMax / 100.0f), -1, 0, joyNum);
+      else
+        ConstantForceEffect(-ffCmd.force * (float)(sdlConstForceMax / 100.0f), 1, 0, joyNum);
+      return true;
+
+    case FFSelfCenter:
+      sdlSelfCenterMax = m_config["SDLSelfCenterMax"].ValueAs<unsigned>();
+      if (sdlSelfCenterMax == 0)
+        return false;
+      SpringForceEffect(ffCmd.force * (float)(sdlSelfCenterMax / 100.0f), joyNum);
+      return true;
+
+    case FFFriction:
+      sdlFrictionMax = m_config["SDLFrictionMax"].ValueAs<unsigned>();
+      if (sdlFrictionMax == 0)
+        return false;
+      FrictionForceEffect(ffCmd.force * (float)(sdlFrictionMax / 100.0f), joyNum);
+      return true;
+
+    case FFVibrate:
+      sdlVibrateMax = m_config["SDLVibrateMax"].ValueAs<unsigned>();
+      if (sdlVibrateMax == 0)
+        return false;
+      VibrationEffect(ffCmd.force * (float)(sdlVibrateMax / 100.0f), joyNum);
+      return true;
+
+    default:
+      return false;
+  }
+#else
   switch (ffCmd.id)
   {
     case FFStop:
@@ -738,6 +1325,7 @@ bool CSDLInputSystem::ProcessForceFeedbackCmd(int joyNum, int axisNum, ForceFeed
       break;
     }
     return true;
+#endif
 }
 
 int CSDLInputSystem::GetNumKeyboards() const
@@ -748,17 +1336,28 @@ int CSDLInputSystem::GetNumKeyboards() const
 
 int CSDLInputSystem::GetNumMice() const
 {
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+  // SDL3 enumerates mice individually and the platform layer tracks one state per device, so the
+  // input system can expose real MOUSE1_/MOUSE2_ bindings instead of the merged ANY_MOUSE only.
+  return OSD::Platform::GetMouseCount();
+#else
   // Return ANY_MOUSE as SDL 1.2 cannot handle multiple mice
   return ANY_MOUSE;
+#endif
 }
 
 int CSDLInputSystem::GetNumJoysticks() const
 {
-  // Return number of joysticks found
+  // Return number of joysticks found. Both backends keep one entry per open device, in the order
+  // the bindings' JOYn_* names refer to.
+#if defined(SUPERMODEL_PLATFORM_SDL2)
   if (m_useGameController)
     return (int)m_gamepads.size();
   else
     return (int)m_joysticks.size();
+#else
+  return (int)m_gamepadIds.size();
+#endif
 }
 
 bool CSDLInputSystem::ConsumeDevicesChanged()
@@ -776,6 +1375,19 @@ const KeyDetails *CSDLInputSystem::GetKeyDetails(int kbdNum)
 
 const MouseDetails *CSDLInputSystem::GetMouseDetails(int mseNum)
 {
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+  if (mseNum >= 0)
+  {
+    OSD::Platform::MouseInfo info;
+    if (!OSD::Platform::GetMouseInfo(mseNum, &info))
+      return nullptr;
+
+    std::strncpy(m_mouseDetails.name, info.name, MAX_NAME_LENGTH);
+    m_mouseDetails.name[MAX_NAME_LENGTH] = '\0';
+    m_mouseDetails.isAbsolute = true;
+    return &m_mouseDetails;
+  }
+#endif
   // Return nullptr as SDL 1.2 cannot handle multiple mice
   return nullptr;
 }
@@ -790,82 +1402,286 @@ bool CSDLInputSystem::Poll()
   // Reset mouse wheel direction
   m_mouseWheelDir = 0;
 
-  // Poll for event from SDL
-  SDL_Event e;
-  while (SDL_PollEvent(&e))
+  /*
+   * The event drain and the keyboard/mouse snapshot live in the platform layer
+   * now.  CSDLInputSystem still owns the mapping, calibration and gamepad
+   * handles; it only consumes events whose meaning it needs (quit, close,
+   * wheel and hot-plug) and reads the rest from the snapshot.
+   */
+  OSD::Platform::BeginInputFrame();
+
+  OSD::Platform::Event event;
+  while (OSD::Platform::PollEvent(&event))
   {
-    switch (e.type)
-		{
-	  default:
-	    break;
-		case SDL_QUIT:
-			return false;
-		case SDL_WINDOWEVENT:
-			// Closing the window must work like quitting. SDL only raises SDL_QUIT when the window
-			// being closed is its *only* window (see SDL_windowevents.c), and since the settings GUI
-			// keeps its own window alive this one never is - so the close button did nothing. Treat
-			// the window's own close event as a quit instead of relying on SDL's.
-			if (e.window.event == SDL_WINDOWEVENT_CLOSE)
-				return false;
-			break;
-		case SDL_MOUSEWHEEL:
-			if (e.button.y > 0)
-			{
-				m_mouseZ += 5;
-				m_mouseWheelDir = 1;
-			}
-			else if (e.button.y < 0)
-			{
-				m_mouseZ -= 5;
-				m_mouseWheelDir = -1;
-			}
-			break;
-		// Hot-plug. Without these two cases a pad attached after the game had started was never
-		// opened: the joysticks were enumerated once, in InitializeSystem(), so its bindings
-		// resolved to nothing and the only way to use it was to quit back to the settings window
-		// and start the game again.
-		//
-		// The two events do not carry the same kind of id: ADDED reports a *device index*,
-		// REMOVED reports an *instance id*. They are not interchangeable - opening a removal's id
-		// would open whatever device happens to sit at that index, and closing an addition's index
-		// would close an unrelated pad.
-		case SDL_JOYDEVICEADDED:
-			{
-				const int index = e.jdevice.which;
-				const bool controller = SDL_IsGameController(index) != SDL_FALSE;
-				if (OpenJoystickAt(index))
-				{
-					m_devicesChanged = true;
-					const char* name = SDL_IsGameController(index)
-						? SDL_GameControllerNameForIndex(index)
-						: SDL_JoystickNameForIndex(index);
-					InfoLog("Joystick added: %s (%s).\n",
-						name != nullptr ? name : "unknown device",
-						controller ? "game controller API" : "raw joystick");
-				}
-			}
-			break;
-		case SDL_JOYDEVICEREMOVED:
-			CloseJoystickAt(e.jdevice.which);
-			break;
-		}
+    switch (event.type)
+    {
+    case OSD::Platform::EventType::Quit:
+      return false;
+
+    case OSD::Platform::EventType::WindowClose:
+      // Closing the window must work like quitting. SDL only raises QUIT when
+      // the window being closed is its *only* window, and since the settings
+      // GUI keeps its own window alive this one never is.
+      return false;
+
+    case OSD::Platform::EventType::MouseWheel:
+      if (event.wheelY != 0.0f)
+      {
+        const int notches = static_cast<int>(event.wheelY);
+        m_mouseZ += 5 * notches;
+        m_mouseWheelDir = notches > 0 ? 1 : -1;
+      }
+      break;
+
+    // Hot-plug. ADDED carries the stable instance id in gamepadId and the
+    // enumeration index in deviceIndex; REMOVED carries the instance id.
+    case OSD::Platform::EventType::GamepadAdded:
+      {
+        const int index = event.deviceIndex;
+        if (index >= 0 && OpenJoystickAt(index))
+        {
+          m_devicesChanged = true;
+          OSD::Platform::GamepadInfo info;
+          if (OSD::Platform::GetGamepadInfo(index, &info))
+          {
+            InfoLog("Joystick added: %s (%s).\n",
+              info.name[0] != '\0' ? info.name : "unknown device",
+              info.isGamepad ? "game controller API" : "raw joystick");
+          }
+        }
+      }
+      break;
+
+    case OSD::Platform::EventType::GamepadRemoved:
+      CloseJoystickAt(event.gamepadId);
+      break;
+
+    default:
+      break;
+    }
   }
 
-  // Get key state from SDL
-  m_keyState = SDL_GetKeyboardState(nullptr);
+  ReadSnapshot();
 
-  // Get mouse state from SDL (except mouse wheel which was handled earlier)
-  m_mouseButtons = SDL_GetMouseState(&m_mouseX, &m_mouseY);
-
-  // Update joystick state (not required as called implicitly by SDL_PollEvent above)
-  //SDL_JoystickUpdate();
+  // Update joystick state (not required as called implicitly by the event drain)
   return true;
+}
+
+/*
+ * Copies the platform snapshot into the caches the bindings read.
+ *
+ * Shared by Poll() - which calls it after draining the frame's events - and RefreshState(), which
+ * calls it after re-pumping the devices but takes no events.
+ */
+void CSDLInputSystem::ReadSnapshot()
+{
+  const OSD::Platform::InputSnapshot& input = OSD::Platform::Input();
+
+  // Get key state from the platform snapshot
+  m_keyState = input.keys;
+
+  // Get mouse state from the platform snapshot (wheel was handled by Poll())
+  m_mouseX = static_cast<int>(input.mouseX);
+  m_mouseY = static_cast<int>(input.mouseY);
+  m_mouseXF = input.mouseX;
+  m_mouseYF = input.mouseY;
+  m_mouseButtons = static_cast<uint8_t>(input.mouseButtons);
+
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+  // One read per device per frame, the same model as the gamepad snapshots below.
+  m_mouseStates.clear();
+  const int mouseCount = OSD::Platform::GetMouseCount();
+  for (int i = 0; i < mouseCount; i++)
+  {
+    OSD::Platform::MouseState state;
+    if (OSD::Platform::GetMouseStateByIndex(i, &state))
+      m_mouseStates.push_back(state);
+  }
+
+  if (s_logGunProbe && GunProbeDue())
+  {
+    char device[64] = "(none)";
+    if (!m_mouseStates.empty())
+      snprintf(device, sizeof(device), "%.1f,%.1f", m_mouseStates[0].x, m_mouseStates[0].y);
+    InfoLog("GunProbe: snapshot pointer %.1f,%.1f; per-device %s.",
+      input.mouseX, input.mouseY, device);
+  }
+
+  // One device read per frame for every pad, rather than one per binding (see m_gamepadStates).
+  RefreshGamepadStates();
+
+  // Keep a vibration the drive board is still holding alive; see m_padVibration.
+  ServicePadVibration();
+  ReportForceFeedback();
+#endif
+}
+
+/*
+ * Late device sample.
+ *
+ * The frame's events are taken at the top of the frame, but everything between that and the
+ * emulation step - building the in-game panel, recording the renderer's commands - costs time, and
+ * a wheel or a pad input sampled at the top of the frame is that much older than the frame it ends
+ * up in. This re-pumps and re-reads the snapshot at the step boundary.
+ *
+ * No events are taken here on purpose: the queue belongs to Poll(), and draining it twice would
+ * deliver wheel notches and hot-plug notifications twice. Re-pumping still updates the keyboard
+ * array in place, so the second read sees keys pressed after the first sample.
+ */
+void CSDLInputSystem::RefreshState()
+{
+  OSD::Platform::BeginInputFrame();
+  ReadSnapshot();
 }
 
 void CSDLInputSystem::SetMouseVisibility(bool visible)
 {
-  SDL_ShowCursor(visible ? SDL_ENABLE : SDL_DISABLE);
+  OSD::Platform::SetCursorVisible(visible);
 }
+
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+
+/*
+ * Rumble-only force feedback.
+ *
+ * Strengths arrive pre-scaled by the SDL2 path's config percentages; here they are simply clamped
+ * to what SetGamepadRumble() accepts. The duration is short because every command is refreshed
+ * while the effect is meant to last - a long duration would keep vibrating after the game stopped
+ * asking for it.
+ */
+void CSDLInputSystem::StopAllEffect(int joyNum)
+{
+  if (JoyNumValid(joyNum))
+    OSD::Platform::StopAllHapticEffects(m_gamepadIds[joyNum]);
+
+  VibrationEffect(0.0f, joyNum);
+}
+
+void CSDLInputSystem::StopConstanteforce(int joyNum)
+{
+  if (JoyNumValid(joyNum))
+    OSD::Platform::StopHapticEffect(m_gamepadIds[joyNum], OSD::Platform::HapticEffect::Constant);
+}
+
+void CSDLInputSystem::StopVibrationforce(int joyNum)
+{
+  VibrationEffect(0.0f, joyNum);
+}
+
+void CSDLInputSystem::StopSpringforce(int joyNum)
+{
+  if (JoyNumValid(joyNum))
+    OSD::Platform::StopHapticEffect(m_gamepadIds[joyNum], OSD::Platform::HapticEffect::Spring);
+}
+
+void CSDLInputSystem::StopFrictionforce(int joyNum)
+{
+  if (JoyNumValid(joyNum))
+    OSD::Platform::StopHapticEffect(m_gamepadIds[joyNum], OSD::Platform::HapticEffect::Friction);
+}
+
+void CSDLInputSystem::VibrationEffect(float strength, int joyNum)
+{
+  if (!JoyNumValid(joyNum))
+    return;
+
+  float clamped = strength;
+  if (clamped < 0.0f)
+    clamped = 0.0f;
+  if (clamped > 1.0f)
+    clamped = 1.0f;
+
+  /*
+   * Stored as a level and re-issued every frame by ServicePadVibration().
+   *
+   * The drive board only writes this value when it changes, and on real hardware that means "the
+   * motor runs at this strength until further notice". SDL_RumbleGamepad() is a timed pulse, so a
+   * single command produced one 100 ms buzz and then silence while the game still expected the
+   * motor to be running - which is why a wall scrape felt like nothing at all.
+   */
+  if (joyNum < (int)m_padVibration.size())
+    m_padVibration[joyNum] = clamped;
+
+  const bool sent = OSD::Platform::SetGamepadRumble(m_gamepadIds[joyNum], clamped, clamped,
+    clamped > 0.0f ? kVibrationPulseMs : 0);
+
+  // Once per session: "the pad never vibrates" and "the game never asks it to" look identical from
+  // the outside, and this is the last place where the two can be told apart.
+  static bool reported = false;
+  if (!reported)
+  {
+    reported = true;
+    InfoLog("FFB: vibration force %.2f %s by the SDL rumble path.", clamped,
+      sent ? "accepted" : "rejected");
+  }
+}
+
+void CSDLInputSystem::ServicePadVibration()
+{
+  for (size_t i = 0; i < m_padVibration.size() && i < m_gamepadIds.size(); ++i)
+  {
+    if (m_padVibration[i] <= 0.0f)
+      continue;
+    OSD::Platform::SetGamepadRumble(m_gamepadIds[i], m_padVibration[i], m_padVibration[i],
+      kVibrationPulseMs);
+  }
+}
+
+void CSDLInputSystem::ReportForceFeedback()
+{
+  // Counted in frames rather than wall time: this runs from the frame's input sample, so 300 calls
+  // is about five seconds at the arcade rate and nothing here depends on a timer being initialised.
+  static unsigned framesSinceReport = 0;
+  if (++framesSinceReport < 300)
+    return;
+  framesSinceReport = 0;
+
+  unsigned total = 0;
+  for (unsigned count : m_ffbCounts)
+    total += count;
+  if (total == 0)
+    return;
+
+  InfoLog("FFB: commands in the last ~5 s - constant %u, self-centering %u, friction %u, vibration %u.",
+    m_ffbCounts[FFConstantForce], m_ffbCounts[FFSelfCenter], m_ffbCounts[FFFriction], m_ffbCounts[FFVibrate]);
+  for (unsigned& count : m_ffbCounts)
+    count = 0;
+}
+
+void CSDLInputSystem::ConstantForceEffect(float force, int dir, int length, int joyNum)
+{
+  (void)length;   // every effect is infinite and stopped by FFStop / a zero force
+
+  if (!JoyNumValid(joyNum))
+    return;
+  if (!OSD::Platform::OpenHaptics(m_gamepadIds[joyNum]))
+    return;
+
+  OSD::Platform::SetHapticEffect(m_gamepadIds[joyNum], OSD::Platform::HapticEffect::Constant,
+    force * (float)dir);
+}
+
+void CSDLInputSystem::SpringForceEffect(float force, int joyNum)
+{
+  if (!JoyNumValid(joyNum))
+    return;
+  if (!OSD::Platform::OpenHaptics(m_gamepadIds[joyNum]))
+    return;
+
+  OSD::Platform::SetHapticEffect(m_gamepadIds[joyNum], OSD::Platform::HapticEffect::Spring, force);
+}
+
+void CSDLInputSystem::FrictionForceEffect(float force, int joyNum)
+{
+  if (!JoyNumValid(joyNum))
+    return;
+  if (!OSD::Platform::OpenHaptics(m_gamepadIds[joyNum]))
+    return;
+
+  OSD::Platform::SetHapticEffect(m_gamepadIds[joyNum], OSD::Platform::HapticEffect::Friction, force);
+}
+
+#else
 
 void CSDLInputSystem::StopAllEffect(int joyNum)
 {
@@ -1071,3 +1887,5 @@ bool CSDLInputSystem::HasBasicForce(SDL_Haptic* hap)
   else
     return false;
 }
+
+#endif  // SUPERMODEL_PLATFORM_SDL2

@@ -58,6 +58,19 @@ public:
 	 *		SaveState	Block file to load state information from.
 	 */
 	void LoadState(CBlockFile *SaveState);
+
+	/*
+	 * RefreshInterruptLine(void):
+	 *
+	 * Drives the CPU's interrupt input to match the current pending state.
+	 *
+	 * The line is not part of either the IRQ controller's or the CPU's saved state: it is
+	 * re-evaluated only when an interrupt is asserted or acknowledged. A state saved while an
+	 * interrupt was still pending therefore loads with that interrupt invisible to the CPU, and the
+	 * game waits forever for a handler that never runs. Call this after both blocks have been
+	 * loaded.
+	 */
+	void RefreshInterruptLine(void);
 	
 	/*
 	 * Assert(irqBits):

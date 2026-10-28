@@ -55,8 +55,12 @@ struct AllocatedImage
 class CVulkanMemory
 {
 public:
-	bool Init(VkPhysicalDevice physical, VkDevice device);
+	bool Init(VkPhysicalDevice physical, VkDevice device, bool budgetExtension);
 	void Shutdown();
+
+	// Logs the driver's heap budget/usage when VK_EXT_memory_budget is available. `reason` names the
+	// event in the log line, so the same function serves startup and an allocation failure.
+	void LogMemoryBudget(const char* reason) const;
 
 	bool CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags props, AllocatedBuffer& out);
 	void DestroyBuffer(AllocatedBuffer& buffer);
@@ -103,6 +107,7 @@ private:
 	VkPhysicalDevice m_physical = VK_NULL_HANDLE;
 	VkDevice m_device = VK_NULL_HANDLE;
 	VkPhysicalDeviceMemoryProperties m_props = {};
+	bool m_budget = false;
 	std::vector<Block> m_blocks;
 };
 

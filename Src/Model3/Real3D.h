@@ -147,6 +147,16 @@ public:
    * since it may be running in a separate thread.
    */
   void BeginFrame(void);
+
+  /*
+   * PrepareFrame(void):
+   *
+   * Builds the renderer's CPU-side scene for a completed simulation frame.
+   * Separate from RenderFrame() so the high-refresh loop can build once and
+   * present many interpolated frames from the result.
+   */
+  void PrepareFrame(void);
+  void ResetInterpolation(void);
   
   /*
    * RenderFrame(void):
@@ -156,6 +166,7 @@ public:
    * and variables since it may be running in a separate thread.
    */
   void RenderFrame(void);
+  void RenderFrame(double alpha, bool newSimulation);
 
   /*
    * EndFrame(void):

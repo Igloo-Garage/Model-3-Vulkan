@@ -107,6 +107,19 @@ public:
 	 * Returns current value as a fraction -1.0 to 1.0
 	 */ 
 	double ValueAsFraction() const;
+
+	/*
+	 * Returns the current value as a signed fraction: -1.0 at the minimum, 0.0 at the off point,
+	 * +1.0 at the maximum. ValueAsFraction() returns the distance from the off point as a positive
+	 * number instead, which is not enough to smooth a bipolar axis.
+	 */
+	double SignedFraction() const;
+
+	/*
+	 * Sets the value from a signed fraction, clamped to the axis range. The steering filter uses
+	 * this so it does not have to know the raw 0..255 range.
+	 */
+	void SetSignedFraction(double fraction);
 };
 
 /*

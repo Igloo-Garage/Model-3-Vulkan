@@ -5,6 +5,6 @@
 // lowest-numbered ICON resource for the executable icon, so Explorer, the taskbar and Alt-Tab
 // all pick this one up.
 #define IDI_SUPERMODEL 101
-IDI_SUPERMODEL ICON "Src/OSD/Windows/Supermodel.ico"
+IDI_SUPERMODEL ICON "output.ico"
 
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "Src/OSD/Windows/SupermodelManifest.xml"

@@ -37,7 +37,6 @@
 #include <oleauto.h>
 
 #include <SDL.h>
-#include <SDL_syswm.h>
 
 /*
  * There seem to be three versions of XInput floating around, all of which
@@ -422,7 +421,7 @@ const char *CDirectInputSystem::ConstructName(bool useRawInput, bool useXInput)
 		return (useXInput ? "Xinput" : "DirectInput");
 }
 
-CDirectInputSystem::CDirectInputSystem(const Util::Config::Node &config, SDL_Window *window, bool useRawInput, bool useXInput) : 
+CDirectInputSystem::CDirectInputSystem(const Util::Config::Node &config, OSD::Platform::Window *window, bool useRawInput, bool useXInput) : 
 	CInputSystem(ConstructName(useRawInput, useXInput)),
 	m_config(config),
 	m_useRawInput(useRawInput), m_useXInput(useXInput), m_enableFFeedback(true),
@@ -2040,13 +2039,7 @@ bool CDirectInputSystem::Poll()
 	// See if keyboard, mice and joysticks have been activated yet
 	if (!m_activated)
 	{
-		// If not, then get Window handle of SDL window
-		SDL_SysWMinfo info;
-		SDL_VERSION(&info.version);
-		if (SDL_GetWindowWMInfo(m_window, &info))
-		{
-			m_hwnd = info.info.win.window;
-		}
+		m_hwnd = static_cast<HWND>(OSD::Platform::GetNativeWindowHandle(m_window));
 		
 		// Tell SDL to pass on all Windows events
 		// Removed - see below

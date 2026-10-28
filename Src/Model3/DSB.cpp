@@ -41,140 +41,302 @@
 #include "Supermodel.h"
 #include "Sound/MPEG/MpegAudio.h"
 #include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <numeric>
+
+// The MPEG ROM reserved by CModel3 (DSBMPEGROM_SIZE). Offsets in the DSB save state are
+// relative to this buffer; anything outside it is a stale or corrupt saved range.
+static constexpr unsigned kMpegRomSize = 0x1000000;
+
+static bool DsbLoadDebugEnabled(void)
+{
+	static const bool enabled = std::getenv("SM3D_LOAD_DEBUG") != nullptr;
+	return enabled;
+}
+
+/*
+ * Optional companion block to "DSB1"/"DSB2": the MPEG window as the decoder itself holds it.
+ *
+ * The fields in the DSB blocks are the register shadows last latched by the board firmware, and
+ * they are not always the window that is actually playing: Scud Race leaves usingMPEG* at the
+ * 0x80008000 "no track" sentinel after the music has started, because the firmware stages the
+ * next command in mpegStart/mpegEnd. Restoring from those shadows alone therefore either hung
+ * (before the range validation) or left the car-select music stopped. This block stores what the
+ * decoder is really playing, so the track can resume at the exact byte offset it was saved at.
+ *
+ * Readers that predate the block skip it and use the old fields, which is why SaveState() also
+ * reports isPlaying = 0 when those fields do not describe a valid range.
+ */
+static constexpr UINT32 kMpegActiveMagic = 0x4D504732;	// "MPG2"
+
+static void SaveMpegActiveWindow(CBlockFile *stateFile, const char *blockName, const UINT8 *mpegROM)
+{
+	UINT32	magic = kMpegActiveMagic;
+	INT32	offset = (INT32)MpegDec::GetActiveOffset(mpegROM);
+	INT32	size = (INT32)MpegDec::GetActiveSize();
+	INT32	pos = (INT32)MpegDec::GetPosition();
+	UINT8	loop = (UINT8)(MpegDec::GetLoop() ? 1 : 0);
+
+	stateFile->NewBlock(blockName, __FILE__);
+	stateFile->Write(&magic, sizeof(magic));
+	stateFile->Write(&offset, sizeof(offset));
+	stateFile->Write(&size, sizeof(size));
+	stateFile->Write(&pos, sizeof(pos));
+	stateFile->Write(&loop, sizeof(loop));
+}
+
+// Returns true when the companion block exists and restored a usable window. The caller then
+// skips the legacy register path; a missing or invalid block falls back to it.
+static bool LoadMpegActiveWindow(CBlockFile *stateFile, const char *blockName, const UINT8 *mpegROM)
+{
+	UINT32	magic = 0;
+	INT32	offset = -1, size = 0, pos = 0;
+	UINT8	loop = 0;
+
+	if (Result::OKAY != stateFile->FindBlock(blockName))
+		return false;
+
+	stateFile->Read(&magic, sizeof(magic));
+	stateFile->Read(&offset, sizeof(offset));
+	stateFile->Read(&size, sizeof(size));
+	stateFile->Read(&pos, sizeof(pos));
+	stateFile->Read(&loop, sizeof(loop));
+
+	const bool valid = magic == kMpegActiveMagic && mpegROM != nullptr &&
+		offset >= 0 && size > 0 && (unsigned)offset + (unsigned)size <= kMpegRomSize;
+	if (DsbLoadDebugEnabled())
+		InfoLog("LoadDebug mpeg active: magic=%s offset=%d size=%d pos=%d loop=%u%s",
+			(magic == kMpegActiveMagic) ? "ok" : "bad", (int)offset, (int)size, (int)pos, (unsigned)loop,
+			valid ? " restored" : " ignored");
+	if (!valid)
+		return false;
+
+	MpegDec::SetMemory(mpegROM, (int)offset, (int)size, loop != 0);
+	MpegDec::SetPosition((int)pos);
+	return true;
+}
 
 /******************************************************************************
  Resampler
 
- MPEG Layer 2 audio can be 32, 44.1, or 48 KHz. Here, an up-sampling algorithm
- is provided, which should work for any frequency less than 44.1 KHz and an
- output frequency of 44.1 KHz. Down-sampling is not yet implemented, but would
- work in a similar fashion. The chief difference is that the input index would
- sometimes advance by more than one for a single output sample and the
- fractions, nFrac and pFrac, would sometimes exceed 1.0.
+ MPEG Layer II audio in Model 3 is 32 KHz; the emulator's output clock is 44.1 KHz. The converter is
+ a Kaiser-windowed sinc evaluated through a polyphase table. 32000:44100 reduces to 320:441, so 441
+ phases reproduce the ratio exactly and the position advances in integers. The old 24.8 fixed point
+ step truncated 0.7256 to 0.7227, which played every DSB track 0.41% (about 7 cents) flat.
 
- Up-Sampling Description
- -----------------------
+ Frame continuity works as before: each frame decodes MpegSamplesForFrame() samples into a buffer
+ whose first `retainedSamples` entries are the tail of the previous frame, and the converter returns
+ how many input samples to keep for the next one. The difference is that the filter needs k_half
+ samples of look-ahead, which is why MpegSamplesForFrame() now adds DSB_RESAMPLER_TAPS instead of the
+ old two samples. Without it, the end of every frame would be convolved with zeros.
 
- Linear interpolation is used to up-sample. Not as accurate as the Shannon
- reconstruction equation but it seems to work quite well.
-
- 1. Linear Interpolation
-
- Input samples for a given frame (here, this means 1/60Hz, not to be confused
- with an MPEG frame, which is shorter) are numbered 0 ... L-1 (L samples in
- total). Output samples are 0 ... M-1.
-
- For two adjacent input samples at times p ("previous") and n ("next"), in[p]
- and in[n], and output out[t] at time t, linear interpolation yields:
-
- 		out[t] = (n-t)/(n-p) * in[p] + (t-p)/(n-p) * in[n]
-
- Note that (n-p) = 1/fin (fin being the input sampling frequency).
-
- Let pFrac = (n-t)/(n-p) and nFrac = (t-p)/(n-p). As t moves from p to n, pFrac
- moves from 1 to 0 and nFrac from 0 to 1, as we expect.
-
- If we proceed one output sample at a time, we must add the time difference
- between output samples, 1/fout, to t. Call this delta_t. If we divide delta_t
- by (n-p), we can add it directly to nFrac and subtract from pFrac. Therefore:
-
- 	delta = (1/fout)/(n-p) = fin/fout
-
- What happens when nFrac exceeds 1.0 or pFrac goes below 0.0? That can't
- be allowed to happen -- it means that we've actually moved along the line into
- the region between the next set of samples. We use pFrac < 0 as the condition
- to update the input samples.
-
- It so happens that when fin < fout, pFrac and nFrac will never exceed 1.0. So
- there is no need to check or mask the fixed point values when using them to
- interpolate samples.
-
- 2. Input Buffer Overflows
-
- For some low sampling rates, particularly those that are a factor of 2 or 4
- smaller, it is possible that the very last sample or two needed from the input
- stream will be beyond the end. Fetching two extra samples (which can introduce
- an update lag of two samples -- imperceptible and inconsequential) fixes this,
- and so we do it.
-
- 3. Continuity Between Frames
-
- The very last output sample will typically sit somewhere between two input
- samples. It is wrong to start the next frame by assuming everything is lined
- up again. The first sample of the next frame will often have to be interpol-
- ated with the last sample of the previous frame. To facilitate this, we check
- to see how many input samples remain unprocessed when up-sampling is finished,
- and then copy those to the beginning of the buffer. We then return the number
- of samples so that the buffer update function will know to skip them.
-
- We also must maintain the state of pFrac and nFrac to resume interpolation
- correctly. Therefore, these variables are persistent.
-
- 4. Fixed Point Arithmetic
-
- Fixed point arithmetic is used to track fractions. For such numbers, the low
- 8 bits represent a fraction (0x100 would be 1.0, 0x080 would be 0.5, etc.)
- and the upper bits are the integral portion.
+ The output is float in the same S16-scaled domain the SCSP uses, so the two boards are summed by
+ addition in SoundBoard without a conversion or a clamp in between. Volume is applied here.
 ******************************************************************************/
+
+namespace
+{
+	// Modified Bessel function of the first kind, order 0, for the Kaiser window.
+	double BesselI0(double x)
+	{
+		const double halfX = x * 0.5;
+		double term = 1.0;
+		double sum = 1.0;
+		for (int k = 1; k < 32; ++k)
+		{
+			term *= (halfX / k) * (halfX / k);
+			sum += term;
+			if (term < sum * 1e-12)
+				break;
+		}
+		return sum;
+	}
+}
 
 void CDSBResampler::Reset(void)
 {
-	// Initial state of fractions (24.8 fixed point)
-	nFrac = 0<<8;	// fraction of next sample to use (0->1.0 as x moves p->n)
-	pFrac = 1<<8;	// previous sample (1.0->0 as x moves p->n)
+	m_inPos = 0;
+	m_phase = 0;
+	for (int i = 0; i < k_half; ++i)
+	{
+		m_histL[i] = 0.0f;
+		m_histR[i] = 0.0f;
+	}
 }
 
-// Mixes audio and returns number of samples copied back to start of buffer (ie. offset at which new samples should be written)
+void CDSBResampler::Prepare(int outRate, int inRate)
+{
+	if (outRate == m_outRate && inRate == m_inRate && !m_coeff.empty())
+		return;
+
+	m_outRate = outRate;
+	m_inRate = inRate;
+
+	// Reduce the ratio so the phases and the integer advance are as small as possible: 32000:44100
+	// becomes 320:441, i.e. 441 phases and an advance of 320/441 input samples per output.
+	const int divisor = std::gcd(inRate, outRate);
+	m_phases = outRate / divisor;
+	m_step = inRate / divisor;
+	m_coeff.assign((size_t)m_phases * k_taps, 0.0f);
+
+	if (outRate == inRate)
+	{
+		// Unity ratio: one phase, and a kernel that copies the sample under the output instant.
+		m_coeff[k_half - 1] = 1.0f;
+		return;
+	}
+
+	// Cut-off at the lower of the two Nyquist frequencies (so down-sampling cannot alias), backed
+	// off slightly to give the window room for a transition band instead of ringing at the edge.
+	constexpr double kPi = 3.14159265358979323846;
+	const double fc = std::min(1.0, (double)outRate / (double)inRate) * 0.96;
+	const double beta = 8.0;
+	const double windowNorm = BesselI0(beta);
+
+	for (int p = 0; p < m_phases; ++p)
+	{
+		const double frac = (double)p / (double)m_phases;
+		float *h = &m_coeff[(size_t)p * k_taps];
+		double sum = 0.0;
+
+		for (int k = 0; k < k_taps; ++k)
+		{
+			// Tap k reads input m_inPos - k_half + 1 + k, so this is its distance from the output
+			// instant in input samples.
+			const double d = (double)(k - k_half + 1) - frac;
+			const double x = d * fc;
+			const double sinc = (std::abs(x) < 1e-9) ? 1.0 : std::sin(kPi * x) / (kPi * x);
+			const double r = d / (double)k_half;
+			const double window = (std::abs(r) >= 1.0)
+				? 0.0
+				: BesselI0(beta * std::sqrt(1.0 - r * r)) / windowNorm;
+
+			h[k] = (float)(sinc * window);
+			sum += h[k];
+		}
+
+		// Unity DC gain for every phase, so the level does not modulate at the phase rate.
+		if (std::abs(sum) > 1e-12)
+		{
+			const float scale = (float)(1.0 / sum);
+			for (int k = 0; k < k_taps; ++k)
+				h[k] *= scale;
+		}
+	}
+}
+
 int CDSBResampler::UpSampleAndMix(float *outL, float *outR, INT16 *inL, INT16 *inR, UINT8 volumeL, UINT8 volumeR, int sizeOut, int sizeIn, int outRate, int inRate)
 {
-	int 	delta = (inRate<<8)/outRate;	// (1/fout)/(1/fin)=fin/fout, 24.8 fixed point
-	int		outIdx = 0;
-	int		inIdx = 0;
-	float	v[2], musicVol;
+	Prepare(outRate, inRate);
 
 	// Obtain program volume settings
-	musicVol = (float)std::max(0,std::min(200,m_config["MusicVolume"].ValueAs<int>()));
-	musicVol = musicVol * (float) (1.0 / 100.0);
+	const float musicVol = (float)std::max(0, std::min(200, m_config["MusicVolume"].ValueAs<int>())) * (1.0f / 100.0f);
+	const float gainL = musicVol * (float)volumeL * (1.0f / 255.0f);
+	const float gainR = musicVol * (float)volumeR * (1.0f / 255.0f);
 
-	v[0] = musicVol * (float) volumeL * (float) (1.0 / (255.0*256.0)); // 256 is there to correct for fixed point interpolation below
-	v[1] = musicVol * (float) volumeR * (float) (1.0 / (255.0*256.0));
+	if (sizeOut <= 0 || sizeIn <= 0)
+		return sizeIn > 0 ? sizeIn : 0;
 
-	// Up-sample and mix!
-	while (outIdx < sizeOut)
+	for (int outIdx = 0; outIdx < sizeOut; ++outIdx)
 	{
-		// nFrac, pFrac will never exceed 1.0 (0x100) (only true if delta does not exceed 1)
-		INT32 leftSample  = (int)inL[inIdx]*pFrac+(int)inL[inIdx+1]*nFrac;	// left channel
-		INT32 rightSample = (int)inR[inIdx]*pFrac+(int)inR[inIdx+1]*nFrac;	// right channel
+		const int base = m_inPos - k_half + 1;
+		const float *h = &m_coeff[(size_t)m_phase * k_taps];
+		float left = 0.0f, right = 0.0f;
 
-		// Apply DSB volume+overall music volume setting, and mix into output
-		outL[outIdx] += (float)leftSample  * v[0];
-		outR[outIdx] += (float)rightSample * v[1];
-		outIdx++;
-
-		// Time step
-		pFrac -= delta;
-		nFrac += delta;
-
-		// Time to move to next samples?
-		if (pFrac <= 0)	// when pFrac becomes 0, advance samples, reset pFrac to 1
+		if (base >= 0 && base + k_taps <= sizeIn)
 		{
-			pFrac += (1<<8);
-			nFrac -= (1<<8);
-			inIdx++;	// advance samples (for upsampling only; downsampling may advance by more than one -- add delta every loop iteration)
+			const INT16 *srcL = inL + base;
+			const INT16 *srcR = inR + base;
+			for (int k = 0; k < k_taps; ++k)
+			{
+				left += h[k] * (float)srcL[k];
+				right += h[k] * (float)srcR[k];
+			}
+		}
+		else
+		{
+			for (int k = 0; k < k_taps; ++k)
+			{
+				const int idx = base + k;
+				float sampleL, sampleR;
+				if (idx < 0)
+				{
+					// Start of a stream (or of a block shorter than the filter): the samples before
+					// the buffer are the ones kept in the history.
+					sampleL = (idx >= -k_half) ? m_histL[k_half + idx] : 0.0f;
+					sampleR = (idx >= -k_half) ? m_histR[k_half + idx] : 0.0f;
+				}
+				else if (idx >= sizeIn)
+				{
+					// Only reachable if a caller under-feeds the block; MpegSamplesForFrame()
+					// guarantees the look-ahead. Hold the last sample rather than read past the end.
+					sampleL = (float)inL[sizeIn - 1];
+					sampleR = (float)inR[sizeIn - 1];
+				}
+				else
+				{
+					sampleL = (float)inL[idx];
+					sampleR = (float)inR[idx];
+				}
+
+				left += h[k] * sampleL;
+				right += h[k] * sampleR;
+			}
+		}
+
+		outL[outIdx] += left * gainL;
+		outR[outIdx] += right * gainR;
+
+		// Advance exactly inRate/outRate input samples, without a floating point position.
+		m_phase += m_step;
+		if (m_phase >= m_phases)
+		{
+			m_inPos += m_phase / m_phases;
+			m_phase %= m_phases;
 		}
 	}
 
-	// Copy remaining "active" input samples to start of buffer
-	int i = 0;
-	int j = inIdx;
-	while (j < sizeIn)
+	// Everything before keepFrom has been consumed; everything from there on is needed by the next
+	// output, including the right half of its filter.
+	int keepFrom = m_inPos - k_half + 1;
+	if (keepFrom < 0)
+		keepFrom = 0;
+	if (keepFrom > sizeIn)
+		keepFrom = sizeIn;
+
+	// Fold the samples preceding the retained block into the history before moving it. Inputs may
+	// alias (Sega Rally 2 feeds the same mono buffer to both sides), so compute both channels first.
+	float newHistL[k_half], newHistR[k_half];
+	for (int k = 0; k < k_half; ++k)
 	{
-		inL[i] = inL[j];
-		inR[i] = inR[j];
-		i++;
-		j++;
+		const int idx = keepFrom - k_half + k;
+		if (idx < 0)
+		{
+			newHistL[k] = (idx >= -k_half) ? m_histL[k_half + idx] : 0.0f;
+			newHistR[k] = (idx >= -k_half) ? m_histR[k_half + idx] : 0.0f;
+		}
+		else
+		{
+			newHistL[k] = (float)inL[idx];
+			newHistR[k] = (float)inR[idx];
+		}
 	}
-	return i;	// first free position in input buffer to copy next MPEG update to
+	for (int k = 0; k < k_half; ++k)
+	{
+		m_histL[k] = newHistL[k];
+		m_histR[k] = newHistR[k];
+	}
+
+	const int retained = sizeIn - keepFrom;
+	for (int i = 0; i < retained; ++i)
+	{
+		inL[i] = inL[keepFrom + i];
+		inR[i] = inR[keepFrom + i];
+	}
+	m_inPos -= keepFrom;
+
+	return retained;
 }
 
 
@@ -414,8 +576,13 @@ void CDSB1::RunFrame(float *audioL, float *audioR, int numSamples)
 	}
 
 	int		cycles;
+	// The DSB1 CPU is 4 MHz, and one emulated frame is 44100/numSamples of a second.
+	// Deriving the budget from numSamples (as DSB2 already does) keeps it correct at
+	// the arcade's 57.524 Hz; the old 4000000/60 assumed a 60 Hz frame and left the
+	// 68K about 4.1% short of its real work.
+	const int framePeriod = (int)((4000000.0 * (double)numSamples) / 44100.0);
 	// While FIFO not empty, fire interrupts, run for up to one frame
-	for (cycles = (4000000/60); (cycles > 0) && (fifoIdxR != fifoIdxW);  )
+	for (cycles = framePeriod; (cycles > 0) && (fifoIdxR != fifoIdxW);  )
 	{
 		Z80.SetINT(true);	// fire an IRQ to indicate pending command
 		//printf("Z80 INT fired\n");
@@ -462,8 +629,13 @@ void CDSB1::SaveState(CBlockFile *StateFile)
 
 	StateFile->NewBlock("DSB1", __FILE__);
 
-	// MPEG playback state
-	isPlaying	= (UINT8)MpegDec::IsLoaded();
+	// MPEG playback state. A legacy reader rebuilds the decoder from the two ranges below
+	// whenever this flag is set, so report "not playing" when those fields are the board's
+	// 0x80008000 sentinel even though the decoder is running: such a reader would otherwise
+	// restore an invalid window and hang. The DSB1 MPEG block carries the real window.
+	const bool legacyRangeValid = mpegROM != nullptr &&
+		usingMPEGStart < usingMPEGEnd && usingMPEGEnd <= kMpegRomSize;
+	isPlaying	= (UINT8)(MpegDec::IsLoaded() && legacyRangeValid);
 	playOffset	= (UINT32)MpegDec::GetPosition();
 	endOffset	= 0;
 
@@ -492,6 +664,9 @@ void CDSB1::SaveState(CBlockFile *StateFile)
 
 	// Z80 CPU state
 	Z80.SaveState(StateFile, "DSB1 Z80");
+
+	// The window the decoder is actually playing (see SaveMpegActiveWindow).
+	SaveMpegActiveWindow(StateFile, "DSB1 MPEG", mpegROM);
 }
 
 void CDSB1::LoadState(CBlockFile *StateFile)
@@ -528,19 +703,47 @@ void CDSB1::LoadState(CBlockFile *StateFile)
 
 	Z80.LoadState(StateFile, "DSB1 Z80");
 
-	// Restart MPEG audio at the appropriate position
-	if (isPlaying)
+	if (DsbLoadDebugEnabled())
 	{
-		MpegDec::SetMemory(mpegROM, usingMPEGStart, usingMPEGEnd - usingMPEGStart, false);
-
-		if (usingLoopEnd != 0) {	// only if looping was actually enabled
-			MpegDec::UpdateMemory(mpegROM, usingLoopStart, usingLoopEnd, true);
-		}
-
-		MpegDec::SetPosition(playOffset);
+		InfoLog("LoadDebug dsb1 raw: loaded=%u start=%u end=%u loopStart=%u loopEnd=%u offset=%u",
+			(unsigned)isPlaying, (unsigned)usingMPEGStart, (unsigned)usingMPEGEnd,
+			(unsigned)usingLoopStart, (unsigned)usingLoopEnd, (unsigned)playOffset);
+		// The board registers are logged too: a sentinel in the shadows above is only suspicious
+		// when the live registers and the decoder disagree with them.
+		InfoLog("LoadDebug dsb1 regs: mpegStart=%u mpegEnd=%u mpegState=%u loopStart=%u loopEnd=%u status=%u latch=%u",
+			(unsigned)mpegStart, (unsigned)mpegEnd, (unsigned)mpegState,
+			(unsigned)loopStart, (unsigned)loopEnd, (unsigned)status, (unsigned)cmdLatch);
 	}
-	else {
+
+	// Restart MPEG audio. The companion block is authoritative when present: the register
+	// shadows above can be a sentinel while a track is still playing. Fall back to the legacy
+	// fields for states written before that block existed. Both are external input: usingMPEGStart/End
+	// are absolute offsets into the 16 MB MPEG ROM, and usingLoopStart is an absolute offset while
+	// usingLoopEnd is already a length (see the assignments in IOWrite8). Never hand an inverted or
+	// out-of-range window to MpegDec; a negative size used to reach DecodeAudio() and spin there.
+	if (LoadMpegActiveWindow(StateFile, "DSB1 MPEG", mpegROM))
+		return;
+
+	const bool mainRangeValid = mpegROM != nullptr &&
+		usingMPEGStart < usingMPEGEnd && usingMPEGEnd <= kMpegRomSize;
+	const bool loopRangeValid = usingLoopStart < kMpegRomSize && usingLoopEnd > 0 &&
+		usingLoopEnd <= kMpegRomSize - usingLoopStart;
+
+	if (!isPlaying || !mainRangeValid)
+	{
 		MpegDec::Stop();
+	}
+	else
+	{
+		MpegDec::SetMemory(mpegROM, (int)usingMPEGStart, (int)(usingMPEGEnd - usingMPEGStart), false);
+
+		if (loopRangeValid)
+			MpegDec::UpdateMemory(mpegROM, (int)usingLoopStart, (int)usingLoopEnd, true);
+
+		const unsigned activeSize = loopRangeValid ? usingLoopEnd : (usingMPEGEnd - usingMPEGStart);
+		if (playOffset >= activeSize)
+			playOffset = 0;
+		MpegDec::SetPosition((int)playOffset);
 	}
 }
 
@@ -755,12 +958,16 @@ void CDSB2::WriteMPEGFIFO(UINT8 byte)
 			mpegEnd &= 0xFFFF00;
 			mpegEnd |= (byte);
 
-			stereo = StereoMode::Stereo;
+			// Do NOT reset the output routing here. Sega Rally 2 sets 0xA0/0xB1 to pick one of the
+			// two mono programmes and then updates the end/loop address; resetting to stereo on
+			// every 0x24 write made both programmes play at once. Resetting is done in Reset() and
+			// by an explicit 0x00 argument to 0xA0 or 0xB1.
 			mpegState = ST_IDLE;
 			break;
 
 		case ST_GOTA0:
-			stereo = (byte != 0x00) ? StereoMode::MonoLeft : StereoMode::Stereo;
+			// Channel 0. Its samples come out of the decoder's right buffer (see DSB.h).
+			stereo = (byte != 0x00) ? StereoMode::Channel0 : StereoMode::Stereo;
 			mpegState = ST_IDLE;
 			break;
 
@@ -780,7 +987,8 @@ void CDSB2::WriteMPEGFIFO(UINT8 byte)
 			mpegState = ST_IDLE;
 			break;
 		case ST_GOTB1:
-			stereo = (byte != 0x00) ? StereoMode::MonoRight : StereoMode::Stereo;
+			// Channel 1. Its samples come out of the decoder's left buffer (see DSB.h).
+			stereo = (byte != 0x00) ? StereoMode::Channel1 : StereoMode::Stereo;
 			mpegState = ST_IDLE;
 			break;
 		case ST_GOTB4:
@@ -1040,15 +1248,17 @@ void CDSB2::RunFrame(float *audioL, float *audioR, int numSamples)
       volL = volume[0];
       volR = volume[1];
       break;
-    case StereoMode::MonoLeft:
-      leftChannelSource = mpegL;
-      rightChannelSource = mpegL;
+    case StereoMode::Channel0:
+      // One programme occupies the right half of the stereo stream; put it on both outputs.
+      // volume[0] is the level the game sends for this channel (command 0xB0).
+      leftChannelSource = mpegR;
+      rightChannelSource = mpegR;
       volL = volume[0];
       volR = volume[0];
       break;
-    case StereoMode::MonoRight:
-      leftChannelSource = mpegR;
-      rightChannelSource = mpegR;
+    case StereoMode::Channel1:
+      leftChannelSource = mpegL;
+      rightChannelSource = mpegL;
       volL = volume[1];
       volR = volume[1];
       break;
@@ -1094,8 +1304,11 @@ void CDSB2::SaveState(CBlockFile *StateFile)
 
 	StateFile->NewBlock("DSB2", __FILE__);
 
-	// MPEG playback state
-	isPlaying	= (UINT8)MpegDec::IsLoaded();
+	// MPEG playback state. Same reasoning as CDSB1::SaveState(): the legacy ranges can be a sentinel
+	// while a track is playing, so only claim them for a legacy reader when they are usable.
+	const bool legacyRangeValid = mpegROM != nullptr &&
+		usingMPEGStart < usingMPEGEnd && usingMPEGEnd <= kMpegRomSize;
+	isPlaying	= (UINT8)(MpegDec::IsLoaded() && legacyRangeValid);
 	playOffset	= (UINT32)MpegDec::GetPosition();
 	endOffset	= 0;
 
@@ -1123,6 +1336,9 @@ void CDSB2::SaveState(CBlockFile *StateFile)
 	// 68K CPU state
 	M68KSetContext(&M68K);
 	M68KSaveState(StateFile, "DSB2 68K");
+
+	// The window the decoder is actually playing (see SaveMpegActiveWindow).
+	SaveMpegActiveWindow(StateFile, "DSB2 MPEG", mpegROM);
 
 	//DEBUG
 	//printf("DSB2 PC=%06X\n", M68KGetPC());
@@ -1171,19 +1387,36 @@ void CDSB2::LoadState(CBlockFile *StateFile)
 	m_cyclesElapsedThisFrame = 0;
 	m_nextTimerInterruptCycles = k_timerPeriod;
 
-	// Restart MPEG audio at the appropriate position
-	if (isPlaying)
+	if (DsbLoadDebugEnabled())
+		InfoLog("LoadDebug dsb2 raw: loaded=%u start=%u end=%u loopStart=%u loopEnd=%u offset=%u",
+			(unsigned)isPlaying, (unsigned)usingMPEGStart, (unsigned)usingMPEGEnd,
+			(unsigned)usingLoopStart, (unsigned)usingLoopEnd, (unsigned)playOffset);
+
+	// Restart MPEG audio; the companion block wins over the register shadows when present. Same
+	// validation as CDSB1::LoadState().
+	if (LoadMpegActiveWindow(StateFile, "DSB2 MPEG", mpegROM))
+		return;
+
+	const bool mainRangeValid = mpegROM != nullptr &&
+		usingMPEGStart < usingMPEGEnd && usingMPEGEnd <= kMpegRomSize;
+	const bool loopRangeValid = usingLoopStart < kMpegRomSize && usingLoopEnd > 0 &&
+		usingLoopEnd <= kMpegRomSize - usingLoopStart;
+
+	if (!isPlaying || !mainRangeValid)
 	{
-		MpegDec::SetMemory(mpegROM, usingMPEGStart, usingMPEGEnd - usingMPEGStart, false);
-
-		if (usingLoopEnd != 0) {		// only if looping was actually enabled
-			MpegDec::UpdateMemory(mpegROM, usingLoopStart, usingLoopEnd, true);
-		}
-
-		MpegDec::SetPosition(playOffset);
-	}
-	else {
 		MpegDec::Stop();
+	}
+	else
+	{
+		MpegDec::SetMemory(mpegROM, (int)usingMPEGStart, (int)(usingMPEGEnd - usingMPEGStart), false);
+
+		if (loopRangeValid)
+			MpegDec::UpdateMemory(mpegROM, (int)usingLoopStart, (int)usingLoopEnd, true);
+
+		const unsigned activeSize = loopRangeValid ? usingLoopEnd : (usingMPEGEnd - usingMPEGStart);
+		if (playOffset >= activeSize)
+			playOffset = 0;
+		MpegDec::SetPosition((int)playOffset);
 	}
 
 	//DEBUG

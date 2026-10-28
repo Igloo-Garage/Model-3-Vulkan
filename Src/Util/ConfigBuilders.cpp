@@ -316,6 +316,55 @@ namespace Util
       }
     }
 
+    /*
+     * Removes settings a build cannot use.
+     *
+     * SetEmpty() rather than a node deletion: the config model has no Remove(),
+     * and an empty leaf is already the "not set" state everywhere that matters.
+     * CreateControls() iterates leaves with a value, and WriteSection() skips
+     * empty ones, so the key disappears from both the interface and the file.
+     *
+     * Child sections are visited as well.  A game-specific section can repeat
+     * any global key, and RunGameSession() merges that section over the global
+     * one, so cleaning only the top level would let the key come straight back.
+     */
+    void StripSettings(Node &section, const std::vector<std::string> &keys)
+    {
+      for (const std::string &key : keys)
+        section.SetEmpty(key);
+
+      for (auto it = section.begin(); it != section.end(); ++it)
+        if (it->HasChildren())
+          StripSettings(*it, keys);
+    }
+
+    /*
+     * The Vulkan renderer's settings.
+     *
+     * Bezel* and Post* are Vulkan2D's compositor and post-processing chain; MSAA is
+     * created with the Vulkan render targets; InternalResolution decides the size of those
+     * render targets.  Supersampling and CRTcolors are not
+     * listed: those are the OpenGL anti-aliasing and colour paths and still apply.
+     *
+     * A build that has no Vulkan renderer calls this on every configuration file it
+     * reads.  MergeINISections() keeps unknown keys from the file, so without it an
+     * existing Supermodel.ini would keep these keys forever, and a game-specific
+     * section would merge them back into the run-time configuration.
+     */
+    void StripRetiredVulkanSettings(Node &section)
+    {
+      static const std::vector<std::string> retired = {
+        "Vulkan3DEngine", "VkValidation", "VulkanDevice",
+        "MSAA", "PostFXAA", "PostCRT", "PostScanlines", "PostScanlineIntensity",
+        "PostMaskType", "PostMaskScale", "PostMaskIntensity",
+        "PostGlow", "PostGlowLevels", "PostGlowThreshold", "PostGain",
+        "InternalResolution",
+        "BezelMode", "BezelImage", "BezelBrightness",
+        "LoadHDTextures", "DumpHDTextures",
+      };
+      StripSettings(section, retired);
+    }
+
     static void WriteSection(std::ofstream &file, const Node &section)
     {
       file << "[ " << section.Key() << " ]" << std::endl;

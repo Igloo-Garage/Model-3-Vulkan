@@ -1,0 +1,39 @@
+#version 450
+
+// Line-of-sight depth readback for the multisampled path.
+//
+// A multisampled depth image cannot be copied to a buffer: Vulkan only permits a copy from a
+// single-sampled image, and D32_SFLOAT has no resolve operation at all. CVulkan3D::CopyLos()
+// therefore runs this single-invocation dispatch instead. It fetches the depth at the exact LOS
+// texel from every sample and writes the nearest one to the host-visible buffer the 1x path also
+// uses, so GetLosValue() keeps its meaning at 2x, 4x and 8x MSAA.
+//
+// The largest sample is chosen rather than the average. The depth buffer is cleared to zero and
+// tested with GREATER (the same convention as New3D), so a larger value is nearer geometry. On a
+// pixel that an edge only partially covers, averaging would report a depth between the surface and
+// "nothing there" - which is not a depth the hardware ever produced - whereas max() answers the
+// question the register asks: is there geometry at this pixel, and how near is it.
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2DMS uDepth;
+
+layout(set = 0, binding = 1, std430) writeonly buffer LosResult
+{
+	float values[];
+} result;
+
+layout(push_constant) uniform PushConstants
+{
+	ivec2 pos;      // Texel to read, in depth-image coordinates (origin top-left).
+	uint  index;    // Slot in the result buffer: frame slot * 4 + viewport priority.
+	uint  samples;  // Sample count of the depth image.
+} pc;
+
+void main()
+{
+	float depth = 0.0;
+	for (uint i = 0; i < pc.samples; ++i)
+		depth = max(depth, texelFetch(uDepth, pc.pos, int(i)).r);
+	result.values[pc.index] = depth;
+}

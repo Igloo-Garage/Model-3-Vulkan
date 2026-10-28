@@ -32,10 +32,26 @@
 
 namespace FileSystemPath
 {
-    enum PathType { Analysis, Config, Log, NVRAM, Saves, Screenshots, Assets }; // Filesystem path types
+    enum PathType { Analysis, Config, Cache, Log, NVRAM, Saves, SavesLegacy, Screenshots, Assets }; // Filesystem path types
     bool PathExists(std::string fileSystemPath); // Checks if a directory exists (returns true if exists, false if it doesn't)
     int MakeDir(std::string dir); // Create a directory
     std::string GetPath(PathType pathType);  // Generates a path to be used by Supermodel files
+
+    /*
+     * Where this executable writes save states.
+     *
+     * The OpenGL-only build writes raw .st block files and cannot read the Vulkan build's .zst
+     * containers, so it keeps them in Saves_Legacy/. The Vulkan build (and the dual build) use
+     * Saves/, which is also where old .st saves live and can still be loaded.
+     */
+    inline PathType SavePathType()
+    {
+#if defined(SUPERMODEL_OPENGL_ONLY)
+        return SavesLegacy;
+#else
+        return Saves;
+#endif
+    }
 
     /*
      * Anchors a relative path to the installation directory, so the file it names lands in the
@@ -61,11 +77,11 @@ namespace FileSystemPath
     /*
      * Directory a fresh installation should look in for ROM sets.
      *
-     * The release archives ship an empty "ROMs" folder next to the executable. On macOS, where
-     * the archive is a plain folder the user can put anywhere, the default is that folder and it
-     * is created when missing. Windows keeps the historical Downloads location, because that is
-     * where a downloaded romset usually still is. An empty result means the platform cannot name
-     * a sensible default.
+     * The release archives ship an empty "roms" folder next to the executable. macOS and Linux
+     * use that folder as the default (creating it when missing); Windows keeps the historical
+     * Downloads location, but the settings window switches to a portable roms/romset folder next
+     * to the executable when one exists. An empty result means the platform cannot name a
+     * sensible default.
      */
     std::string GetDefaultRomPath();
 }

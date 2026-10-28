@@ -1,0 +1,114 @@
+name: Build Model 3-Vulkan (Linux / macOS)
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake ninja-build clang zlib1g-dev libwebp-dev unzip curl \
+            libudev-dev \
+            libx11-dev libxext-dev libxrandr-dev libxi-dev libxcursor-dev \
+            libxfixes-dev libwayland-dev libxkbcommon-dev libegl1-mesa-dev \
+            libasound2-dev libpulse-dev
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '11.0.x'
+          dotnet-quality: 'preview'
+
+      - name: Fetch third-party sources
+        run: bash Scripts/fetch-cmake-deps.sh
+
+      - name: Configure
+        run: |
+          cmake -S . -B build-cmake -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DUSE_SDL2=OFF -DUSE_SDL3=ON -DSUPERMODEL_SDL3_PURE_VULKAN=ON
+
+      - name: Build
+        run: cmake --build build-cmake --target Model3-Vulkan --parallel
+
+      - name: Publish HostCore
+        run: cmake --build build-cmake --target hostcore
+
+      - name: Package
+        run: bash Scripts/package-cmake.sh Linux
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Model3-Vulkan-Linux
+          path: Model3-Vulkan.v*.for.Linux.tar.gz
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: brew install ninja
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '11.0.x'
+          dotnet-quality: 'preview'
+
+      - name: Fetch third-party sources
+        run: bash Scripts/fetch-cmake-deps.sh
+
+      - name: Fetch MoltenVK
+        run: |
+          set -euo pipefail
+          mkdir -p Frameworks
+          curl -fsSL --retry 5 --retry-delay 2 \
+            -o /tmp/MoltenVK-macos.tar \
+            https://github.com/KhronosGroup/MoltenVK/releases/download/v1.3.0/MoltenVK-macos.tar
+          echo "57b4184ded521b08a63e3642552ebef8b9e98c2f0bcffa49bd93bbe1301c173d  /tmp/MoltenVK-macos.tar" \
+            | shasum -a 256 -c -
+          tar -xf /tmp/MoltenVK-macos.tar -C /tmp
+          cp /tmp/MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib Frameworks/
+          cp /tmp/MoltenVK/MoltenVK/dynamic/dylib/macOS/MoltenVK_icd.json Frameworks/
+          cp /tmp/MoltenVK/LICENSE Frameworks/LICENSE-MoltenVK.txt
+          file Frameworks/libMoltenVK.dylib
+          lipo -info Frameworks/libMoltenVK.dylib
+
+      - name: Configure
+        run: |
+          cmake -S . -B build-cmake -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
+            -DUSE_SDL2=OFF -DUSE_SDL3=ON -DSUPERMODEL_SDL3_PURE_VULKAN=ON
+
+      - name: Build
+        run: cmake --build build-cmake --target Model3-Vulkan --parallel
+
+      - name: Publish universal HostCore
+        run: |
+          set -euo pipefail
+          dotnet publish HostCore/Model3VulkanHostCore.csproj -c Release -r osx-x64 -o HostCore/publish-x64
+          dotnet publish HostCore/Model3VulkanHostCore.csproj -c Release -r osx-arm64 -o HostCore/publish-arm64
+          lipo -create \
+            -output build-cmake/bin/libModel3VulkanHostCore.dylib \
+            HostCore/publish-x64/libModel3VulkanHostCore.dylib \
+            HostCore/publish-arm64/libModel3VulkanHostCore.dylib
+          file build-cmake/bin/libModel3VulkanHostCore.dylib
+          lipo -info build-cmake/bin/libModel3VulkanHostCore.dylib
+
+      - name: Package
+        run: bash Scripts/package-cmake.sh macOS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Model3-Vulkan-macOS
+          path: Model3-Vulkan.v*.for.macOS.tar.gz
+          if-no-files-found: error

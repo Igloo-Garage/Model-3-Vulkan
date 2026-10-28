@@ -16,11 +16,18 @@ $ErrorActionPreference = 'Stop'
 $shaderDir = Join-Path $PSScriptRoot '..\Src\Graphics\Vulkan3D\Shaders'
 
 $sources = @(
-    'real3d.vert', 'real3d.frag',
+    'real3d.vert', 'real3d.frag', 'real3d_oit.frag',
+    'oit_resolve.vert', 'oit_resolve.frag',
+    'scene_composite.vert', 'scene_composite.frag', 'scene_composite_ms.frag',
+    'scene_composite.glsl',
+    'real3d_common.glsl',
     'composite.vert', 'composite.frag',
     'texdecode.comp',
+    'los.comp',
     'fog.vert', 'fog.frag',
-    'post.frag'
+    'post.frag',
+    'crosshair.vert', 'crosshair.frag',
+    'border.vert', 'border.frag'
 )
 
 $stale = @()
@@ -28,7 +35,14 @@ $stale = @()
 foreach ($name in $sources)
 {
     $source = Join-Path $shaderDir $name
-    $header = Join-Path $shaderDir (($name -replace '\.', '_') + '.spv.h')
+    # real3d_common.glsl is #included by the two scene shaders rather than compiled on its own,
+    # so it has no header of its own; editing it has to invalidate both of their headers.
+    $headerNames = if ($name -eq 'real3d_common.glsl')
+        { @('real3d_frag.spv.h', 'real3d_oit_frag.spv.h') }
+    elseif ($name -eq 'scene_composite.glsl')
+        { @('scene_composite_frag.spv.h', 'scene_composite_ms_frag.spv.h') }
+    else
+        { @(($name -replace '\.', '_') + '.spv.h') }
 
     if (-not (Test-Path $source))
     {
@@ -36,15 +50,20 @@ foreach ($name in $sources)
         exit 1
     }
 
-    if (-not (Test-Path $header))
+    foreach ($headerName in $headerNames)
     {
-        $stale += "$name (no compiled header)"
-        continue
-    }
+        $header = Join-Path $shaderDir $headerName
 
-    if ((Get-Item $source).LastWriteTime -gt (Get-Item $header).LastWriteTime)
-    {
-        $stale += "$name (edited $((Get-Item $source).LastWriteTime.ToString('MM-dd HH:mm')), compiled $((Get-Item $header).LastWriteTime.ToString('MM-dd HH:mm')))"
+        if (-not (Test-Path $header))
+        {
+            $stale += "$name (no compiled header)"
+            continue
+        }
+
+        if ((Get-Item $source).LastWriteTime -gt (Get-Item $header).LastWriteTime)
+        {
+            $stale += "$name (edited $((Get-Item $source).LastWriteTime.ToString('MM-dd HH:mm')), compiled $((Get-Item $header).LastWriteTime.ToString('MM-dd HH:mm')))"
+        }
     }
 }
 

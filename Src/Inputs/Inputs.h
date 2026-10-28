@@ -51,6 +51,21 @@ private:
   std::vector<std::shared_ptr<CInput>> m_inputs;
 
   /*
+   * Steering axis smoothing: 0 = off, 1 = light, 2 = medium, 3 = strong.
+   *
+   * The arcade cabinet has a 270-degree wheel with physical damping; a thumbstick is a step input
+   * and the driving games' chase cameras react to the first derivative of the steering value, so a
+   * short flick shows up as a one-frame camera snap. The filter runs once per emulated frame in
+   * PollGameInputsLate(), after the raw axis has been sampled and before the CPU sees it.
+   */
+  int m_gamepadSteeringSmoothing = 0;
+  bool m_steeringFilterValid = false;
+  double m_steeringFiltered = 0.0;
+  bool m_steeringProbe = false;
+  UINT64 m_steeringProbeFrame = 0;
+  void FilterSteering();
+
+  /*
    * Adds a switch input (eg button) to this collection.
    */ 
   std::shared_ptr<CSwitchInput> AddSwitchInput(const char *id, const char *label, unsigned gameFlags, const char *defaultMapping,
@@ -111,6 +126,13 @@ public:
   // Shows and hides the statistics readout. Bound to the key above Tab (backquote), withheld from
   // game bindings the same way Tab is.
   std::shared_ptr<CSwitchInput> uiToggleStatsOsd;
+  // Switches presentation between the arcade rate (VRR 1x) and twice it (VRR 2x), for an A/B of
+  // smoothness without leaving the game. F8 is next to the volume keys and is not bound to anything.
+  std::shared_ptr<CSwitchInput> uiToggleVrr;
+  // Rescans the HD texture folder of the running game. F4: the function keys around it are already
+  // taken (F5-F7 save states, F8 VRR, F9-F12 volume), and a pack author replacing files while
+  // playing needs this without leaving the session.
+  std::shared_ptr<CSwitchInput> uiReloadHDTextures;
 #ifdef SUPERMODEL_DEBUGGER
   std::shared_ptr<CSwitchInput> uiEnterDebugger;
 #endif
@@ -296,6 +318,12 @@ public:
    * Adjusts input value ranges that differ from the defaults for a particular game.
    */
   void ApplyGameSpecificInputRanges(const Game &game);
+
+  /*
+   * Selects steering smoothing: 0 = off, 1 = light, 2 = medium, 3 = strong.
+   * Called from LoadFromConfig() and from the main loop so an in-game change is live.
+   */
+  void SetGamepadSteeringSmoothing(int preset);
   
   /*
    * Stores the current input mapping assignments to the given config object.
@@ -343,6 +371,29 @@ public:
    * First the input system is polled (CInputSystem.Poll()) and then each input is polled (CInput.Poll()).
    */
   bool Poll(const Game *game, unsigned dispX, unsigned dispY, unsigned dispW, unsigned dispH);
+
+  /*
+   * Re-samples the pointer as late as possible and re-polls the inputs that follow it.
+   *
+   * Called immediately before the frame is emulated. Poll() already ran, but everything between
+   * it and the frame boundary - building the in-game panel, recording the render commands - costs
+   * time that a light gun shows up as lag. Only the pointer-following axes are re-polled, so no
+   * button edge can be seen twice and no switch state can change; the panel being open still
+   * suppresses them exactly as Poll() does.
+   */
+  void PollPointerLate(const Game *game);
+
+  /*
+   * Re-samples every game input immediately before the emulation step.
+   *
+   * Poll() runs at the top of the frame, and everything between it and the step - building the
+   * in-game panel, recording the renderer's command lists - delays the values the emulated CPUs
+   * actually see. This refreshes the device state and re-polls the inputs the running game uses at
+   * the boundary, so a wheel or a pad is sampled as late as the frame allows. UI inputs are left
+   * alone: their edges belong to the top of the frame, where the panel and the hotkeys read them.
+   * While the panel is open nothing is re-polled, exactly as in Poll().
+   */
+  void PollGameInputsLate(const Game *game);
 
   /*
    * Prints the current values of the inputs for the given game, or all inputs if game is NULL, to stdout for debugging purposes.

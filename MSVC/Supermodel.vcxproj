@@ -21,6 +21,7 @@
   <PropertyGroup Label="Globals">
     <ProjectGuid>{B114BBD9-8AEA-4DAE-B367-A66A804CB3DD}</ProjectGuid>
     <RootNamespace>Supermodel</RootNamespace>
+    <TargetName>Supermodel-LegacyOG</TargetName>
     <Keyword>Win32Proj</Keyword>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
@@ -93,8 +94,8 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
       <Optimization>Disabled</Optimization>
-      <AdditionalIncludeDirectories>..\Src;..\Src\OSD;..\Src\OSD\SDL;..\Src\OSD\Windows;..\Libraries\zlib-1.3.1;..\Libraries\SDL2-2.30.11\include;..\Libraries\SDL2_net-2.4.0\include;$(DXSDK_DIR)\Include;..\Src\Pkgs;..\Libraries\Vulkan-Headers\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>SUPERMODEL_WIN32;INLINE=static __inline;_MBCS;_CRT_SECURE_NO_WARNINGS;GLEW_STATIC</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\Src;..\Src\OSD;..\Src\OSD\SDL;..\Src\OSD\Windows;..\Libraries\zlib-1.3.1;..\Libraries\SDL2-2.30.11\include;..\Libraries\SDL2_net-2.4.0\include;$(DXSDK_DIR)\Include;..\Src\Pkgs;..\Src\Pkgs\webp;..\Src\Pkgs\webp\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>SUPERMODEL_WIN32;SUPERMODEL_PLATFORM_SDL2;SUPERMODEL_OPENGL_ONLY;INLINE=static __inline;_MBCS;_CRT_SECURE_NO_WARNINGS;GLEW_STATIC</PreprocessorDefinitions>
       <MinimalRebuild>true</MinimalRebuild>
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
@@ -105,18 +106,13 @@
     </ClCompile>
     <Link>
       <AdditionalDependencies>opengl32.lib;glu32.lib;WbemUuid.lib;dinput8.lib;dxguid.lib;ws2_32.lib;iphlpapi.lib;setupapi.lib;cfgmgr32.lib;winmm.lib;imm32.lib;version.lib;psapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <OutputFile>$(OutDir)$(ProjectName).exe</OutputFile>
+      <OutputFile>$(OutDir)$(TargetName).exe</OutputFile>
       <AdditionalLibraryDirectories>$(DXSDK_DIR)\Lib\x86;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <!-- Windows, not Console: see the Release x64 configuration for the reasoning. -->
       <SubSystem>Windows</SubSystem>
       <TargetMachine>MachineX86</TargetMachine>
     </Link>
-    <PreBuildEvent>
-      <Command>powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(ProjectDir)..\Scripts\CheckShaderHeaders.ps1"
-if errorlevel 1 exit /b 1</Command>
-      <Message>Checking that the precompiled Vulkan shaders match their sources...</Message>
-    </PreBuildEvent>
     <PostBuildEvent>
       <Command>if not exist "$(TargetDir)Config" mkdir "$(TargetDir)Config"
 if not exist "$(TargetDir)NVRAM" mkdir "$(TargetDir)NVRAM"
@@ -136,8 +132,8 @@ xcopy /D /Y "$(ProjectDir)..\Assets\*" "$(TargetDir)Assets"</Command>
     </Midl>
     <ClCompile>
       <Optimization>Disabled</Optimization>
-      <AdditionalIncludeDirectories>..\Src;..\Src\OSD;..\Src\OSD\SDL;..\Src\OSD\Windows;..\Libraries\zlib-1.3.1;..\Libraries\SDL2-2.30.11\include;..\Libraries\SDL2_net-2.4.0\include;$(DXSDK_DIR)\Include;..\Src\Pkgs;..\Libraries\Vulkan-Headers\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>SUPERMODEL_WIN32;INLINE=static __inline;_MBCS;_CRT_SECURE_NO_WARNINGS;GLEW_STATIC</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\Src;..\Src\OSD;..\Src\OSD\SDL;..\Src\OSD\Windows;..\Libraries\zlib-1.3.1;..\Libraries\SDL2-2.30.11\include;..\Libraries\SDL2_net-2.4.0\include;$(DXSDK_DIR)\Include;..\Src\Pkgs;..\Src\Pkgs\webp;..\Src\Pkgs\webp\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>SUPERMODEL_WIN32;SUPERMODEL_PLATFORM_SDL2;SUPERMODEL_OPENGL_ONLY;INLINE=static __inline;_MBCS;_CRT_SECURE_NO_WARNINGS;GLEW_STATIC</PreprocessorDefinitions>
       <MinimalRebuild>true</MinimalRebuild>
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
@@ -148,18 +144,13 @@ xcopy /D /Y "$(ProjectDir)..\Assets\*" "$(TargetDir)Assets"</Command>
     </ClCompile>
     <Link>
       <AdditionalDependencies>opengl32.lib;glu32.lib;WbemUuid.lib;dinput8.lib;dxguid.lib;ws2_32.lib;iphlpapi.lib;setupapi.lib;cfgmgr32.lib;winmm.lib;imm32.lib;version.lib;psapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <OutputFile>$(OutDir)$(ProjectName).exe</OutputFile>
+      <OutputFile>$(OutDir)$(TargetName).exe</OutputFile>
       <AdditionalLibraryDirectories>$(DXSDK_DIR)\Lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <!-- Windows, not Console: see the Release x64 configuration for the reasoning. -->
       <SubSystem>Windows</SubSystem>
       <TargetMachine>MachineX64</TargetMachine>
     </Link>
-    <PreBuildEvent>
-      <Command>powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(ProjectDir)..\Scripts\CheckShaderHeaders.ps1"
-if errorlevel 1 exit /b 1</Command>
-      <Message>Checking that the precompiled Vulkan shaders match their sources...</Message>
-    </PreBuildEvent>
     <PostBuildEvent>
       <Command>if not exist "$(TargetDir)Config" mkdir "$(TargetDir)Config"
 if not exist "$(TargetDir)NVRAM" mkdir "$(TargetDir)NVRAM"
@@ -177,8 +168,8 @@ xcopy /D /Y "$(ProjectDir)..\Assets\*" "$(TargetDir)Assets"</Command>
     <ClCompile>
       <Optimization>Full</Optimization>
       <IntrinsicFunctions>false</IntrinsicFunctions>
-      <AdditionalIncludeDirectories>..\Src;..\Src\OSD;..\Src\OSD\SDL;..\Src\OSD\Windows;..\Libraries\zlib-1.3.1;..\Libraries\SDL2-2.30.11\include;..\Libraries\SDL2_net-2.4.0\include;$(DXSDK_DIR)\Include;..\Src\Pkgs;..\Libraries\Vulkan-Headers\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>SUPERMODEL_WIN32;INLINE=static __inline;_MBCS;_CRT_SECURE_NO_WARNINGS;GLEW_STATIC</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\Src;..\Src\OSD;..\Src\OSD\SDL;..\Src\OSD\Windows;..\Libraries\zlib-1.3.1;..\Libraries\SDL2-2.30.11\include;..\Libraries\SDL2_net-2.4.0\include;$(DXSDK_DIR)\Include;..\Src\Pkgs;..\Src\Pkgs\webp;..\Src\Pkgs\webp\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>SUPERMODEL_WIN32;SUPERMODEL_PLATFORM_SDL2;SUPERMODEL_OPENGL_ONLY;INLINE=static __inline;_MBCS;_CRT_SECURE_NO_WARNINGS;GLEW_STATIC</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <PrecompiledHeader />
@@ -188,7 +179,7 @@ xcopy /D /Y "$(ProjectDir)..\Assets\*" "$(TargetDir)Assets"</Command>
     </ClCompile>
     <Link>
       <AdditionalDependencies>opengl32.lib;glu32.lib;WbemUuid.lib;dinput8.lib;dxguid.lib;ws2_32.lib;iphlpapi.lib;setupapi.lib;cfgmgr32.lib;winmm.lib;imm32.lib;version.lib;psapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <OutputFile>$(OutDir)$(ProjectName).exe</OutputFile>
+      <OutputFile>$(OutDir)$(TargetName).exe</OutputFile>
       <AdditionalLibraryDirectories>$(DXSDK_DIR)\Lib\x86;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <!-- Windows, not Console: see the Release x64 configuration for the reasoning. -->
       <SubSystem>Windows</SubSystem>
@@ -197,11 +188,6 @@ xcopy /D /Y "$(ProjectDir)..\Assets\*" "$(TargetDir)Assets"</Command>
       <TargetMachine>MachineX86</TargetMachine>
       <GenerateDebugInformation>false</GenerateDebugInformation>
     </Link>
-    <PreBuildEvent>
-      <Command>powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(ProjectDir)..\Scripts\CheckShaderHeaders.ps1"
-if errorlevel 1 exit /b 1</Command>
-      <Message>Checking that the precompiled Vulkan shaders match their sources...</Message>
-    </PreBuildEvent>
     <PostBuildEvent>
       <Command>if not exist "$(TargetDir)Config" mkdir "$(TargetDir)Config"
 if not exist "$(TargetDir)NVRAM" mkdir "$(TargetDir)NVRAM"
@@ -222,8 +208,8 @@ xcopy /D /Y "$(ProjectDir)..\Assets\*" "$(TargetDir)Assets"</Command>
     <ClCompile>
       <Optimization>Full</Optimization>
       <IntrinsicFunctions>false</IntrinsicFunctions>
-      <AdditionalIncludeDirectories>..\Src;..\Src\OSD;..\Src\OSD\SDL;..\Src\OSD\Windows;..\Libraries\zlib-1.3.1;..\Libraries\SDL2-2.30.11\include;..\Libraries\SDL2_net-2.4.0\include;$(DXSDK_DIR)\Include;..\Src\Pkgs;..\Libraries\Vulkan-Headers\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>SUPERMODEL_WIN32;INLINE=static __inline;_MBCS;_CRT_SECURE_NO_WARNINGS;GLEW_STATIC</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\Src;..\Src\OSD;..\Src\OSD\SDL;..\Src\OSD\Windows;..\Libraries\zlib-1.3.1;..\Libraries\SDL2-2.30.11\include;..\Libraries\SDL2_net-2.4.0\include;$(DXSDK_DIR)\Include;..\Src\Pkgs;..\Src\Pkgs\webp;..\Src\Pkgs\webp\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>SUPERMODEL_WIN32;SUPERMODEL_PLATFORM_SDL2;SUPERMODEL_OPENGL_ONLY;INLINE=static __inline;_MBCS;_CRT_SECURE_NO_WARNINGS;GLEW_STATIC</PreprocessorDefinitions>
       <ExceptionHandling>Sync</ExceptionHandling>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -234,7 +220,7 @@ xcopy /D /Y "$(ProjectDir)..\Assets\*" "$(TargetDir)Assets"</Command>
     </ClCompile>
     <Link>
       <AdditionalDependencies>opengl32.lib;glu32.lib;WbemUuid.lib;dinput8.lib;dxguid.lib;ws2_32.lib;iphlpapi.lib;setupapi.lib;cfgmgr32.lib;winmm.lib;imm32.lib;version.lib;psapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <OutputFile>$(OutDir)$(ProjectName).exe</OutputFile>
+      <OutputFile>$(OutDir)$(TargetName).exe</OutputFile>
       <AdditionalLibraryDirectories>$(DXSDK_DIR)\Lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <!--
@@ -251,11 +237,6 @@ xcopy /D /Y "$(ProjectDir)..\Assets\*" "$(TargetDir)Assets"</Command>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <TargetMachine>MachineX64</TargetMachine>
     </Link>
-    <PreBuildEvent>
-      <Command>powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$(ProjectDir)..\Scripts\CheckShaderHeaders.ps1"
-if errorlevel 1 exit /b 1</Command>
-      <Message>Checking that the precompiled Vulkan shaders match their sources...</Message>
-    </PreBuildEvent>
     <PostBuildEvent>
       <Command>if not exist "$(TargetDir)Config" mkdir "$(TargetDir)Config"
 if not exist "$(TargetDir)NVRAM" mkdir "$(TargetDir)NVRAM"
@@ -291,6 +272,47 @@ xcopy /D /Y "$(ProjectDir)..\Assets\*" "$(TargetDir)Assets"</Command>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\Src\BlockFile.cpp" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\dec\alpha_dec.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\dec\buffer_dec.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\dec\frame_dec.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\dec\idec_dec.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\dec\io_dec.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\dec\quant_dec.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\dec\tree_dec.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\dec\vp8_dec.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\dec\vp8l_dec.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\dec\webp_dec.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\dsp\alpha_processing.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\dsp\cpu.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\dsp\dec.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\dsp\dec_clip_tables.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\dsp\filters.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\dsp\lossless.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\dsp\rescaler.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\dsp\upsampling.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\dsp\yuv.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\dsp\alpha_processing_sse2.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\dsp\alpha_processing_sse41.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\dsp\dec_sse2.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\dsp\dec_sse41.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\dsp\filters_sse2.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\dsp\lossless_sse2.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\dsp\lossless_sse41.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\dsp\rescaler_sse2.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\dsp\upsampling_sse2.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\dsp\upsampling_sse41.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\dsp\yuv_sse2.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\dsp\yuv_sse41.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\utils\bit_reader_utils.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\utils\color_cache_utils.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\utils\filters_utils.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\utils\huffman_utils.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\utils\palette.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\utils\quant_levels_dec_utils.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\utils\random_utils.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\utils\rescaler_utils.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\utils\thread_utils.c" />
+    <ClCompile Include="..\Src\Pkgs\webp\src\utils\utils.c" />
     <ClCompile Include="..\Src\CPU\68K\68K.cpp" />
     <ClCompile Include="..\Src\CPU\68K\Musashi\m68kcpu.c" />
     <ClCompile Include="..\Src\CPU\68K\Musashi\m68kdasm.c">
@@ -299,10 +321,28 @@ xcopy /D /Y "$(ProjectDir)..\Assets\*" "$(TargetDir)Assets"</Command>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
     </ClCompile>
-    <ClCompile Include="..\Src\CPU\68K\Musashi\m68kopac.c" />
-    <ClCompile Include="..\Src\CPU\68K\Musashi\m68kopdm.c" />
-    <ClCompile Include="..\Src\CPU\68K\Musashi\m68kopnz.c" />
-    <ClCompile Include="..\Src\CPU\68K\Musashi\m68kops.c" />
+    <!--
+      The four generated Musashi opcode files compute in 64-bit and truncate to the 68K's 32-bit
+      registers on purpose (e.g. "uint64 data = DY; ... REG_D[x] = data;"). The truncation is the
+      emulated behaviour, not a mistake, so C4244 is silenced for these files only.
+
+      Silenced here rather than by adding casts, because they are output of m68kmake.c from
+      m68k_in.c: a hand edit would be overwritten the next time the table is regenerated, and the
+      regenerated files themselves are tens of thousands of lines. Keep the suppression scoped to
+      this list - a project-wide /wd4244 would also hide real conversions in Supermodel's own code.
+    -->
+    <ClCompile Include="..\Src\CPU\68K\Musashi\m68kopac.c">
+      <DisableSpecificWarnings>4244;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+    </ClCompile>
+    <ClCompile Include="..\Src\CPU\68K\Musashi\m68kopdm.c">
+      <DisableSpecificWarnings>4244;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+    </ClCompile>
+    <ClCompile Include="..\Src\CPU\68K\Musashi\m68kopnz.c">
+      <DisableSpecificWarnings>4244;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+    </ClCompile>
+    <ClCompile Include="..\Src\CPU\68K\Musashi\m68kops.c">
+      <DisableSpecificWarnings>4244;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+    </ClCompile>
     <ClCompile Include="..\Src\CPU\68K\Musashi\m68k_in.c">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
@@ -372,14 +412,6 @@ xcopy /D /Y "$(ProjectDir)..\Assets\*" "$(TargetDir)Assets"</Command>
     <ClCompile Include="..\Src\Graphics\New3D\VBO.cpp" />
     <ClCompile Include="..\Src\Graphics\New3D\Vec.cpp" />
     <ClCompile Include="..\Src\Graphics\Render2D.cpp" />
-    <ClCompile Include="..\Src\Graphics\Vulkan3D\R3DSceneBuilder.cpp" />
-    <ClCompile Include="..\Src\Graphics\Vulkan3D\Vulkan2D.cpp" />
-    <ClCompile Include="..\Src\Graphics\Vulkan3D\Vulkan3D.cpp" />
-    <ClCompile Include="..\Src\Graphics\Vulkan3D\VulkanContext.cpp" />
-    <ClCompile Include="..\Src\Graphics\Vulkan3D\VulkanMemory.cpp" />
-    <ClCompile Include="..\Src\Graphics\Vulkan3D\VulkanRingBuffer.cpp" />
-    <ClCompile Include="..\Src\Graphics\Vulkan3D\VulkanTextureCache.cpp" />
-    <ClCompile Include="..\Src\Pkgs\volk_impl.cpp" />
     <ClCompile Include="..\Src\Graphics\Shader.cpp" />
     <ClCompile Include="..\Src\Graphics\SuperAA.cpp" />
     <ClCompile Include="..\Src\Inputs\Input.cpp" />
@@ -414,8 +446,12 @@ xcopy /D /Y "$(ProjectDir)..\Assets\*" "$(TargetDir)Assets"</Command>
     <ClCompile Include="..\Src\Network\TCPSend.cpp" />
     <ClCompile Include="..\Src\OSD\Logger.cpp" />
     <ClCompile Include="..\Src\OSD\Outputs.cpp" />
+    <ClCompile Include="..\Src\OSD\Platform\ImguiPlatform.cpp" />
+    <ClCompile Include="..\Src\OSD\Platform\SDL2\PlatformSDL2.cpp" />
+    <ClCompile Include="..\Src\OSD\Platform\SDL2\PlatformInputSDL2.cpp" />
     <ClCompile Include="..\Src\OSD\SDL\Audio.cpp" />
     <ClCompile Include="..\Src\OSD\SDL\Crosshair.cpp" />
+    <ClCompile Include="..\Src\OSD\SDL\FontProbe.cpp" />
     <ClCompile Include="..\Src\OSD\SDL\Gui.cpp">
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
@@ -429,6 +465,7 @@ xcopy /D /Y "$(ProjectDir)..\Assets\*" "$(TargetDir)Assets"</Command>
            The file already held Chinese in comments; those happened to survive, this does not. -->
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
+    <ClCompile Include="..\Src\OSD\DisplayPacer.cpp" />
     <ClCompile Include="..\Src\OSD\SDL\NetOutputs.cpp" />
     <ClCompile Include="..\Src\OSD\SDL\StatsOsd.cpp">
       <!-- Same reason as Gui.cpp and Main.cpp: the file carries Chinese string literals for the
@@ -447,6 +484,7 @@ xcopy /D /Y "$(ProjectDir)..\Assets\*" "$(TargetDir)Assets"</Command>
     <ClCompile Include="..\Src\OSD\SDL\Thread.cpp" />
     <ClCompile Include="..\Src\OSD\Windows\DirectInputSystem.cpp" />
     <ClCompile Include="..\Src\OSD\Windows\FileSystemPath.cpp" />
+    <ClCompile Include="..\Src\OSD\Windows\SplashScreen.cpp" />
     <ClCompile Include="..\Src\OSD\Windows\WinOutputs.cpp" />
     <ClCompile Include="..\Src\Pkgs\glew.c">
       <ExceptionHandling Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
@@ -457,8 +495,6 @@ xcopy /D /Y "$(ProjectDir)..\Assets\*" "$(TargetDir)Assets"</Command>
     <ClCompile Include="..\Src\Pkgs\imgui\imgui.cpp" />
     <ClCompile Include="..\Src\Pkgs\imgui\imgui_draw.cpp" />
     <ClCompile Include="..\Src\Pkgs\imgui\imgui_impl_opengl3.cpp" />
-    <ClCompile Include="..\Src\Pkgs\imgui\imgui_impl_vulkan.cpp" />
-    <ClCompile Include="..\Src\Pkgs\imgui\imgui_impl_sdl2.cpp" />
     <ClCompile Include="..\Src\Pkgs\imgui\imgui_tables.cpp" />
     <ClCompile Include="..\Src\Pkgs\imgui\imgui_widgets.cpp" />
     <ClCompile Include="..\Src\Pkgs\ioapi.c">
@@ -614,12 +650,19 @@ xcopy /D /Y "$(ProjectDir)..\Assets\*" "$(TargetDir)Assets"</Command>
     <ClInclude Include="..\Src\OSD\SDL\Gui.h" />
     <ClInclude Include="..\Src\OSD\SDL\Localization.h" />
     <ClInclude Include="..\Src\OSD\SDL\Main.h" />
+    <ClInclude Include="..\Src\OSD\Platform\Platform.h" />
+    <ClInclude Include="..\Src\OSD\Platform\PlatformInput.h" />
+    <ClInclude Include="..\Src\OSD\Platform\PlatformVulkan.h" />
+    <ClInclude Include="..\Src\OSD\Platform\ImguiPlatform.h" />
+    <ClInclude Include="..\Src\OSD\Platform\SDL2\PlatformSDL2Internal.h" />
     <ClInclude Include="..\Src\OSD\SDL\OSDConfig.h" />
     <ClInclude Include="..\Src\OSD\SDL\SDLInputSystem.h" />
     <ClInclude Include="..\Src\OSD\SDL\Types.h" />
     <ClInclude Include="..\Src\OSD\Thread.h" />
     <ClInclude Include="..\Src\OSD\Video.h" />
     <ClInclude Include="..\Src\OSD\Windows\DirectInputSystem.h" />
+    <ClInclude Include="..\Src\OSD\Windows\SplashResource.h" />
+    <ClInclude Include="..\Src\OSD\Windows\SplashScreen.h" />
     <ClInclude Include="..\Src\OSD\Windows\WinOutputs.h" />
     <ClInclude Include="..\Src\OSD\SDL\NetOutputs.h" />
     <ClInclude Include="..\Src\OSD\SDL\Overlay.h" />
@@ -628,7 +671,6 @@ xcopy /D /Y "$(ProjectDir)..\Assets\*" "$(TargetDir)Assets"</Command>
     <ClInclude Include="..\Src\Pkgs\imgui\imconfig.h" />
     <ClInclude Include="..\Src\Pkgs\imgui\imgui.h" />
     <ClInclude Include="..\Src\Pkgs\imgui\imgui_impl_opengl3_loader.h" />
-    <ClInclude Include="..\Src\Pkgs\imgui\imgui_impl_sdl2.h" />
     <ClInclude Include="..\Src\Pkgs\imgui\imstb_rectpack.h" />
     <ClInclude Include="..\Src\Pkgs\imgui\imstb_textedit.h" />
     <ClInclude Include="..\Src\Pkgs\imgui\imstb_truetype.h" />

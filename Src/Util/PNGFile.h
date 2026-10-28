@@ -165,6 +165,72 @@ namespace PNG
 	}
 
 	/*
+	 * WriteRGBA():
+	 *
+	 * Writes an 8-bit RGBA image, rows top to bottom, 4 bytes per pixel. The alpha
+	 * channel is written as given - this is what the HD texture dumper uses, and
+	 * its whole point is that a replacement may carry a smooth alpha channel rather
+	 * than the source texture's one-bit transparency.
+	 *
+	 * Same convention as WriteRGB(): returns true on FAILURE.
+	 */
+	inline bool WriteRGBA(const std::string& file_name, const uint8_t* rgba, int32_t width, int32_t height)
+	{
+		using namespace detail;
+
+		if (rgba == nullptr || width <= 0 || height <= 0)
+			return true;
+
+		const size_t rowBytes = (size_t)width * 4;
+
+		std::vector<uint8_t> raw;
+		raw.reserve(((size_t)height) * (rowBytes + 1));
+		for (int32_t y = 0; y < height; y++)
+		{
+			raw.push_back(0);       // filter: None
+			const uint8_t* src = rgba + (size_t)y * rowBytes;
+			raw.insert(raw.end(), src, src + rowBytes);
+		}
+
+		uLongf compressedSize = compressBound((uLong)raw.size());
+		std::vector<uint8_t> compressed(compressedSize);
+		if (compress2(compressed.data(), &compressedSize, raw.data(), (uLong)raw.size(), 6) != Z_OK)
+			return true;
+		compressed.resize(compressedSize);
+
+		std::vector<uint8_t> png;
+		png.reserve(compressed.size() + 128);
+
+		static const uint8_t signature[8] = { 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A };
+		png.insert(png.end(), signature, signature + 8);
+
+		// IHDR: width, height, bit depth 8, colour type 6 (truecolour with alpha).
+		uint8_t ihdr[13];
+		ihdr[0] = (uint8_t)(width >> 24);  ihdr[1] = (uint8_t)(width >> 16);
+		ihdr[2] = (uint8_t)(width >> 8);   ihdr[3] = (uint8_t)width;
+		ihdr[4] = (uint8_t)(height >> 24); ihdr[5] = (uint8_t)(height >> 16);
+		ihdr[6] = (uint8_t)(height >> 8);  ihdr[7] = (uint8_t)height;
+		ihdr[8] = 8;    // bit depth
+		ihdr[9] = 6;    // colour type: RGBA
+		ihdr[10] = 0;   // compression method (deflate)
+		ihdr[11] = 0;   // filter method
+		ihdr[12] = 0;   // interlace: none
+		AppendChunk(png, "IHDR", ihdr, sizeof(ihdr));
+		AppendChunk(png, "IDAT", compressed.data(), compressed.size());
+		AppendChunk(png, "IEND", nullptr, 0);
+
+		FILE* fp = fopen(file_name.c_str(), "wb");
+		if (fp == nullptr)
+		{
+			ErrorLog("Unable to open '%s' for writing.", file_name.c_str());
+			return true;
+		}
+		const size_t written = fwrite(png.data(), 1, png.size(), fp);
+		fclose(fp);
+		return written != png.size();
+	}
+
+	/*
 	 * DecodeRGBA():
 	 *
 	 * Decodes a PNG held in memory into tightly packed non-premultiplied RGBA, one byte per

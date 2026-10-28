@@ -64,6 +64,10 @@ constexpr VkDeviceSize kRingSliceBytes = 64ull * 1024ull * 1024ull;
  * that is a small fraction of what is available. On a card with 2 GB it is worth knowing about, which is
  * why the allocation logs its size and why a failure to allocate is reported rather than silently
  * falling back.
+ *
+ * A vertex here is a quad corner, not a triangle corner: each primitive occupies four slots (a triangle
+ * repeats its last vertex), so the same six million holds one and a half million quads - half again as
+ * many primitives as the old six-vertex per quad triangle list did in the same space.
  */
 constexpr uint32_t kMaxRomVerts = 6000000;
 
@@ -79,7 +83,11 @@ enum MaterialFlag : uint32_t
 	kMatInverted		= 1u << 7,
 	kMatSmooth			= 1u << 8,
 	kMatPolyAlpha		= 1u << 9,
-	kMatMicro			= 1u << 10
+	kMatMicro			= 1u << 10,
+	// LAY=1. Only the sorted-transparency path consumes this today: it makes one
+	// layered fragment per pixel win, which is what the Real3D stencil did. The
+	// two-layer path ignores it, exactly as before.
+	kMatLayered			= 1u << 11,
 };
 
 // std430, 64 bytes. Keep in sync with real3d.frag.
@@ -104,24 +112,46 @@ struct R3DMaterial
 	float    shininess;
 	float    specularValue;
 	float    fogIntensity;
-	float    pad0;
+	// Bindless index into the shader's u_hdTextures[] array, or -1 when this material keeps sampling
+	// the original sub-texture out of the packed Real3D page. The slot is assigned by the HD texture
+	// pack; the shader takes the fast path (textureGrad) whenever it is non-negative.
+	int32_t  hdTexIndex;
 	float    pad1;
 };
 
-// 64-byte vertex. The first 48 bytes match the planned layout; faceNormal is
-// required so back-face rejection can use the polygon normal (flat shading
-// stores that normal in "normal" as well, smooth shading does not).
-struct R3DVertex
+/*
+ * One corner of a Real3D primitive, as the shaders see it.
+ *
+ * Real3D rasterises quads, not triangles: four vertices carry the polygon and the
+ * hardware interpolates across them quadratically. To reproduce that without a
+ * geometry shader, four consecutive slots describe one primitive (a triangle
+ * repeats its last vertex in slot 3) and both shaders pull what they need out of
+ * this array instead of receiving vertex attributes:
+ *
+ *   - the vertex shader fetches the single corner it owns, for gl_Position;
+ *   - the fragment shader fetches all four and solves for the quad's (s, t).
+ *
+ * The layout is four 16-byte groups so that it is identical under std430 and
+ * under the C rules, with no vec3 straddling a 16-byte boundary. That is why the
+ * position and normal are stored as float[4] rather than float[3]: a GLSL `vec3`
+ * member would be padded to 16 bytes and every offset after it would move.
+ *
+ * The polygon normal lives in the last group. It is stored once per corner (the
+ * four copies are identical) because the vertices are uploaded as a flat array
+ * with a uniform stride; the winding test and the texture LOD both need it.
+ * `colour` occupies the same group's w slot and is read back with
+ * floatBitsToUint(), the same trick the push constants use for the material
+ * index. Keeping it there rather than adding a fifth group is what holds the
+ * struct at 64 bytes - it is the element size of a buffer sized at six million
+ * vertices.
+ */
+struct GpuQuadVertex
 {
-	float pos[3];
-	float normal[3];
-	float uv[2];
-	uint32_t colour;
-	uint32_t materialFlags;
-	float fixedShade;
-	float textureNP;
-	float faceNormal[3];
-	float pad;
+	float pos[4];			// xyz = model-space position, w unused (1.0)
+	float normal[4];		// xyz = vertex normal, w = textureNP
+	float uv[4];			// xy = texture coordinates, z = fixed shade, w unused
+	float faceNormal[3];	// polygon normal
+	uint32_t colour;		// unorm8x4
 };
 
 // std140 push constants, 208 bytes.
@@ -145,6 +175,32 @@ struct ViewportUBO
 	float spotRange[4];
 	float spotColor[4];
 	float spotFogColor[4];
+	/*
+	 * Texture filtering for the 3D scene, carried here because this is the block the
+	 * scene shader already reads per node and it is per-session state.
+	 *
+	 *   x = mode: 0 = radial hardware LOD (default, what the hardware did),
+	 *             1 = screen-space derivative LOD,
+	 *             2 = derivative LOD with anisotropic taps.
+	 *   y = maximum number of taps for mode 2.
+	 */
+	float texFilter[4];
+	/*
+	 * Scene shader options.
+	 *
+	 *   x = quad interpolation: 1 = the exact four-corner solve (default, what
+	 *       this backend has always produced), 0 = hardware triangle interpolation.
+	 *       The fast path skips four storage-buffer reads and the per-pixel
+	 *       quadratic solve, which is what the ultra-low preset is for. It shows
+	 *       the rasteriser's diagonal on non-planar quads, so it is opt-in.
+	 *   y = arcade checkerboard transparency (AlphaSortMode = 2): 1 = each
+	 *       transparency layer writes only its half of the checkerboard, 0 = both
+	 *       layers write every pixel. Carried here rather than as a specialization
+	 *       constant so the mode needs no second set of twelve scene pipelines;
+	 *       it is per-session state, which is exactly what this block holds.
+	 *   zw unused.
+	 */
+	float renderOptions[4];
 };
 
 // std140 push constants for the ambient / scroll fog background pass. 64 bytes.
@@ -158,9 +214,13 @@ struct R3DFogPush
 };
 
 static_assert(sizeof(R3DMaterial) == 64, "R3DMaterial size");
-static_assert(sizeof(R3DVertex) == 64, "R3DVertex size");
+static_assert(sizeof(GpuQuadVertex) == 64, "GpuQuadVertex size");
+static_assert(offsetof(GpuQuadVertex, normal) == 16, "GpuQuadVertex std430 layout");
+static_assert(offsetof(GpuQuadVertex, uv) == 32, "GpuQuadVertex std430 layout");
+static_assert(offsetof(GpuQuadVertex, faceNormal) == 48, "GpuQuadVertex std430 layout");
+static_assert(offsetof(GpuQuadVertex, colour) == 60, "GpuQuadVertex std430 layout");
 static_assert(sizeof(R3DPush) == 208, "R3DPush size");
-static_assert(sizeof(ViewportUBO) == 64, "ViewportUBO size");
+static_assert(sizeof(ViewportUBO) == 96, "ViewportUBO size");
 static_assert(sizeof(R3DFogPush) == 64, "R3DFogPush size");
 
 /*
@@ -236,7 +296,7 @@ inline bool Rendering2EntryPointsAvailable()
 		(vkQueueSubmit2 != nullptr || vkQueueSubmit2KHR != nullptr);
 }
 
-inline void CmdTransition(VkCommandBuffer cmd, VkImage image, VkImageLayout oldLayout, VkImageLayout newLayout, VkImageAspectFlags aspect, uint32_t baseMip = 0, uint32_t mipCount = 1)
+inline void CmdTransition(VkCommandBuffer cmd, VkImage image, VkImageLayout oldLayout, VkImageLayout newLayout, VkImageAspectFlags aspect, uint32_t baseMip = 0, uint32_t mipCount = 1, VkPipelineStageFlags2 srcStageOverride = 0)
 {
 	if (oldLayout == newLayout || image == VK_NULL_HANDLE)
 		return;
@@ -289,6 +349,20 @@ inline void CmdTransition(VkCommandBuffer cmd, VkImage image, VkImageLayout oldL
 		barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
 		barrier.srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
 		break;
+	}
+
+	/*
+	 * A swapchain image is acquired by a semaphore that this backend waits on at
+	 * COLOR_ATTACHMENT_OUTPUT. A transition recorded straight after vkAcquireNextImageKHR with the
+	 * usual PRESENT_SRC/UNDEFINED -> TOP_OF_PIPE source stage runs before that wait, which is a real
+	 * WRITE_AFTER_READ hazard (synchronization validation reports it on every frame). Passing the
+	 * wait's stage here creates the missing execution dependency. Callers only do this on the first
+	 * transition of an acquired image; every later transition keeps the derived stage.
+	 */
+	if (srcStageOverride != 0)
+	{
+		barrier.srcStageMask = srcStageOverride;
+		barrier.srcAccessMask = 0;
 	}
 
 	switch (newLayout)

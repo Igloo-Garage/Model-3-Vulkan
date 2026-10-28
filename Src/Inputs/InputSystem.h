@@ -677,6 +677,16 @@ protected:
   virtual int GetMouseAxisValue(int mseNum, int axisNum) const = 0;
 
   /*
+   * The same value as GetMouseAxisValue(), but with sub-pixel precision.
+   *
+   * Only the light-gun axes need this: the host pixel is mapped onto the arcade gun's much
+   * coarser range, so rounding the pointer to whole pixels before scaling is what makes fine
+   * aiming jump in visible steps. Backends that only know integer coordinates inherit this
+   * default and keep the old behaviour exactly.
+   */
+  virtual float GetMouseAxisValueFloat(int mseNum, int axisNum) const;
+
+  /*
    * Returns the current direction (-1, 0 or 1) the Z-axis (wheel) is moving in for the given mouse.
    */
   virtual int GetMouseWheelDir(int mseNum) const = 0;
@@ -878,6 +888,27 @@ public:
    * Updates the current state of the input system (called by CInputs.Poll).
    */
   virtual bool Poll() = 0;
+
+  /*
+   * Re-reads the pointer position from the OS without draining the event queue.
+   *
+   * Called immediately before a frame is emulated, after the in-game panel and the renderer have
+   * done their work, so that absolute pointing (the light-gun axes) reflects the pointer as late
+   * as the frame boundary allows. Implementations that have no cheaper source than the event queue
+   * leave it alone; the default does nothing.
+   */
+  virtual void RefreshPointer();
+
+  /*
+   * Re-reads every device's state without draining the event queue.
+   *
+   * Poll() does two jobs: it takes the frame's events, and it copies the resulting device state
+   * (keys, pads, mice) into the backend's own caches that the input bindings read. A late sample
+   * only needs the second: the events belong to the top of the frame, and taking them twice would
+   * deliver wheel notches and hot-plug notifications twice. The default does nothing, so the older
+   * backends keep their current behaviour.
+   */
+  virtual void RefreshState();
 
   virtual void GrabMouse();
 

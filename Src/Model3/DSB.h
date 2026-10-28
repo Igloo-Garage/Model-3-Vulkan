@@ -38,6 +38,8 @@
 #include "CPU/Z80/Z80.h"
 #include "Util/NewConfig.h"
 
+#include <vector>
+
 #define FIFO_STACK_SIZE			0x100
 #define FIFO_STACK_SIZE_MASK	(FIFO_STACK_SIZE - 1)
 
@@ -49,23 +51,32 @@
 #define MAX_SAMPLES_PER_FRAME   (44100/45)
 
 /*
+ * Length of the DSB resampling filter, shared by MpegSamplesForFrame() below and CDSBResampler. The
+ * frame has to decode this much audio ahead of what it consumes so that the filter has its full
+ * right-hand support at the end of the buffer; with less padding the last outputs of every frame
+ * would be filtered against zeros and the music would pick up a 57.5 Hz edge artefact. 64 taps at
+ * 32 kHz keep the passband flat to ~14.5 kHz and reach -80 dB by the input Nyquist frequency.
+ */
+constexpr int DSB_RESAMPLER_TAPS = 64;
+
+/*
  * MpegSamplesForFrame(numSamples)
  *
  * Number of 32 KHz MPEG source samples needed to fill a frame that will produce numSamples 44.1 KHz
- * samples, including the two samples of padding the decoder has always been given. The fraction is
- * carried in a caller-owned accumulator so the 32 kHz:44.1 kHz ratio stays exact across frames even
- * though neither count is an integer at non-60 Hz rates.
+ * samples, including the look-ahead the resampler filter needs at the end of the block. The fraction
+ * is carried in a caller-owned accumulator so the 32 kHz:44.1 kHz ratio stays exact across frames
+ * even though neither count is an integer at non-60 Hz rates.
  *
- * The DSB's MPEG buffers are sized for 48 kHz, which covers every permitted refresh rate
- * (48 KHz at 45 Hz needs 1069 samples against 802 actually allocated when using 32 kHz, so this
- * comfortably fits).
+ * The DSB's MPEG buffers are sized for 48 kHz at 60 Hz. At the rates actually used (32 kHz, any
+ * permitted refresh rate) the worst case is 45 Hz: 32000/45 + taps + 4 = 780 samples against 802
+ * allocated, so the extra look-ahead still fits.
  */
 inline int MpegSamplesForFrame(int numSamples, double& carry)
 {
 	carry += (double)numSamples * (32000.0 / 44100.0);
 	const int whole = (int)carry;
 	carry -= (double)whole;
-	return whole + 2;
+	return whole + DSB_RESAMPLER_TAPS + 4;
 }
 
 /******************************************************************************
@@ -78,20 +89,22 @@ inline int MpegSamplesForFrame(int numSamples, double& carry)
 /*
  * CDSBResampler:
  *
- * Frame-by-frame resampler. Resamples one single frame of audio and maintains
- * continuity between frames by copying unprocessed input samples to the
- * beginning of the buffer and retaining the internal interpolation state.
+ * Frame-by-frame sample rate converter for the DSB's MPEG output. It replaces the old linear
+ * interpolator with a Kaiser-windowed sinc, evaluated through a polyphase table whose phase count
+ * is derived from the greatest common divisor of the two rates: 32000:44100 reduces to 320:441, so
+ * 441 phases reproduce the ratio exactly and the phase accumulator is integer arithmetic. There is
+ * no rounding to accumulate, which the old 24.8 fixed point step did (it truncated 0.7256 to
+ * 0.7227 and played every DSB track 0.41% flat).
  *
- * See DSB.cpp for a detailed description of how this works.
+ * A frame produces exactly sizeOut samples and consumes sizeOut*inRate/outRate input samples. The
+ * remainder of the block is copied back to the front for the next call, and the last k_half input
+ * samples before that point are kept separately as history. Because the clock authority stays with
+ * the caller's per-frame sample count (GetSamplesThisFrame() in OSD/Audio.h), the DSB can never
+ * drift against the SCSP or starve: it is asked for, and delivers, exactly one frame of audio per
+ * frame, at whatever RefreshRate the emulator is running.
  *
- * NOTE: If the sampling frequencies change, it is probably best to call
- * Reset(). Whether the resampler will otherwise behave correctly and stay
- * within array bounds has not been verified.
- *
- * Designed for use at 60 Hz, for input frequencies of 11.025, 22.05, 16, and
- * 32 KHz and 44.1 KHz output frequencies. Theoretically, it should be able to
- * operate on most output frequencies and input frequencies that are simply
- * lower, but it has not been extensively verified.
+ * The input is INT16 (the MPEG decoder's native output) and the output is float in the same
+ * S16-scaled domain the SCSP uses, so the two can be summed without an intermediate conversion.
  */
 class CDSBResampler
 {
@@ -102,11 +115,34 @@ public:
 	  : m_config(config)
 	{
 		Reset();
+		// Both DSBs run at 32 kHz into the 44.1 kHz output; build the table up front so the first
+		// frame does not allocate or compute it while the audio device is already running.
+		Prepare(44100, 32000);
 	}
 private:
+	static constexpr int k_taps = DSB_RESAMPLER_TAPS;
+	static constexpr int k_half = k_taps / 2;
+
+	void	Prepare(int outRate, int inRate);
+
 	const Util::Config::Node &m_config;
-	int	nFrac;
-	int	pFrac;
+
+	// Polyphase kernel: k_phases rows of k_taps coefficients (see DSB.cpp).
+	std::vector<float> m_coeff;
+	int		m_phases = 0;   // outRate/gcd(inRate, outRate): number of phases
+	int		m_step = 0;     // inRate/gcd(inRate, outRate): input advance per output, numerator
+	int		m_outRate = 0;
+	int		m_inRate = 0;
+
+	// Position of the next output: m_inPos is an index into the current input block and
+	// m_phase/m_phases its fraction. Integer arithmetic only, so the ratio cannot drift.
+	int		m_inPos = 0;
+	int		m_phase = 0;
+
+	// The k_half input samples immediately preceding the current block, so the first outputs of a
+	// frame can be filtered without a special case at the buffer start.
+	float	m_histL[k_half] = {};
+	float	m_histR[k_half] = {};
 };
 
 
@@ -321,12 +357,17 @@ private:
 	// MPEG decode buffers (48KHz, 1/60th second + 2 extra padding samples)
 	INT16	*mpegL, *mpegR;
 
-	// Stereo mode (do not change values because they are used in save states!)
+	// Output routing for the two mono programmes packed into one stereo MP2 stream (Sega Rally 2).
+	// Command 0xA0 selects Channel0, whose audio the decoder delivers in its SECOND buffer (mpegR);
+	// command 0xB1 selects Channel1, delivered in the FIRST buffer (mpegL). The names follow the
+	// board's channel numbering rather than the decoder's L/R order: this is the mapping the
+	// original Sega Rally 2 fix established, and it was inverted by a later refactor.
+	// Do not change the values because they are used in save states!
 	enum class StereoMode: uint8_t
 	{
 		Stereo = 0,     // both channels
-		MonoLeft = 1,   // mono, using left stream as source data
-		MonoRight = 2   // mono, using right stream as source data
+		Channel0 = 1,   // mono, source is the decoder's right buffer
+		Channel1 = 2    // mono, source is the decoder's left buffer
 	};
 
 	// DSB memory
