@@ -47,11 +47,12 @@
 #include <fstream>
 #include <optional>
 #include <print>
-#if __has_include(<stacktrace>)
+#if defined(_WIN32) && __has_include(<stacktrace>)
 #include <stacktrace>
 #define SUPERMODEL_HAS_STACKTRACE 1
 #else
-// libc++ on macOS does not provide <stacktrace> yet.
+// libc++ on macOS does not provide <stacktrace>; libstdc++ on Linux does, but
+// its symbols live in libstdc++_libbacktrace, which this target does not link.
 #define SUPERMODEL_HAS_STACKTRACE 0
 #endif
 #include <string>
