@@ -22,18 +22,72 @@
 #include "VulkanContext.h"
 
 #include "OSD/Logger.h"
+#include "OSD/FileSystemPath.h"
+#include "OSD/Platform/Platform.h"
+#include "OSD/Platform/PlatformVulkan.h"
 #include "Util/PNGFile.h"
-#include <SDL.h>
-#include <SDL_vulkan.h>
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <vector>
 
-namespace Vulkan3D {
+namespace Vulkan3D
+{
+
+namespace
+{
+
+uint64_t SurfaceToBits(VkSurfaceKHR surface)
+{
+	uint64_t bits = 0;
+	std::memcpy(&bits, &surface, sizeof(surface));
+	return bits;
+}
+
+VkSurfaceKHR SurfaceFromBits(uint64_t bits)
+{
+	VkSurfaceKHR surface = VK_NULL_HANDLE;
+	std::memcpy(&surface, &bits, sizeof(surface));
+	return surface;
+}
+
+/*
+ * Whether an instance layer provides a given extension.
+ *
+ * VK_EXT_validation_features belongs to VK_LAYER_KHRONOS_validation, not to the loader or the driver,
+ * so it has to be looked up with the layer name. Enumerating with VK_NULL_HANDLE misses it on most
+ * setups, which would silently turn off the feature the caller asked for.
+ */
+bool LayerProvidesInstanceExtension(const char* layer, const char* name)
+{
+	uint32_t count = 0;
+	if (vkEnumerateInstanceExtensionProperties(layer, &count, nullptr) != VK_SUCCESS || count == 0)
+		return false;
+	std::vector<VkExtensionProperties> props(count);
+	if (vkEnumerateInstanceExtensionProperties(layer, &count, props.data()) != VK_SUCCESS)
+		return false;
+	for (const auto& prop : props)
+	{
+		if (std::strcmp(prop.extensionName, name) == 0)
+			return true;
+	}
+	return false;
+}
+
+bool EnabledByEnvironment(const char* name)
+{
+	const char* value = std::getenv(name);
+	return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+}
+
+} // namespace
 
 static VKAPI_ATTR VkBool32 VKAPI_CALL DebugCallback(
 	VkDebugUtilsMessageSeverityFlagBitsEXT severity,
@@ -41,6 +95,17 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL DebugCallback(
 	const VkDebugUtilsMessengerCallbackDataEXT* data,
 	void*)
 {
+	// Synchronization validation reports one message per hazard per command buffer, so a systematic
+	// mistake (a missing barrier in the scene pass) can produce thousands per second. The first
+	// thousand are the ones that identify it; the rest only make the log unreadable.
+	static std::atomic<uint32_t> messageCount{ 0 };
+	static std::atomic<bool> suppressed{ false };
+	if (messageCount.fetch_add(1) >= 1000)
+	{
+		if (!suppressed.exchange(true))
+			ErrorLog("Vulkan: 1000 validation messages reached; further messages are suppressed.");
+		return VK_FALSE;
+	}
 	if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)
 		ErrorLog("Vulkan: %s", data->pMessage);
 	else if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)
@@ -103,12 +168,35 @@ VkImageView CVulkanContext::SwapView() const
 	return m_imageIndex < m_images.size() ? m_images[m_imageIndex].view : VK_NULL_HANDLE;
 }
 
-Result CVulkanContext::InitDevice(SDL_Window* window, bool validation, bool vsync, const std::string& deviceName)
+Result CVulkanContext::InitDevice(OSD::Platform::Window* window, bool validation, bool vsync, const std::string& deviceName, bool disableOverlayLayers, const std::string& pipelineCacheTag)
 {
 	m_window = window;
 	m_validation = validation;
 	m_vsync = vsync;
 	m_devicePreference = deviceName;
+	m_disableOverlayLayers = disableOverlayLayers;
+
+	/*
+	 * Synchronization validation and GPU-assisted validation are developer tools, not options a
+	 * player should be able to switch on by accident: the first multiplies draw cost by tracking
+	 * every barrier, the second instruments every shader. They are requested through the environment
+	 * and both imply the validation layer itself.
+	 */
+	m_syncValidation = EnabledByEnvironment("SM3D_VK_SYNC_VALIDATION");
+	m_gpuValidation = EnabledByEnvironment("SM3D_VK_GPU_VALIDATION");
+	if ((m_syncValidation || m_gpuValidation) && !m_validation)
+	{
+		m_validation = true;
+		InfoLog("Vulkan: validation enabled by SM3D_VK_SYNC_VALIDATION/SM3D_VK_GPU_VALIDATION.");
+	}
+
+	// Same milestones as the settings window logs: instance, device, swapchain. They are the
+	// difference between a slow driver and a slow font, and there is no other way to tell.
+	const auto initClock = std::chrono::steady_clock::now();
+	const auto initMs = [&initClock]()
+	{
+		return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - initClock).count();
+	};
 
 	if (volkInitialize() != VK_SUCCESS)
 	{
@@ -123,15 +211,23 @@ Result CVulkanContext::InitDevice(SDL_Window* window, bool validation, bool vsyn
 	if (!CreateInstance())
 		return Result::FAIL;
 	volkLoadInstance(m_instance);
+	InfoLog("Vulkan: instance created (%.0f ms).", initMs());
 
-	if (!SDL_Vulkan_CreateSurface(window, m_instance, &m_surface))
+	uint64_t surfaceBits = 0;
+	if (!OSD::Platform::CreateVulkanSurface(window, m_instance, &surfaceBits))
 	{
-		ErrorLog("Vulkan: SDL_Vulkan_CreateSurface failed: %s", SDL_GetError());
+		ErrorLog("Vulkan: creating the window surface failed: %s", OSD::Platform::GetError());
 		return Result::FAIL;
 	}
+	m_surface = SurfaceFromBits(surfaceBits);
 	if (!PickDevice() || !CreateDevice())
 		return Result::FAIL;
 	volkLoadDevice(m_device);
+	InfoLog("Vulkan: device created (%.0f ms).", initMs());
+
+	// Best effort: a cache that cannot be created only means the pipelines are compiled again.
+	CreatePipelineCache(pipelineCacheTag);
+	InfoLog("Vulkan: pipeline cache ready (%.0f ms).", initMs());
 
 	/*
 	 * The entry points the renderer reaches through the wrappers in VulkanCommon.h have to exist by
@@ -171,12 +267,14 @@ Result CVulkanContext::InitDevice(SDL_Window* window, bool validation, bool vsyn
 		VK_API_VERSION_MAJOR(props.apiVersion), VK_API_VERSION_MINOR(props.apiVersion),
 		m_vulkan13 ? "Vulkan 1.3 core path" : "Vulkan 1.2 extension path");
 
-	if (!m_memory.Init(m_physical, m_device))
+	if (!m_memory.Init(m_physical, m_device, m_memoryBudget))
 		return Result::FAIL;
+	m_memory.LogMemoryBudget("startup");
 	if (!m_ring.Init(m_memory, kMaxFramesInFlight, kRingSliceBytes))
 		return Result::FAIL;
 	if (!CreateSwapchain() || !CreateFrames())
 		return Result::FAIL;
+	InfoLog("Vulkan: swapchain ready (%.0f ms).", initMs());
 	return Result::OKAY;
 }
 
@@ -202,12 +300,15 @@ void CVulkanContext::Shutdown()
 	m_memory.Shutdown();
 	if (m_device)
 	{
+		// Before the device goes: this is the only point at which the compiled pipelines can still be
+		// read back, and the next run skips recompiling them.
+		SavePipelineCache();
 		vkDestroyDevice(m_device, nullptr);
 		m_device = VK_NULL_HANDLE;
 	}
 	if (m_surface && m_instance)
 	{
-		vkDestroySurfaceKHR(m_instance, m_surface, nullptr);
+		OSD::Platform::DestroyVulkanSurface(m_instance, SurfaceToBits(m_surface));
 		m_surface = VK_NULL_HANDLE;
 	}
 	if (m_debug && m_instance)
@@ -226,44 +327,117 @@ void CVulkanContext::Shutdown()
 
 bool CVulkanContext::CreateInstance()
 {
-	unsigned extCount = 0;
-	if (!SDL_Vulkan_GetInstanceExtensions(m_window, &extCount, nullptr))
+	std::vector<const char*> extensions;
+	if (!OSD::Platform::GetVulkanInstanceExtensions(m_window, extensions))
 	{
-		ErrorLog("Vulkan: SDL_Vulkan_GetInstanceExtensions failed.");
+		ErrorLog("Vulkan: querying the window-system instance extensions failed: %s",
+			OSD::Platform::GetError());
 		return false;
 	}
-	std::vector<const char*> extensions(extCount);
-	SDL_Vulkan_GetInstanceExtensions(m_window, &extCount, extensions.data());
+	// Everything below this point is optional and must be removed as a block if the validation layer
+	// cannot be created.
+	const size_t baseExtensionCount = extensions.size();
 
 	std::vector<const char*> layers;
+	VkValidationFeaturesEXT validationFeatures = {};
+	VkValidationFeatureEnableEXT enabledFeatures[2] = {};
+	uint32_t enabledFeatureCount = 0;
+	bool haveValidationFeatureChain = false;
 	if (m_validation)
 	{
 		extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 		layers.push_back("VK_LAYER_KHRONOS_validation");
+
+		/*
+		 * Synchronization validation and GPU-assisted validation live behind
+		 * VK_EXT_validation_features, an instance extension the layer itself provides. Plain
+		 * VK_LAYER_KHRONOS_validation only checks API usage; it cannot see a read that races a write,
+		 * and it cannot see a shader sampling an image outside its declared range.
+		 *
+		 * Requesting the struct without the extension is an error, so the extension is looked up on the
+		 * layer first. A machine with an old layer simply gets the core checks and a line saying so.
+		 */
+		if (m_syncValidation || m_gpuValidation)
+		{
+			if (LayerProvidesInstanceExtension("VK_LAYER_KHRONOS_validation", VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME))
+			{
+				extensions.push_back(VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME);
+				if (m_syncValidation)
+					enabledFeatures[enabledFeatureCount++] = VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT;
+				if (m_gpuValidation)
+					enabledFeatures[enabledFeatureCount++] = VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_EXT;
+				validationFeatures.sType = VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT;
+				validationFeatures.enabledValidationFeatureCount = enabledFeatureCount;
+				validationFeatures.pEnabledValidationFeatures = enabledFeatures;
+				haveValidationFeatureChain = true;
+			}
+			else
+			{
+				ErrorLog("Vulkan: the validation layer does not provide %s; synchronization/GPU-assisted "
+					"validation is unavailable. Update the Vulkan SDK/layer.", VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME);
+				m_syncValidation = false;
+				m_gpuValidation = false;
+			}
+		}
 	}
 
 	VkApplicationInfo app = {};
 	app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-	app.pApplicationName = "Supermodel";
+	app.pApplicationName = "Model 3-Vulkan";
 	app.applicationVersion = VK_MAKE_API_VERSION(0, 0, 3, 0);
-	app.pEngineName = "Supermodel";
+	app.pEngineName = "Model 3-Vulkan";
 	app.engineVersion = app.applicationVersion;
 	app.apiVersion = VK_API_VERSION_1_3;
 
 	VkInstanceCreateInfo info = {};
 	info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+	info.pNext = haveValidationFeatureChain ? &validationFeatures : nullptr;
 	info.pApplicationInfo = &app;
 	info.enabledExtensionCount = (uint32_t)extensions.size();
 	info.ppEnabledExtensionNames = extensions.data();
 	info.enabledLayerCount = (uint32_t)layers.size();
 	info.ppEnabledLayerNames = layers.empty() ? nullptr : layers.data();
 
-	VkResult result = vkCreateInstance(&info, nullptr, &m_instance);
+	VkResult result = VK_SUCCESS;
+#if defined(_WIN32)
+	/*
+	 * The settings window does not want the desktop's implicit overlay layers in its instance, and
+	 * they are expensive to load: six registered layers (Steam, RTSS, ReShade, OBS, GOG, Fossilize)
+	 * add about a second to vkCreateInstance on the machine this was measured on.  The setting is
+	 * scoped to this call and restored immediately, so a later game-session instance creates with
+	 * the normal layer set and overlays attach there.
+	 *
+	 * Skipped when validation is requested: VK_LOADER_LAYERS_DISABLE=* would filter that explicit
+	 * layer out as well.
+	 */
+	const bool filterLayers = m_disableOverlayLayers && !m_validation;
+	char* previousLayers = nullptr;
+	size_t previousLayersSize = 0;
+	if (filterLayers)
+	{
+		_dupenv_s(&previousLayers, &previousLayersSize, "VK_LOADER_LAYERS_DISABLE");
+		_putenv_s("VK_LOADER_LAYERS_DISABLE", "*");
+	}
+#endif
+	result = vkCreateInstance(&info, nullptr, &m_instance);
+#if defined(_WIN32)
+	if (filterLayers)
+	{
+		_putenv_s("VK_LOADER_LAYERS_DISABLE", previousLayers != nullptr ? previousLayers : "");
+		free(previousLayers);
+	}
+#endif
 	if (result != VK_SUCCESS && m_validation)
 	{
 		ErrorLog("Vulkan: validation layer unavailable, retrying without it.");
 		m_validation = false;
-		extensions.pop_back();
+		m_syncValidation = false;
+		m_gpuValidation = false;
+		haveValidationFeatureChain = false;
+		// Everything the validation path added, including VK_EXT_validation_features, goes away as
+		// one block; the window-system extensions before baseExtensionCount stay.
+		extensions.resize(baseExtensionCount);
+		info.pNext = nullptr;
 		info.enabledExtensionCount = (uint32_t)extensions.size();
 		info.ppEnabledExtensionNames = extensions.data();
 		info.enabledLayerCount = 0;
@@ -298,6 +472,12 @@ bool CVulkanContext::CreateInstance()
 		volkLoadInstance(m_instance);
 		if (vkCreateDebugUtilsMessengerEXT)
 			vkCreateDebugUtilsMessengerEXT(m_instance, &dbg, nullptr, &m_debug);
+		if (m_syncValidation || m_gpuValidation)
+		{
+			InfoLog("Vulkan: validation features - synchronization validation %s, GPU-assisted validation %s.",
+				m_syncValidation ? "on (expect a large slowdown)" : "off",
+				m_gpuValidation ? "on (shaders instrumented)" : "off");
+		}
 	}
 	return true;
 }
@@ -481,9 +661,9 @@ std::vector<std::string> EnumeratePhysicalDeviceNames()
 
 	VkApplicationInfo appInfo = {};
 	appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-	appInfo.pApplicationName = "Supermodel";
+	appInfo.pApplicationName = "Model 3-Vulkan";
 	appInfo.applicationVersion = VK_MAKE_VERSION(0, 3, 0);
-	appInfo.pEngineName = "Supermodel";
+	appInfo.pEngineName = "Model 3-Vulkan";
 	appInfo.engineVersion = VK_MAKE_VERSION(0, 3, 0);
 	appInfo.apiVersion = VK_API_VERSION_1_0;
 
@@ -545,6 +725,9 @@ bool CVulkanContext::CreateDevice()
 
 	VkPhysicalDeviceProperties props = {};
 	vkGetPhysicalDeviceProperties(m_physical, &props);
+	// Kept for the statistics readout, which has no other way to name the GPU: the settings window and the
+	// game session each hold their own context, and only this one knows which device was picked.
+	m_deviceName = props.deviceName;
 	const BackendRoute route = ClassifyDevice(m_physical, props);
 	if (route == BackendRoute::Unsupported)
 	{
@@ -579,6 +762,47 @@ bool CVulkanContext::CreateDevice()
 		extensions.push_back(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
 
 	/*
+	 * VK_EXT_memory_budget, when present, turns "vkAllocateMemory failed" from a bare number into
+	 * "the heap has X MB of budget left and Y MB is already in use". That is the same information VMA
+	 * exposes as VmaBudget and the only way to tell fragmentation apart from a genuinely full device
+	 * after a failure. Optional: everything works without it, the log is just less specific.
+	 */
+	m_memoryBudget = hasExt(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+	if (m_memoryBudget)
+		extensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+
+	/*
+	 * VK_KHR_present_wait and VK_KHR_present_id, when the driver offers both.
+	 *
+	 * Requested rather than required: a driver or compositor without them renders exactly the same
+	 * picture, it simply cannot say when that picture reached the display. The two are only useful
+	 * together - present_id numbers the presents, present_wait waits on the number - so one without
+	 * the other is treated as absent.
+	 *
+	 * Both features are queried through the extension structs rather than assumed from the extension
+	 * name. An implementation may advertise the extension and still report the feature as false, and
+	 * chaining a feature the driver did not claim fails vkCreateDevice.
+	 */
+	VkPhysicalDevicePresentIdFeaturesKHR presentIdQuery = {};
+	presentIdQuery.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR;
+	VkPhysicalDevicePresentWaitFeaturesKHR presentWaitQuery = {};
+	presentWaitQuery.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR;
+	presentIdQuery.pNext = &presentWaitQuery;
+	{
+		VkPhysicalDeviceFeatures2 query = {};
+		query.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+		query.pNext = &presentIdQuery;
+		vkGetPhysicalDeviceFeatures2(m_physical, &query);
+	}
+	if (presentIdQuery.presentId && presentWaitQuery.presentWait &&
+		hasExt(VK_KHR_PRESENT_ID_EXTENSION_NAME) && hasExt(VK_KHR_PRESENT_WAIT_EXTENSION_NAME))
+	{
+		extensions.push_back(VK_KHR_PRESENT_ID_EXTENSION_NAME);
+		extensions.push_back(VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
+		m_presentWait = true;
+	}
+
+	/*
 	 * The two capabilities the renderer cannot do without are queried and enabled through different
 	 * structs depending on the route.
 	 *
@@ -611,6 +835,16 @@ bool CVulkanContext::CreateDevice()
 
 	vkGetPhysicalDeviceFeatures2(m_physical, &features2);
 
+	/*
+	 * The texture cache builds one sampler per pair of wrap modes, including
+	 * VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE. Using that mode without samplerMirrorClampToEdge
+	 * is invalid and the validation layer reports it for every sampler created; the driver may accept
+	 * it, which is exactly the kind of "works on this machine" behaviour that breaks on another.
+	 */
+	m_samplerMirrorClamp = features12.samplerMirrorClampToEdge != 0;
+	m_fragmentStoresAndAtomics = features2.features.fragmentStoresAndAtomics != 0;
+	m_sampleRateShading = features2.features.sampleRateShading != 0;
+
 	if (!features12.descriptorIndexing || !features12.runtimeDescriptorArray ||
 		!features12.shaderSampledImageArrayNonUniformIndexing || !features12.descriptorBindingPartiallyBound ||
 		!features12.descriptorBindingSampledImageUpdateAfterBind || !features12.descriptorBindingVariableDescriptorCount)
@@ -636,6 +870,7 @@ bool CVulkanContext::CreateDevice()
 	enable12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
 	enable12.descriptorBindingVariableDescriptorCount = VK_TRUE;
 	enable12.timelineSemaphore = features12.timelineSemaphore;
+	enable12.samplerMirrorClampToEdge = m_samplerMirrorClamp ? VK_TRUE : VK_FALSE;
 
 	// Enabled through the same struct that was queried, for the same reason as above.
 	VkPhysicalDeviceVulkan13Features enable13 = {};
@@ -659,10 +894,49 @@ bool CVulkanContext::CreateDevice()
 		enable12.pNext = &enableDyn;
 	}
 
+	VkPhysicalDevicePresentIdFeaturesKHR enablePresentId = {};
+	enablePresentId.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR;
+	VkPhysicalDevicePresentWaitFeaturesKHR enablePresentWait = {};
+	enablePresentWait.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR;
+	if (m_presentWait)
+	{
+		enablePresentId.presentId = VK_TRUE;
+		enablePresentWait.presentWait = VK_TRUE;
+		enablePresentId.pNext = &enablePresentWait;
+		// Appended to whichever chain the route built above, so the structs the renderer needs stay
+		// first in pNext order and the optional one is last.
+		if (route == BackendRoute::Vulkan13)
+			enable13.pNext = &enablePresentId;
+		else
+			enableSync.pNext = &enablePresentId;
+	}
+
 	VkPhysicalDeviceFeatures enabled = {};
+	/*
+	 * The three scene targets need different colour write masks (the colour layer writes all three,
+	 * each transparency layer writes only its own), and independentBlend is what makes per-attachment
+	 * state legal. Without it the pAttachments array must be identical and the MRT erase is undefined.
+	 * Every desktop Vulkan implementation supports it; a device that does not cannot run this backend.
+	 */
+	if (!features2.features.independentBlend)
+	{
+		ErrorLog("Vulkan: independentBlend is missing; the three scene colour attachments cannot be written "
+			"independently. The OpenGL renderer can be chosen on the Video tab.");
+		return false;
+	}
+	enabled.independentBlend = VK_TRUE;
 	enabled.samplerAnisotropy = features2.features.samplerAnisotropy;
 	enabled.fragmentStoresAndAtomics = features2.features.fragmentStoresAndAtomics;
+	// The sorted-transparency resolve runs once per sample to keep MSAA edges on translucent
+	// geometry. This is a core feature and enabled whenever it exists, so turning the mode on does
+	// not require recreating the device; a device without it resolves per pixel instead.
+	enabled.sampleRateShading = features2.features.sampleRateShading;
 	enabled.shaderInt16 = features2.features.shaderInt16;
+	// GPU-assisted validation instruments every shader and writes its access records through
+	// storage images, which requires vertex-stage stores as well. Requested only in that mode, so a
+	// normal session enables exactly the features it did before.
+	if (m_gpuValidation && features2.features.vertexPipelineStoresAndAtomics)
+		enabled.vertexPipelineStoresAndAtomics = VK_TRUE;
 	VkPhysicalDeviceFeatures2 enable2 = {};
 	enable2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
 	enable2.pNext = &enable12;
@@ -689,7 +963,99 @@ bool CVulkanContext::CreateDevice()
 		return false;
 	}
 	vkGetDeviceQueue(m_device, m_queueFamily, 0, &m_queue);
+	InfoLog("Vulkan: VK_KHR_present_wait %s.", m_presentWait
+		? "available - presentation is timed against the display"
+		: "unavailable - presentation is timed against the queue");
 	return true;
+}
+
+/*
+ * Persistent pipeline cache.
+ *
+ * Every pipeline in the backend - the 3D passes, the post chain, the 2D layers, the ImGui and
+ * overlay pipelines - is created against this one object, and the driver keeps the compiled shader
+ * blobs in it. Creating it from the file left by the previous run turns the first seconds of a
+ * session from "compile everything again" into a few milliseconds of reading.
+ *
+ * Incompatible data is not an error. A cache written by another driver, another GPU, or a run that
+ * was killed mid-write is rejected and the object is created empty - which is exactly the state a
+ * fresh installation is in anyway.
+ */
+bool CVulkanContext::CreatePipelineCache(const std::string& tag)
+{
+	m_pipelineCachePath = FileSystemPath::GetPath(FileSystemPath::Cache) + "pipelines-" + tag + ".bin";
+
+	std::vector<uint8_t> initial;
+	{
+		std::ifstream in(m_pipelineCachePath, std::ios::binary | std::ios::ate);
+		if (in)
+		{
+			const std::streamoff size = in.tellg();
+			if (size > 0)
+			{
+				initial.resize((size_t)size);
+				in.seekg(0);
+				in.read(reinterpret_cast<char*>(initial.data()), (std::streamsize)size);
+				if (!in)
+					initial.clear();
+			}
+		}
+	}
+
+	VkPipelineCacheCreateInfo info = {};
+	info.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+	info.initialDataSize = initial.size();
+	info.pInitialData = initial.empty() ? nullptr : initial.data();
+
+	VkResult result = vkCreatePipelineCache(m_device, &info, nullptr, &m_pipelineCache);
+	if (result != VK_SUCCESS)
+	{
+		InfoLog("Vulkan: pipeline cache '%s' was rejected (%d); starting empty.", m_pipelineCachePath.c_str(), (int)result);
+		info.initialDataSize = 0;
+		info.pInitialData = nullptr;
+		if (vkCreatePipelineCache(m_device, &info, nullptr, &m_pipelineCache) != VK_SUCCESS)
+		{
+			m_pipelineCache = VK_NULL_HANDLE;
+			return false;
+		}
+	}
+	else if (!initial.empty())
+	{
+		InfoLog("Vulkan: pipeline cache loaded from '%s' (%.1f KB).", m_pipelineCachePath.c_str(), initial.size() / 1024.0);
+	}
+	return true;
+}
+
+void CVulkanContext::SavePipelineCache()
+{
+	if (m_pipelineCache == VK_NULL_HANDLE)
+		return;
+
+	size_t size = 0;
+	if (vkGetPipelineCacheData(m_device, m_pipelineCache, &size, nullptr) == VK_SUCCESS && size > 0)
+	{
+		std::vector<uint8_t> data(size);
+		if (vkGetPipelineCacheData(m_device, m_pipelineCache, &size, data.data()) == VK_SUCCESS)
+		{
+			// Written under a temporary name and renamed over the old file: a crash in the middle of
+			// this must not leave a truncated cache that is rejected on every following start.
+			const std::string temporary = m_pipelineCachePath + ".part";
+			std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+			bool written = out && out.write(reinterpret_cast<const char*>(data.data()), (std::streamsize)size);
+			out.close();
+
+			std::error_code error;
+			if (written)
+				std::filesystem::rename(temporary, m_pipelineCachePath, error);
+			if (written && !error)
+				InfoLog("Vulkan: pipeline cache saved to '%s' (%.1f KB).", m_pipelineCachePath.c_str(), size / 1024.0);
+			else
+				InfoLog("Vulkan: could not write pipeline cache '%s'.", m_pipelineCachePath.c_str());
+		}
+	}
+
+	vkDestroyPipelineCache(m_device, m_pipelineCache, nullptr);
+	m_pipelineCache = VK_NULL_HANDLE;
 }
 
 bool CVulkanContext::CreateSwapchain()
@@ -754,7 +1120,7 @@ bool CVulkanContext::CreateSwapchain()
 	else
 	{
 		int w = 0, h = 0;
-		SDL_GetWindowSize(m_window, &w, &h);
+		OSD::Platform::GetWindowSize(m_window, &w, &h);
 		m_extent.width = std::max(caps.minImageExtent.width, std::min(caps.maxImageExtent.width, (uint32_t)w));
 		m_extent.height = std::max(caps.minImageExtent.height, std::min(caps.maxImageExtent.height, (uint32_t)h));
 	}
@@ -821,6 +1187,10 @@ bool CVulkanContext::CreateSwapchain()
 	if (m_swapchain)
 		vkDestroySwapchainKHR(m_device, m_swapchain, nullptr);
 	m_swapchain = fresh;
+	// The new swapchain has had no presents yet, so there is no id a wait may refer to until EndFrame()
+	// submits one on it. Ids in m_presentId keep counting up, which the spec requires of a swapchain's
+	// ids and costs nothing across a recreation.
+	m_swapchainPresentId = 0;
 
 	uint32_t got = 0;
 	vkGetSwapchainImagesKHR(m_device, m_swapchain, &got, nullptr);
@@ -856,6 +1226,7 @@ void CVulkanContext::DestroySwapchain()
 	}
 	m_images.clear();
 	m_imageSeen.clear();
+	m_swapchainPresentId = 0;
 	if (m_swapchain)
 	{
 		vkDestroySwapchainKHR(m_device, m_swapchain, nullptr);
@@ -914,7 +1285,7 @@ bool CVulkanContext::RecreateSwapchain()
 		return false;
 	vkDeviceWaitIdle(m_device);
 	int w = 0, h = 0;
-	SDL_GetWindowSize(m_window, &w, &h);
+	OSD::Platform::GetWindowSize(m_window, &w, &h);
 	if (w == 0 || h == 0)
 		return false;
 	return CreateSwapchain();
@@ -944,7 +1315,7 @@ bool CVulkanContext::BeginFrame()
 		WriteScreenshot();
 
 	int w = 0, h = 0;
-	SDL_GetWindowSize(m_window, &w, &h);
+	OSD::Platform::GetWindowSize(m_window, &w, &h);
 	if (w == 0 || h == 0)
 		return false;
 
@@ -989,12 +1360,42 @@ void CVulkanContext::RecordScreenshotCopy(VkCommandBuffer cmd)
 {
 	if (m_screenshotRequests <= 0 || !m_swapTransferSrc)
 		return;
+	if (!RecordFrameCopy(cmd))
+		return;
+
+	m_captureIsThumbnail = false;
+	// The request is consumed here; the capture now waits for its frame slot to come round again,
+	// which is when the copy is guaranteed complete (see BeginFrame).
+	m_screenshotRequests--;
+}
+
+void CVulkanContext::RequestThumbnail(const std::string& path, uint32_t width, uint32_t height)
+{
+	m_thumbnailPath = path;
+	m_thumbnailWidth = (width > 0) ? width : 320;
+	m_thumbnailHeight = (height > 0) ? height : 240;
+	m_thumbnailRequests++;
+}
+
+void CVulkanContext::RecordThumbnailCopy(VkCommandBuffer cmd)
+{
+	if (m_thumbnailRequests <= 0 || !m_swapTransferSrc)
+		return;
+	if (!RecordFrameCopy(cmd))
+		return;
+
+	m_captureIsThumbnail = true;
+	m_thumbnailRequests--;
+}
+
+bool CVulkanContext::RecordFrameCopy(VkCommandBuffer cmd)
+{
 	// A capture that has not been read back yet already owns the staging buffer, and a worker may
 	// still be reading it.
 	if (m_screenshotPendingSlot >= 0 || m_screenshotBusy)
-		return;
+		return false;
 	if (m_extent.width == 0 || m_extent.height == 0)
-		return;
+		return false;
 
 	const VkDeviceSize needed = (VkDeviceSize)m_extent.width * m_extent.height * 4;
 
@@ -1010,7 +1411,8 @@ void CVulkanContext::RecordScreenshotCopy(VkCommandBuffer cmd)
 		{
 			ErrorLog("Vulkan: could not allocate the screenshot staging buffer.");
 			m_screenshotRequests = 0;
-			return;
+			m_thumbnailRequests = 0;
+			return false;
 		}
 		m_screenshotSize = needed;
 	}
@@ -1033,10 +1435,9 @@ void CVulkanContext::RecordScreenshotCopy(VkCommandBuffer cmd)
 	vkCmdCopyImageToBuffer(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, m_screenshotBuffer.buffer, 1, &region);
 
 	CmdTransition(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-	// The request is consumed here; the capture now waits for its frame slot to come round again,
-	// which is when the copy is guaranteed complete (see BeginFrame).
-	m_screenshotRequests--;
+
 	m_screenshotPendingSlot = (int32_t)m_frame;
+	return true;
 }
 
 /*
@@ -1070,11 +1471,79 @@ void CVulkanContext::WriteScreenshot()
 	const uint8_t* src = static_cast<const uint8_t*>(m_screenshotBuffer.mapped);
 	const uint32_t width = m_extent.width;
 	const uint32_t height = m_extent.height;
-	const std::string path = m_screenshotPath;
 	const bool swapRedBlue = (m_swapFormat == VK_FORMAT_B8G8R8A8_UNORM ||
 	                          m_swapFormat == VK_FORMAT_B8G8R8A8_SRGB);
 
+	if (m_captureIsThumbnail)
+	{
+		/*
+		 * Save-state thumbnail: a small 4:3 crop of the frame that was captured before the interface
+		 * was drawn. The same worker and staging buffer as a screenshot are used; only the output
+		 * differs, so the two paths cannot disagree about when the buffer is safe to read.
+		 */
+		const uint32_t outWidth = m_thumbnailWidth;
+		const uint32_t outHeight = m_thumbnailHeight;
+		const std::string path = m_thumbnailPath;
+
+		uint32_t cropWidth = width;
+		uint32_t cropHeight = height;
+		uint32_t cropX = 0;
+		uint32_t cropY = 0;
+		if ((uint64_t)cropWidth * 3 > (uint64_t)cropHeight * 4)
+		{
+			cropWidth = cropHeight * 4 / 3;
+			cropX = (width - cropWidth) / 2;
+		}
+		else if ((uint64_t)cropWidth * 3 < (uint64_t)cropHeight * 4)
+		{
+			cropHeight = cropWidth * 3 / 4;
+			cropY = (height - cropHeight) / 2;
+		}
+
+		m_screenshotBusy = true;
+		m_screenshotThread = std::thread([this, src, width, cropX, cropY, cropWidth, cropHeight, outWidth, outHeight,
+			path, swapRedBlue]()
+		{
+			std::vector<uint8_t> rgb((size_t)outWidth * outHeight * 3);
+			for (uint32_t y = 0; y < outHeight; ++y)
+			{
+				const uint32_t sourceY = cropY + y * cropHeight / outHeight;
+				for (uint32_t x = 0; x < outWidth; ++x)
+				{
+					const uint32_t sourceX = cropX + x * cropWidth / outWidth;
+					const uint8_t* texel = src + ((size_t)sourceY * width + sourceX) * 4;
+					uint8_t* target = rgb.data() + ((size_t)y * outWidth + x) * 3;
+					target[0] = swapRedBlue ? texel[2] : texel[0];
+					target[1] = texel[1];
+					target[2] = swapRedBlue ? texel[0] : texel[2];
+				}
+			}
+
+			// Written under a temporary name and renamed when complete: the caller polls for the
+			// file and must never pick up a half-written PNG.
+			const std::string partial = path + ".part";
+			std::error_code error;
+			std::filesystem::remove(partial, error);
+			if (!Util::PNG::WriteRGB(partial, rgb.data(), (int32_t)outWidth, (int32_t)outHeight))
+			{
+				std::filesystem::remove(path, error);
+				std::filesystem::rename(partial, path, error);
+				if (error)
+					ErrorLog("Vulkan: could not move the save thumbnail into place (%s).", error.message().c_str());
+			}
+			else
+			{
+				std::filesystem::remove(partial, error);
+				ErrorLog("Vulkan: failed to write the save thumbnail to %s.", path.c_str());
+			}
+
+			m_screenshotBusy = false;
+		});
+		return;
+	}
+
 	m_screenshotBusy = true;
+	const std::string path = m_screenshotPath;
 	m_screenshotThread = std::thread([this, src, width, height, path, swapRedBlue]()
 	{
 		const size_t pixels = (size_t)width * height;
@@ -1126,6 +1595,17 @@ void CVulkanContext::WriteScreenshot()
 	});
 }
 
+void CVulkanContext::RebindFunctionPointers()
+{
+	if (m_instance == VK_NULL_HANDLE)
+		return;
+	// Instance first: volkLoadInstance resets the device-level entries to the uninitialised stubs,
+	// so the device binding has to come after it.
+	volkLoadInstance(m_instance);
+	if (m_device != VK_NULL_HANDLE)
+		volkLoadDevice(m_device);
+}
+
 void CVulkanContext::EndFrame()
 {
 	if (!m_recording)
@@ -1139,7 +1619,8 @@ void CVulkanContext::EndFrame()
 		VkImageLayout oldLayout = (m_imageIndex < m_imageSeen.size() && m_imageSeen[m_imageIndex])
 			? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
 			: VK_IMAGE_LAYOUT_UNDEFINED;
-		CmdTransition(frame.cmd, m_images[m_imageIndex].image, oldLayout, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_ASPECT_COLOR_BIT);
+		CmdTransition(frame.cmd, m_images[m_imageIndex].image, oldLayout, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_ASPECT_COLOR_BIT,
+			0, 1, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT);
 		if (m_imageIndex < m_imageSeen.size())
 			m_imageSeen[m_imageIndex] = 1;
 		m_swapReady = true;
@@ -1177,11 +1658,182 @@ void CVulkanContext::EndFrame()
 	present.swapchainCount = 1;
 	present.pSwapchains = &m_swapchain;
 	present.pImageIndices = &m_imageIndex;
+
+	/*
+	 * Number the present so that WaitForPresentDisplay() can ask about this exact image.
+	 *
+	 * The id has to be larger than every id previously submitted for the swapchain, which a counter
+	 * that never resets satisfies after a recreation as well.
+	 */
+	VkPresentIdKHR presentId = {};
+	if (m_presentWait)
+	{
+		m_swapchainPresentId = ++m_presentId;
+		presentId.sType = VK_STRUCTURE_TYPE_PRESENT_ID_KHR;
+		presentId.swapchainCount = 1;
+		presentId.pPresentIds = &m_swapchainPresentId;
+		present.pNext = &presentId;
+	}
+
 	VkResult presented = vkQueuePresentKHR(m_queue, &present);
 	m_recording = false;
 	m_frame = (m_frame + 1) % kMaxFramesInFlight;
 	if (presented == VK_ERROR_OUT_OF_DATE_KHR || presented == VK_SUBOPTIMAL_KHR)
 		RecreateSwapchain();
+}
+
+bool CVulkanContext::WaitForPresentDisplay(uint64_t timeoutNs)
+{
+	if (!m_presentWait || m_swapchainPresentId == 0 || m_swapchain == VK_NULL_HANDLE || !vkWaitForPresentKHR)
+		return false;
+
+	const VkResult result = vkWaitForPresentKHR(m_device, m_swapchain, m_swapchainPresentId, timeoutNs);
+	if (result == VK_SUCCESS)
+		return true;
+
+	// A timeout is the expected answer whenever the deadline arrives before the compositor does: the
+	// caller has spent exactly the time it was going to sleep, so it says nothing about the feature.
+	if (result == VK_TIMEOUT)
+		return false;
+
+	// The swapchain is about to be rebuilt and its ids with it, so the next wait has nothing to ask
+	// about yet. Not an error.
+	if (result == VK_ERROR_OUT_OF_DATE_KHR)
+		return false;
+
+	// Anything else means the driver cannot answer for present ids on this device. Asking again every
+	// frame would turn a one-off into a per-frame stall, so the feature is dropped and the caller
+	// falls back to the wall clock.
+	InfoLog("Vulkan: vkWaitForPresentKHR returned %d; presentation timing falls back to the queue.", (int)result);
+	m_presentWait = false;
+	return false;
+}
+
+bool CVulkanContext::CaptureThumbnail(const std::string& pngPath, uint32_t width, uint32_t height)
+{
+	if (!m_device || m_swapchain == VK_NULL_HANDLE || m_images.empty() ||
+		m_extent.width == 0 || m_extent.height == 0 || width == 0 || height == 0)
+		return false;
+
+	// The save path is a cold path and the emulator is paused here, so waiting
+	// for the device is safe and makes the readback self-contained.
+	vkDeviceWaitIdle(m_device);
+
+	VkCommandPool pool = VK_NULL_HANDLE;
+	VkCommandPoolCreateInfo poolInfo = {};
+	poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+	poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+	poolInfo.queueFamilyIndex = m_queueFamily;
+	if (vkCreateCommandPool(m_device, &poolInfo, nullptr, &pool) != VK_SUCCESS)
+		return false;
+
+	VkCommandBuffer command = VK_NULL_HANDLE;
+	VkCommandBufferAllocateInfo allocate = {};
+	allocate.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+	allocate.commandPool = pool;
+	allocate.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	allocate.commandBufferCount = 1;
+	if (vkAllocateCommandBuffers(m_device, &allocate, &command) != VK_SUCCESS)
+	{
+		vkDestroyCommandPool(m_device, pool, nullptr);
+		return false;
+	}
+
+	const VkDeviceSize bytes = (VkDeviceSize)m_extent.width * m_extent.height * 4;
+	AllocatedBuffer staging;
+	if (!m_memory.CreateBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, staging))
+	{
+		vkDestroyCommandPool(m_device, pool, nullptr);
+		return false;
+	}
+
+	VkFenceCreateInfo fenceInfo = {};
+	fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+	VkFence fence = VK_NULL_HANDLE;
+	if (vkCreateFence(m_device, &fenceInfo, nullptr, &fence) != VK_SUCCESS)
+	{
+		m_memory.DestroyBuffer(staging);
+		vkDestroyCommandPool(m_device, pool, nullptr);
+		return false;
+	}
+
+	VkCommandBufferBeginInfo begin = {};
+	begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	vkBeginCommandBuffer(command, &begin);
+
+	const VkImage image = m_images[m_imageIndex].image;
+	CmdTransition(command, image, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+		VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+
+	VkBufferImageCopy region = {};
+	region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	region.imageSubresource.layerCount = 1;
+	region.imageExtent = { m_extent.width, m_extent.height, 1 };
+	vkCmdCopyImageToBuffer(command, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging.buffer, 1, &region);
+
+	CmdTransition(command, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_ASPECT_COLOR_BIT);
+
+	vkEndCommandBuffer(command);
+
+	VkCommandBufferSubmitInfo commandInfo = {};
+	commandInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+	commandInfo.commandBuffer = command;
+	VkSubmitInfo2 submit = {};
+	submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+	submit.commandBufferInfoCount = 1;
+	submit.pCommandBufferInfos = &commandInfo;
+	QueueSubmit2(m_queue, 1, &submit, fence);
+	vkWaitForFences(m_device, 1, &fence, VK_TRUE, UINT64_MAX);
+
+	bool ok = false;
+	if (staging.mapped != nullptr)
+	{
+		const uint8_t* source = static_cast<const uint8_t*>(staging.mapped);
+		const bool swapRedBlue = (m_swapFormat == VK_FORMAT_B8G8R8A8_UNORM ||
+		                          m_swapFormat == VK_FORMAT_B8G8R8A8_SRGB);
+
+		// Keep the thumbnail 4:3 even when the game is displayed widescreen:
+		// crop the centre of the presented image first, then scale it.
+		uint32_t cropWidth = m_extent.width;
+		uint32_t cropHeight = m_extent.height;
+		uint32_t cropX = 0;
+		uint32_t cropY = 0;
+		if ((uint64_t)cropWidth * 3 > (uint64_t)cropHeight * 4)
+		{
+			cropWidth = cropHeight * 4 / 3;
+			cropX = (m_extent.width - cropWidth) / 2;
+		}
+		else if ((uint64_t)cropWidth * 3 < (uint64_t)cropHeight * 4)
+		{
+			cropHeight = cropWidth * 3 / 4;
+			cropY = (m_extent.height - cropHeight) / 2;
+		}
+
+		std::vector<uint8_t> rgb((size_t)width * height * 3);
+		for (uint32_t y = 0; y < height; ++y)
+		{
+			const uint32_t sourceY = cropY + y * cropHeight / height;
+			for (uint32_t x = 0; x < width; ++x)
+			{
+				const uint32_t sourceX = cropX + x * cropWidth / width;
+				const uint8_t* texel = source + ((size_t)sourceY * m_extent.width + sourceX) * 4;
+				uint8_t* target = rgb.data() + ((size_t)y * width + x) * 3;
+				target[0] = swapRedBlue ? texel[2] : texel[0];
+				target[1] = texel[1];
+				target[2] = swapRedBlue ? texel[0] : texel[2];
+			}
+		}
+
+		ok = !Util::PNG::WriteRGB(pngPath, rgb.data(), (int32_t)width, (int32_t)height);
+	}
+
+	vkDestroyFence(m_device, fence, nullptr);
+	m_memory.DestroyBuffer(staging);
+	vkDestroyCommandPool(m_device, pool, nullptr);
+	return ok;
 }
 
 VkImageView CVulkanContext::CreateView(VkImage image, VkFormat format, VkImageAspectFlags aspect, uint32_t baseMip, uint32_t mipCount)

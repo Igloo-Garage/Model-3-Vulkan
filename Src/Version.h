@@ -33,6 +33,10 @@
  *   SUPERMODEL_TITLE     what the interface calls itself. This build is the Vulkan-focused fork, so
  *                        the title names the renderer and credits the upstream release it is based
  *                        on rather than passing itself off as a plain upstream build.
+ *
+ * Naming: the product/executable is "Model 3-Vulkan" / Model3-Vulkan.exe.  "Supermodel-VK"
+ * remains the repository and console-banner name, so do not rename the licence headers or the
+ * upstream references to match the executable.
  */
 
 #ifndef INCLUDED_VERSION_H
@@ -50,10 +54,18 @@
 #define SUPERMODEL_BASE_RELEASE	"0.3a-2026.09.28"
 #endif
 
-// Window title and settings header, and the name of the distributed folder. Kept short: it has to
-// fit a title bar and sit next to a one-line hint without pushing it off the window.
+// Window title and settings header. Kept short: it has to fit a title bar and sit next to a
+// one-line hint without pushing it off the window.
+//
+// The two executables are named apart on purpose: they are not two renderer choices of one program
+// but two builds whose renderer is fixed at compile time.  The Vulkan build is the product called
+// "Model 3-Vulkan"; the OpenGL build keeps its own historical name.
 #ifndef SUPERMODEL_TITLE
-#define SUPERMODEL_TITLE	"Supermodel-VK"
+#if defined(SUPERMODEL_OPENGL_ONLY)
+#define SUPERMODEL_TITLE	"Supermodel-OpenGL"
+#else
+#define SUPERMODEL_TITLE	"Model 3-Vulkan"
+#endif
 #endif
 
 /*
@@ -65,7 +77,7 @@
  * reusing a version updates (and overwrites) the previous release rather than creating a new one.
  */
 #ifndef SUPERMODEL_FORK_VERSION
-#define SUPERMODEL_FORK_VERSION	"0.9.2.4a"
+#define SUPERMODEL_FORK_VERSION	"0.9.8.3a"
 #endif
 
 /*

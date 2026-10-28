@@ -26,6 +26,8 @@
 #include "OSD/Logger.h"
 
 #include <cstdio>
+#include <cstddef>
+#include <cstdlib>
 #include <map>
 #include <memory>
 #include <filesystem>
@@ -220,6 +222,15 @@ static Decoder dec{};
 
 void MpegDec::SetMemory(const uint8_t *data, int offset, int length, bool loop)
 {
+  // A save state is external input: a stale MPEG range, a negative length or a missing ROM
+  // must never reach the decoder as a live window. Stop() clears the window, so the next
+  // DecodeAudio() produces silence instead of walking an invalid buffer.
+  if (data == nullptr || offset < 0 || length <= 0)
+  {
+    Stop();
+    return;
+  }
+
   mp3dec_init(&dec.mp3d);
 
   auto it = s_custom_tracks_by_mpeg_rom_address.find(offset);
@@ -257,20 +268,35 @@ void MpegDec::SetMemory(const uint8_t *data, int offset, int length, bool loop)
 
 void MpegDec::UpdateMemory(const uint8_t* data, int offset, int length, bool loop)
 {
-  auto it = s_custom_tracks_by_mpeg_rom_address.find(offset);
-  if (it == s_custom_tracks_by_mpeg_rom_address.end()) {
-    // MPEG ROM
-  	int diff;
-  	if ((data + offset) > dec.buffer) {
-  		diff = (int)(data + offset - dec.buffer);
-  	}
-  	else {
-  		diff = -(int)(dec.buffer - data - offset);
-  	}
-    dec.buffer  = data + offset;
-    dec.size    = length;
-    dec.pos     = dec.pos - diff; // update position relative to our new start location
+  // A bad loop range must not overwrite a valid playing window. Disable looping and keep
+  // the current window; SetMemory() is the only place that may establish a new one.
+  if (data == nullptr || offset < 0 || length <= 0)
+  {
+    dec.loop = false;
+    return;
   }
+  if (dec.buffer == nullptr)
+  {
+    SetMemory(data, offset, length, loop);
+    return;
+  }
+
+  	auto it = s_custom_tracks_by_mpeg_rom_address.find(offset);
+  	if (it == s_custom_tracks_by_mpeg_rom_address.end()) {
+  		// MPEG ROM. Clear the custom-track marker too: it used to survive a switch back to the
+  		// ROM, which made the active window look file-backed to the save-state reader.
+  		int diff;
+  		if ((data + offset) > dec.buffer) {
+  			diff = (int)(data + offset - dec.buffer);
+  		}
+  		else {
+  			diff = -(int)(dec.buffer - data - offset);
+  		}
+  		dec.buffer  = data + offset;
+  		dec.size    = length;
+  		dec.pos     = dec.pos - diff; // update position relative to our new start location
+  		dec.custom_mpeg_data = nullptr;
+  	}
   else {
     // Custom track available. This is tricky. This command updates the start/end pointers (usually
     // used by games to create a loop point). We need to ensure that the custom track definition is
@@ -310,8 +336,36 @@ int MpegDec::GetPosition()
 	return (int)dec.pos;
 }
 
+int MpegDec::GetActiveOffset(const uint8_t *romBase)
+{
+	// A custom track is addressed by file, not by ROM offset, so it cannot be expressed as a
+	// window into the MPEG ROM; the caller falls back to the legacy fields for those.
+	if (dec.buffer == nullptr || dec.custom_mpeg_data != nullptr || romBase == nullptr)
+		return -1;
+
+	const ptrdiff_t offset = dec.buffer - romBase;
+	if (offset < 0 || offset > (ptrdiff_t)INT32_MAX)
+		return -1;
+
+	return (int)offset;
+}
+
+int MpegDec::GetActiveSize()
+{
+	return (dec.buffer != nullptr) ? dec.size : 0;
+}
+
+bool MpegDec::GetLoop()
+{
+	return (dec.buffer != nullptr) && dec.loop;
+}
+
 void MpegDec::SetPosition(int pos)
 {
+	// The saved offset is relative to the active window. A stale or out-of-range value is
+	// clamped rather than trusted; DecodeAudio() then starts from the beginning of the window.
+	if (pos < 0 || dec.size <= 0 || pos >= dec.size)
+		pos = 0;
 	dec.pos = pos;
 }
 
@@ -346,7 +400,17 @@ static bool EndOfBuffer()
 
 void MpegDec::Stop()
 {
+	// Clear the window as well as the flag. IsLoaded() is used by the save state as its
+	// "isPlaying" flag, so leaving buffer/size set made a stopped track look loaded on the
+	// next save and restored the same invalid range again.
 	dec.stopped = true;
+	dec.buffer = nullptr;
+	dec.size = 0;
+	dec.pos = 0;
+	dec.pcmPos = 0;
+	dec.numSamples = 0;
+	dec.loop = false;
+	dec.custom_mpeg_data = nullptr;
 }
 
 bool MpegDec::IsLoaded()
@@ -356,38 +420,101 @@ bool MpegDec::IsLoaded()
 
 void MpegDec::DecodeAudio(int16_t* left, int16_t* right, int numStereoSamples)
 {
-	// if we are stopped return silence
-	if (dec.stopped || !dec.buffer) {
+	// An empty or negative window is a terminal condition, not something to retry. This is
+	// the case a stale save state used to turn into an infinite loop.
+	if (dec.stopped || dec.buffer == nullptr || dec.size <= 0)
+	{
 		EndWithSilence(left, right, numStereoSamples);
+		return;
 	}
 
 	// copy any left over samples first
 	FlushBuffer(left, right, numStereoSamples);
 
-	while (numStereoSamples) {
+	static const bool loadDebug = std::getenv("SM3D_LOAD_DEBUG") != nullptr;
+	int noProgress = 0;
+	int zeroSampleFrames = 0;
+
+	while (numStereoSamples > 0)
+	{
+		if (dec.pos < 0 || EndOfBuffer())
+		{
+			if (dec.loop && zeroSampleFrames == 0)
+				dec.pos = 0;
+			else
+			{
+				EndWithSilence(left, right, numStereoSamples);
+				break;
+			}
+		}
+
+		const int remaining = dec.size - dec.pos;
+		if (remaining <= 0)
+		{
+			EndWithSilence(left, right, numStereoSamples);
+			break;
+		}
+
+		const int posBefore = dec.pos;
+		const int samplesBefore = numStereoSamples;
 
 		dec.numSamples = mp3dec_decode_frame(
 			&dec.mp3d,
 			dec.buffer + dec.pos,
-			dec.size - dec.pos,
+			remaining,
 			dec.pcm,
 			&dec.info);
+
+		// minimp3 reports a negative or zero frame size on invalid data. Adding it to
+		// dec.pos would move backwards or leave the position unchanged; both end here.
+		if (dec.info.frame_bytes <= 0)
+		{
+			EndWithSilence(left, right, numStereoSamples);
+			break;
+		}
 
 		dec.pos += dec.info.frame_bytes;
 		dec.pcmPos = 0;	// reset pos
 
-		FlushBuffer(left, right, numStereoSamples);
+		if (dec.pos <= posBefore)
+		{
+			EndWithSilence(left, right, numStereoSamples);
+			break;
+		}
 
-		// check end of buffer handling
-		if (EndOfBuffer()) {
-			if (dec.loop) {
+		if (dec.numSamples > 0)
+		{
+			zeroSampleFrames = 0;
+			FlushBuffer(left, right, numStereoSamples);
+		}
+		else if (++zeroSampleFrames > 8)
+		{
+			// Skipped ID3/padding frames are allowed, but not without bound.
+			EndWithSilence(left, right, numStereoSamples);
+			break;
+		}
+
+		if (EndOfBuffer())
+		{
+			if (dec.loop)
 				dec.pos = 0;
-			}
-			else {
+			else
+			{
 				EndWithSilence(left, right, numStereoSamples);
+				break;
 			}
 		}
 
+		if (loadDebug && dec.pos == posBefore && numStereoSamples == samplesBefore)
+		{
+			if (++noProgress == 1000)
+				InfoLog("LoadDebug mpeg stalled pos=%d size=%d frame_bytes=%d samples=%d",
+					dec.pos, dec.size, dec.info.frame_bytes, dec.numSamples);
+		}
+		else
+		{
+			noProgress = 0;
+		}
 	}
 
 }

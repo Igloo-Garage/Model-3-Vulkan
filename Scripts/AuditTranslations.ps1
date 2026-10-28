@@ -47,11 +47,19 @@ function Unescape([string]$raw)
 }
 
 # The set of keys the table already provides.
+#
+# An entry's key may be built from several adjacent literals, exactly like a string passed to Tr():
+# the theme tooltips are written that way. Joining them here matters, because a line-based scan sees
+# only the first fragment and then reports a translated string as missing.
 $table = [System.Collections.Generic.HashSet[string]]::new()
-foreach ($line in ($loc -split "`n"))
+foreach ($m in [regex]::Matches($loc, '(?m)^\s*\{\s*("(?:[^"\\]|\\.)*"(?:\s*"(?:[^"\\]|\\.)*")*)\s*,'))
 {
-    $m = [regex]::Match($line, '^\s*\{\s*"((?:[^"\\]|\\.)*)"\s*,')
-    if ($m.Success) { [void]$table.Add((Unescape $m.Groups[1].Value)) }
+    $keyRaw = ''
+    foreach ($lit in [regex]::Matches($m.Groups[1].Value, '"(?:[^"\\]|\\.)*"'))
+    {
+        $keyRaw += $lit.Value.Substring(1, $lit.Value.Length - 2)
+    }
+    [void]$table.Add((Unescape $keyRaw))
 }
 
 # Walk the file collecting string literals and remembering whether the previous token was also a

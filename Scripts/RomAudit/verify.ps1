@@ -27,12 +27,12 @@ if (-not $ExeDir) {
 }
 if (-not $RomDir) { $RomDir = "E:\EMU\model-3-romset-2020" }
 
-if (-not (Test-Path (Join-Path $ExeDir "Supermodel-VK.exe"))) {
-    Write-Error "Supermodel-VK.exe not found in $ExeDir - set -ExeDir"
+if (-not (Test-Path (Join-Path $ExeDir "Supermodel-LegacyOG.exe"))) {
+    Write-Error "Supermodel-LegacyOG.exe not found in $ExeDir - set -ExeDir"
     exit 2
 }
 
-$exe = Join-Path $ExeDir "Supermodel-VK.exe"
+$exe = Join-Path $ExeDir "Supermodel-LegacyOG.exe"
 $log = Join-Path $ExeDir "Data\Supermodel.log"
 
 foreach ($raw in ($Sets -split ",")) {

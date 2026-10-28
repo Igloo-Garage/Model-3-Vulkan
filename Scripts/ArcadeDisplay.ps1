@@ -491,21 +491,28 @@ function Find-Supermodel
     # a script that only exists in the repository makes that an instruction nobody can follow.
     #
     # Distribution layout nests it one level down, beside the program:
-    #     Supermodel-VK\Supermodel-VK.exe
+    #     Supermodel-VK\Model3-Vulkan.exe
     #     Supermodel-VK\Scripts\ArcadeDisplay.ps1
     # A checkout puts the executable under MSVC\ instead, which is the fallback below.
     $parent = Resolve-Path (Join-Path $PSScriptRoot '..')
 
-    foreach ($name in @('Supermodel-VK.exe', 'Supermodel.exe'))
+    # The Vulkan build first: it is the one the manual recommends and the one the display helper is
+    # most often used with. LegacyOG and the pre-rename names stay in the list, so a distribution
+    # assembled before the two-executable layout (or one that has been trimmed to a single exe) still
+    # resolves.
+    foreach ($name in @('Model3-Vulkan.exe', 'Supermodel-VK-SDL3.exe', 'Supermodel-LegacyOG.exe', 'Supermodel-VK.exe', 'Supermodel.exe'))
     {
         $candidate = Join-Path $parent $name
         if (Test-Path $candidate) { return (Resolve-Path $candidate).Path }
     }
 
+    $candidate = Join-Path $parent 'MSVC\x64\Release\Supermodel-LegacyOG.exe'
+    if (Test-Path $candidate) { return (Resolve-Path $candidate).Path }
+
     $candidate = Join-Path $parent 'MSVC\x64\Release\Supermodel.exe'
     if (Test-Path $candidate) { return (Resolve-Path $candidate).Path }
 
-    throw 'Supermodel was not found next to this script or under MSVC\x64\Release; pass -SupermodelExe <path>.'
+    throw 'Model 3-Vulkan / Supermodel-LegacyOG was not found next to this script or under MSVC\x64\Release; pass -SupermodelExe <path>.'
 }
 
 # ---------------------------------------------------------------------------

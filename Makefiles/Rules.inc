@@ -96,11 +96,11 @@ CXXFLAGS_GENERATE_DEPENDENCIES = $(filter-out -c $(ARCH),$(CXXFLAGS))
 SRC_FILES = \
 	Src/CPU/PowerPC/PPCDisasm.cpp \
 	Src/BlockFile.cpp \
-	Src/Pkgs/unzip.c \
-	Src/Pkgs/ioapi.c \
+	Src/Pkgs/unzip.cpp \
+	Src/Pkgs/ioapi.cpp \
 	Src/Model3/93C46.cpp \
-	Src/Model3/JTAG.cpp \
-	Src/Pkgs/glew.c \
+	Src/JTAG.cpp \
+	Src/Pkgs/glew.cpp \
 	Src/Graphics/Shader.cpp \
 	Src/Model3/Real3D.cpp \
 	Src/Graphics/New3D/GLSLShader.cpp \
@@ -120,6 +120,8 @@ SRC_FILES = \
 	Src/Graphics/Vulkan3D/VulkanContext.cpp \
 	Src/Graphics/Vulkan3D/VulkanTextureCache.cpp \
 	Src/Graphics/Vulkan3D/R3DSceneBuilder.cpp \
+	Src/Graphics/Vulkan3D/HDTextures.cpp \
+	Src/Graphics/Vulkan3D/UiBlur.cpp \
 	Src/Graphics/Vulkan3D/Vulkan2D.cpp \
 	Src/Graphics/Vulkan3D/Vulkan3D.cpp \
 	Src/Pkgs/volk_impl.cpp \
@@ -130,7 +132,13 @@ SRC_FILES = \
 	Src/Model3/Model3.cpp \
 	Src/CPU/PowerPC/ppc.cpp \
 	Src/OSD/SDL/Main.cpp \
+	Src/OSD/DisplayPacer.cpp \
+	Src/OSD/Platform/ImguiPlatform.cpp \
+	Src/OSD/Platform/SDL2/PlatformSDL2.cpp \
+	Src/OSD/Platform/SDL2/PlatformInputSDL2.cpp \
+	Src/OSD/Platform/SDL2/PlatformVulkanSDL2.cpp \
 	Src/OSD/SDL/Audio.cpp \
+	Src/OSD/SDL/FontProbe.cpp \
 	Src/OSD/SDL/Thread.cpp \
 	Src/OSD/SDL/Gui.cpp \
 	Src/OSD/SDL/Localization.cpp \
@@ -178,7 +186,6 @@ SRC_FILES = \
 	Src/Pkgs/tinyxml2.cpp \
 	Src/Pkgs/imgui/imgui.cpp \
 	Src/Pkgs/imgui/imgui_draw.cpp \
-	Src/Pkgs/imgui/imgui_impl_sdl2.cpp \
 	Src/Pkgs/imgui/imgui_impl_opengl3.cpp \
 	Src/Pkgs/imgui/imgui_impl_vulkan.cpp \
 	Src/Pkgs/imgui/imgui_tables.cpp \
@@ -267,7 +274,7 @@ release:: all
 #
 # Github release flow (not yet used).
 #
-PKG_FILES += $(BIN_DIR)/$(SUPERMODEL_BINARY) Docs/README.txt Docs/README-VK.txt Docs/安装说明.txt Docs/LICENSE.txt Config Assets Supermodel3Bezel.png
+PKG_FILES += $(BIN_DIR)/$(SUPERMODEL_BINARY) "Docs/README from The Supermodel Team.txt" Docs/LICENSE.txt usermanual.md usermanual_chs.md Config Assets Model3VulkanBezel.png
 
 pkg: pkg/$(PKG_TYPE)
 	$(info Cleaning up            : $(PKG_STAGE_PATH))
@@ -294,7 +301,7 @@ pkg/stage:: pkg/path
 	  echo "Recommended (but not mandatory) location for ROM sets." > ROMs/DIR.txt && \
 	  mv $(BIN_DIR)/$(SUPERMODEL_BINARY) . && rmdir $(BIN_DIR) && \
 	  mv Docs//* . && rmdir Docs && \
-	  if [ -f Supermodel3Bezel.png ]; then mv Supermodel3Bezel.png Assets/; fi
+	  if [ -f Model3VulkanBezel.png ]; then mv Model3VulkanBezel.png Assets/; fi
 	$(info Generating             : $(PKG_STAGE_PATH)/CHANGES.txt)
 	$(SILENT)./Scripts/changelog.sh $(PKG_STAGE_PATH)/CHANGES.txt
 
@@ -307,17 +314,12 @@ pkg/stage:: pkg/path
 # treats any '#' inside $(shell ...) as the start of a comment, truncates the line and fails with
 # "unterminated variable reference". Matching "define ... NAME" avoids the character entirely.
 FORK_VERSION := $(shell sed -n '/define[[:space:]][[:space:]]*SUPERMODEL_FORK_VERSION[[:space:]][[:space:]]*"/ s/.*"\([^"]*\)".*/\1/p' Src/Version.h)
-FORK_DATE := $(shell sed -n '/define[[:space:]][[:space:]]*SUPERMODEL_FORK_DATE[[:space:]][[:space:]]*"/ s/.*"\([^"]*\)".*/\1/p' Src/Version.h)
 
 ifeq ($(strip $(FORK_VERSION)),)
 # sed unavailable (e.g. a bare cmd.exe MinGW build): keep the old name rather than an empty one.
 PKG_STAGE_NAME = supermodel-$(VERSION)
 else
-ifeq ($(strip $(FORK_DATE)),)
 PKG_STAGE_NAME = Supermodel-VK.v$(FORK_VERSION)
-else
-PKG_STAGE_NAME = Supermodel-VK.v$(FORK_VERSION)-$(FORK_DATE)
-endif
 endif
 
 pkg/path: set_version

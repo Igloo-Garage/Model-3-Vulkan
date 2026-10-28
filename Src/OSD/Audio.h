@@ -40,6 +40,16 @@ extern void SetAudioEnabled(bool enabled);
 extern void SetAudioType(Game::AudioTypes type);
 
 /*
+ * FlushAudioBuffer()
+ *
+ * Drops everything queued for playback and restarts the ring buffer from the beginning. Called
+ * when the game has been stopped without producing audio - the window move/size loop, where Windows
+ * blocks the frame loop - so that the buffer's worth of audio from before the stall is not replayed
+ * when the game resumes.
+ */
+extern void FlushAudioBuffer(void);
+
+/*
  * OpenAudio()
  *
  * Initializes the audio system.
@@ -102,5 +112,40 @@ extern void CloseAudio();
  * audio clock).
  */
 extern void GetAudioBufferStats(unsigned *underruns, unsigned *overruns);
+
+/*
+ * GetAudioStatus()
+ *
+ * A snapshot of the output for the statistics readout: how much audio is queued ahead of the play
+ * position, how much the buffer holds in total, the host format, and whether output is muted.
+ *
+ * bufferMs is the figure worth watching. It falls towards zero when the emulator produces audio more
+ * slowly than the device consumes it - a frame loop missing its deadline, a stalled producer - and
+ * sits pinned at bufferSizeMs when the reverse happens. Both ends are already counted as under- and
+ * over-runs; the fill level says how much margin is left before the next one.
+ *
+ * Milliseconds rather than bytes or samples because that is the unit the problem is felt in, and
+ * because the byte count depends on the channel count, which is a setting.
+ *
+ * peakLeft/peakRight are measured before the mute and the volume/balance stages, and they are a
+ * window rather than a running maximum: GetAudioStatus() consumes them, so each call describes the
+ * audio produced since the previous one. That is deliberate - a peak read after the mute would be
+ * zero for both "the game is silent" and "the output is muted", which are the two cases this pair
+ * exists to tell apart.
+ */
+struct AudioStatus
+{
+    bool opened = false;        // a device is open and the ring buffer exists
+    bool muted = false;         // playback is intentionally silenced (Alt+P, the panel's pause)
+    unsigned bufferMs = 0;      // audio queued ahead of the play position
+    unsigned bufferSizeMs = 0;  // capacity of the ring buffer
+    unsigned channels = 0;      // host channels in use (1, 2 or 4)
+    unsigned underRuns = 0;     // cumulative since OpenAudio()
+    unsigned overRuns = 0;
+    float peakLeft = 0.0f;      // peak since the previous call, 1.0 = full scale (may exceed it)
+    float peakRight = 0.0f;
+};
+
+extern void GetAudioStatus(AudioStatus& status);
 
 #endif	// INCLUDED_AUDIO_H

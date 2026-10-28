@@ -1,15 +1,29 @@
 // Supermodel resources.
 //
-// Only the application icon lives here. The manifest is embedded by the linker
-// (/MANIFEST with AdditionalManifestFiles), not from this file, so that it stays a single
-// source of truth - embedding it twice makes the linker complain about a duplicate resource.
+// Two things live here: the application icon and the start-up artwork. The manifest is embedded
+// by the linker (/MANIFEST with AdditionalManifestFiles), not from this file, so that it stays a
+// single source of truth - embedding it twice makes the linker complain about a duplicate
+// resource.
 //
 // 101 is the conventional first icon id; Windows picks the lowest-numbered ICON resource as
 // the application icon, so this one is what Explorer, the taskbar and Alt-Tab show. The same
 // id is loaded at run time to give the windows themselves a title-bar icon (see SetWindowIcon
 // in Main.cpp), which is why it is a #define rather than a bare number: the two uses have to
 // agree, and a mismatch would be invisible until someone looked at the title bar.
+//
+// The artwork is a RCDATA resource rather than a file shipped next to the executable, so it
+// travels with the binary and cannot be replaced by dropping a file into the folder. Its id and
+// the hash the program checks it against are in Src/OSD/Windows/SplashResource.h, which is
+// included here so the id used to store it and the id used to load it are the same number.
+// The picture itself is the master at the project root - edit that one copy, then rebuild;
+// Scripts/UpdateSplashSignature.ps1 refreshes the hash and build.bat runs it for you.
 
 #define IDI_SUPERMODEL 101
 
-IDI_SUPERMODEL ICON "..\\Src\\OSD\\Windows\\Supermodel.ico"
+#include "..\\Src\\OSD\\Windows\\SplashResource.h"
+
+IDI_SUPERMODEL ICON "..\\output.ico"
+
+// Quoted because the master's name contains a space; the resource compiler takes the whole
+// string as the path.
+IDR_SPLASH RCDATA "..\\Igloo-Garage Presents.webp"

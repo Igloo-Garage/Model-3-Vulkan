@@ -42,8 +42,13 @@ public:
 	void SetViewport(unsigned xOff, unsigned yOff, unsigned xRes, unsigned yRes, unsigned totalX, unsigned totalY, bool wideScreen);
 	void BeginFrame();
 	void Build();
+	void ResetInterpolation();
 
 	std::vector<New3D::Node>& Nodes() { return m_nodes; }
+	const std::vector<New3D::Node>& Nodes() const { return m_nodes; }
+	std::vector<New3D::Node>& PreviousNodes() { return m_nodesPrev; }
+	bool HasPreviousScene() const { return m_prevValid; }
+	bool HasCurrentScene() const { return m_currValid; }
 	std::vector<New3D::FVertex>& RamVerts() { return m_polyBufferRam; }
 	std::vector<New3D::FVertex>& RomVerts() { return m_polyBufferRom; }
 	bool RomReset() const { return m_romReset; }
@@ -68,6 +73,7 @@ private:
 	bool IsDynamicModel(uint32_t* data) const;
 	bool IsVROMModel(uint32_t modelAddr) const;
 	void CalcViewport(New3D::Viewport* vp);
+	static uint64_t MixKey(uint64_t hash, uint64_t value);
 
 	int m_step = 0x10;
 	int m_offset = 2;
@@ -86,14 +92,22 @@ private:
 	bool m_wideScreen = false;
 
 	const float* m_matrixBasePtr = nullptr;
+	uint32_t m_matrixBaseAddr = 0;
+	uint32_t m_lastMatrixSlotID = 0;
+	uint64_t m_pathHash = 0;
 	uint32_t m_colorTableAddr = 0x400;
 	LODBlendTable* m_LODBlendTable = nullptr;
 	New3D::NodeAttributes m_nodeAttribs;
 	New3D::Mat4 m_modelMat;
+	New3D::Mat4 m_localMat;
+	New3D::Mat4 m_baseMat;
 	New3D::Vertex m_prev[4] = {};
 	uint16_t m_prevTexCoords[4][2] = {};
 
-	std::vector<New3D::Node> m_nodes;
+	std::vector<New3D::Node> m_nodes;        // current simulation frame
+	std::vector<New3D::Node> m_nodesPrev;    // previous simulation frame
+	bool m_currValid = false;
+	bool m_prevValid = false;
 	std::vector<New3D::FVertex> m_polyBufferRam;
 	std::vector<New3D::FVertex> m_polyBufferRom;
 	std::unordered_map<uint32_t, std::shared_ptr<std::vector<New3D::Mesh>>> m_romMap;

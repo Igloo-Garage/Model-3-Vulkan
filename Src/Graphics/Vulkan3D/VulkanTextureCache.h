@@ -23,9 +23,11 @@
 #define INCLUDED_VULKAN3D_TEXTURECACHE_H
 
 #include "VulkanContext.h"
+#include "HDTextures.h"
 #include <bitset>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Vulkan3D {
@@ -43,8 +45,41 @@ public:
 	void Shutdown();
 	void AttachMemory(const uint16_t* textureRam);
 
+	/*
+	 * Name of the running ROM set, used to pick the HD texture folder. Set before Init():
+	 * the pack opens its directory and starts its loader thread there.
+	 */
+	void SetGameName(const std::string& gameName) { m_gameName = gameName; }
+
 	// Thread-safe. Marks 32x32 tiles dirty; does not call Vulkan.
 	void UploadTextures(unsigned level, unsigned x, unsigned y, unsigned width, unsigned height);
+
+	/*
+	 * HD texture pack switches, read live from the configuration once per simulation frame.
+	 *
+	 * Load: replacements are looked up by content hash in HDTextures/<set>/.
+	 * Dump: each sub-texture that has not been written yet is exported as a PNG under
+	 *       DumpTextures/<set>/ on a background thread.
+	 */
+	void SetHDTextureOptions(bool load, bool dump);
+	bool HDLoadEnabled() const { return m_hdLoad; }
+	bool HDDumpEnabled() const { return m_hdDump; }
+	bool HDPackEmpty() const { return m_hdPack.IndexEmpty(); }
+
+	/*
+	 * 64-bit content hash of one base-level sub-texture, memoized per rectangle and invalidated
+	 * when any tile it covers is uploaded again. Returns 0 when texture RAM is not attached yet.
+	 */
+	uint64_t TextureHash(int page, int x, int y, int width, int height, int format);
+
+	// Queues a PNG export of a region, unless this hash has already been dumped this session.
+	void DumpTexture(uint64_t hash, int page, int x, int y, int width, int height, int format);
+
+	// Bindless slot of a replacement texture, or -1 while it is absent or still loading.
+	int ResolveHDTexture(uint64_t hash, int wrapX, int wrapY);
+
+	// Handles a reload request and the dump/load switches. Called once per simulation frame.
+	void TickHDTextures(bool load, bool dump);
 
 	// Returns a bindless slot. Creates the image if this key is new.
 	uint32_t Acquire(int page, int x, int y, int width, int height, int format, bool inverted);
@@ -76,8 +111,14 @@ public:
 	 * and a bug on this side) from a surface that really is dark (a lighting or modulation problem, and
 	 * the polygon data's fault). Coordinates are page-local, the same space the fragment shader
 	 * addresses in FetchTexel().
+	 *
+	 * A tile that is marked dirty right now is *not* reported as missing. This is called from the
+	 * simulation tick, which runs before the frame's uploads are recorded, so every texture the game
+	 * has just written is in exactly that state - and calling it a bug made the log accuse this file
+	 * of losing uploads that arrived a moment later. Only a tile that is neither on the GPU nor
+	 * waiting to go there is missing.
 	 */
-	Coverage RegionCoverage(int page, int x, int y, int width, int height) const;
+	Coverage RegionCoverage(int page, int x, int y, int width, int height);
 
 	/*
 	 * How many of a region's tiles the game has ever asked to upload, whether or not the copy reached
@@ -104,8 +145,37 @@ public:
 
 	void WriteDynamicBuffers(VkBuffer viewportBuffer, VkDeviceSize viewportRange, VkBuffer materialBuffer, VkDeviceSize materialRange);
 
+	/*
+	 * Points the two scene geometry bindings at the ROM and polygon-RAM vertex
+	 * arrays.
+	 *
+	 * They are separate bindings rather than one rebindable descriptor because a
+	 * descriptor set cannot be updated while a frame that uses it is in flight, and
+	 * the scene draws from both sources within a single pass. The pixel shader only
+	 * ever reads one of them - which one is compiled in per pipeline - so the cost
+	 * of carrying both is two descriptors, not a branch.
+	 *
+	 * `ram` must be a valid buffer; before the dynamic vertex buffer exists, pass
+	 * the ROM buffer, which is never read as RAM because no RAM pipeline is bound
+	 * yet. `ramRange` is the size of one double-buffer slot: the descriptor may not
+	 * use VK_WHOLE_SIZE, because a dynamic offset is only legal against a bounded
+	 * range.
+	 */
+	void WriteVertexBuffers(VkBuffer rom, VkBuffer ram, VkDeviceSize ramRange);
+
 	VkDescriptorSetLayout Layout() const { return m_layout; }
 	VkDescriptorSet Set() const { return m_set; }
+	/*
+	 * Set 1: the bindless HD replacement array.
+	 *
+	 * A separate set rather than a seventh binding, because VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT
+	 * may not share a layout with UNIFORM_BUFFER_DYNAMIC or STORAGE_BUFFER_DYNAMIC bindings (VUID
+	 * 03001). Set 0 needs both dynamic kinds for the per-node viewport and vertex slices, and the
+	 * bindless array needs update-after-bind so a texture that finishes loading mid-session can be
+	 * published while earlier frames are still in flight.
+	 */
+	VkDescriptorSetLayout HDSetLayout() const { return m_hdLayout; }
+	VkDescriptorSet HDSet() const { return m_hdSet; }
 	VkPipelineLayout ComputeLayout() const { return m_computeLayout; }
 
 private:
@@ -130,6 +200,7 @@ private:
 	};
 
 	bool CreateDescriptors();
+	bool CreateHDDescriptors();
 	bool CreateRawPages();
 	bool CreateComputePipeline();
 	uint32_t AllocateSlot(uint64_t key, int page, int x, int y, int width, int height, int format, bool inverted);
@@ -210,13 +281,42 @@ private:
 	VkDescriptorSetLayout m_layout = VK_NULL_HANDLE;
 	VkDescriptorPool m_pool = VK_NULL_HANDLE;
 	VkDescriptorSet m_set = VK_NULL_HANDLE;
+	VkDescriptorSetLayout m_hdLayout = VK_NULL_HANDLE;
+	VkDescriptorPool m_hdPool = VK_NULL_HANDLE;
+	VkDescriptorSet m_hdSet = VK_NULL_HANDLE;
 	VkSampler m_samplers[16] = {};
 	VkSampler m_rawSampler = VK_NULL_HANDLE;
+
+	/*
+	 * Per-tile upload counter, used to invalidate the sub-texture hash cache.
+	 *
+	 * A per-page counter is the obvious alternative, but one animated texture on a page would then
+	 * force every region of that page to be re-hashed on every frame. With per-tile counters only
+	 * the rectangles that actually overlap a write are recomputed.
+	 */
+	std::vector<uint32_t> m_tileRevision[2];
+	struct HashEntry
+	{
+		uint64_t revision = 0;
+		uint64_t hash = 0;
+	};
+	std::unordered_map<uint64_t, HashEntry> m_hashCache;
+
+	std::unordered_set<uint64_t> m_dumpedHashes;
+	bool m_dumpLimitReported = false;
+	std::string m_gameName;
+	CHDTexturePack m_hdPack;
+	bool m_hdLoad = false;
+	bool m_hdDump = false;
 
 	AllocatedImage m_raw[2];
 	VkImageLayout m_rawLayout[2] = { VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_UNDEFINED };
 
 	VkPipelineLayout m_computeLayout = VK_NULL_HANDLE;
+	// Must stay alive for as long as m_computeLayout: a pipeline layout references its descriptor set
+	// layouts, and destroying them first makes vkCreateComputePipelines fail validation (the layer
+	// reports it as "references deleted object").
+	VkDescriptorSetLayout m_computeSetLayout = VK_NULL_HANDLE;
 	VkPipeline m_computePipeline = VK_NULL_HANDLE;
 	VkShaderModule m_computeModule = VK_NULL_HANDLE;
 	bool m_gpuDecode = false;

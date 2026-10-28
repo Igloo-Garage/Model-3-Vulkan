@@ -168,7 +168,6 @@ UINT8 CNetBoard::Read8(UINT32 a)
 		if (a > 0x0ffff)
 		{
 			DebugLog("OUT OF RANGE RAM[%x]\n", a);
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Out of Range", NULL);
 		}
 		return RAM[a ^ 1];
 
@@ -177,7 +176,6 @@ UINT8 CNetBoard::Read8(UINT32 a)
 		if ((a & 0xfff) > 0xff)
 		{
 			DebugLog("OUT OF RANGE ctrlrw[%x]\n", a);
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Out of Range", NULL);
 		}
 		switch (a & 0xff)
 		{
@@ -188,7 +186,6 @@ UINT8 CNetBoard::Read8(UINT32 a)
 
 		default:
 			DebugLog("unknown 400(%x)\n", a & 0xff);
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Unknown R8 CTRLRW", NULL);
 			return ctrlrw[a&0xff];
 			break;
 
@@ -200,7 +197,6 @@ UINT8 CNetBoard::Read8(UINT32 a)
 		if ((a & 0x3ffff) > 0xffff)
 		{
 			DebugLog("OUT OF RANGE CommRAM[%x]\n", a);
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Out of Range", NULL);
 		}
 		return CommRAM[(a & 0xffff) ^ 1];
 
@@ -209,7 +205,6 @@ UINT8 CNetBoard::Read8(UINT32 a)
 		if ((a & 0xfff) > 0xff)
 		{
 			DebugLog("OUT OF RANGE ioreg[%x]\n", a);
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Out of Range", NULL);
 		}
 
 		switch (a & 0xff)
@@ -248,7 +243,6 @@ UINT8 CNetBoard::Read8(UINT32 a)
 
 		default:
 			DebugLog("unknown c00(%x)\n", a & 0xff);
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Unknown R8 IOREG", NULL);
 			return ioreg[(a&0xff) ^ 1];
 			break;
 
@@ -257,7 +251,6 @@ UINT8 CNetBoard::Read8(UINT32 a)
 
 	default:
 		DebugLog("NetBoard 68K: Unknown R8 (%02X) addr=%x\n", (a >> 16) & 0xF,a&0x0fffff);
-		SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Unknown R8", NULL);
 		break;
 	}
 
@@ -274,7 +267,6 @@ UINT16 CNetBoard::Read16(UINT32 a)
 		if (a > 0x0ffff)
 		{
 			DebugLog("OUT OF RANGE RAM[%x]\n", a);
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Out of Range", NULL);
 		}
 		result = *(UINT16 *)&RAM[a];
 		return result;
@@ -284,7 +276,6 @@ UINT16 CNetBoard::Read16(UINT32 a)
 		if ((a & 0xfff) > 0xff)
 		{
 			DebugLog("OUT OF RANGE ctrlrw[%x]\n", a);
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Out of Range", NULL);
 		}
 
 		switch (a & 0xff)
@@ -298,7 +289,6 @@ UINT16 CNetBoard::Read16(UINT32 a)
 		default:
 			result = *(UINT16 *)&ctrlrw[a & 0xff];
 			DebugLog("unknown 400(%x)\n", a & 0xff);
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Unknown R16 CTRLRW", NULL);
 			return result;
 			break;
 
@@ -309,7 +299,6 @@ UINT16 CNetBoard::Read16(UINT32 a)
 		if ((a & 0x3ffff) > 0xffff)
 		{
 			DebugLog("OUT OF RANGE CommRAM[%x]\n", a);
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Out of Range", NULL);
 		}
 		result = *(UINT16 *)&CommRAM[a & 0xffff];
 		return result;
@@ -319,7 +308,6 @@ UINT16 CNetBoard::Read16(UINT32 a)
 		if ((a & 0xfff) > 0xff)
 		{
 			DebugLog("OUT OF RANGE ioreg[%x]\n", a);
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Out of Range", NULL);
 		}
 
 		switch (a & 0xff)
@@ -337,13 +325,11 @@ UINT16 CNetBoard::Read16(UINT32 a)
 		default:
 			result = *(UINT16 *)&ioreg[a & 0xff];
 			DebugLog("unknown c00(%x)\n", a & 0xff);
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Unknown R16 IOREG", NULL);
 			return result;
 		}
 
 	default:
 		DebugLog("NetBoard 68K: Unknown R16 %02X addr=%x\n", (a >> 16) & 0xF,a&0x0fffff);
-		SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Unknown R16", NULL);
 		break;
 	}
 
@@ -362,7 +348,6 @@ UINT32 CNetBoard::Read32(UINT32 a)
 		if (a > 0x0ffff)
 		{
 			DebugLog("OUT OF RANGE RAM[%x]\n", a);
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Out of Range", NULL);
 		}
 		//DebugLog("Netboard R32\tRAM[%x]=%x\n", a,(hi << 16) | lo);
 		result = (hi << 16) | lo;
@@ -386,7 +371,6 @@ UINT32 CNetBoard::Read32(UINT32 a)
 		if ((a & 0x3ffff) > 0xffff)
 		{
 			DebugLog("OUT OF RANGE CommRAM[%x]\n", a);
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Out of Range", NULL);
 		}
 		//if (((a & 0xffff) > 0 && (a & 0xffff) < 0xff) || ((a & 0xffff) > 0xefff && (a & 0xffff) < 0xffff)) DebugLog("Netboard R32\tCommRAM[%x] = %x\n", a & 0xffff, (hi << 16) | lo);
 		result = (hi << 16) | lo;
@@ -406,7 +390,6 @@ UINT32 CNetBoard::Read32(UINT32 a)
 
 	default:
 		DebugLog("NetBoard 68K: Unknown R32 (%02X) a=%x\n", (a >> 16) & 0xF, a & 0xffff);
-		SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Unknown R32", NULL);
 		break;
 	}
 
@@ -422,7 +405,6 @@ void CNetBoard::Write8(UINT32 a, UINT8 d)
 		if (a > 0x0ffff)
 		{
 			DebugLog("OUT OF RANGE RAM[%x]\n", a);
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Out of Range", NULL);
 		}
 		RAM[a ^ 1] = d;
 		break;
@@ -432,7 +414,6 @@ void CNetBoard::Write8(UINT32 a, UINT8 d)
 		if ((a & 0xfff) > 0xff)
 		{
 			DebugLog("OUT OF RANGE ctrlrw[%x]\n", a);
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Out of Range", NULL);
 		}
 
 		switch (a & 0xff)
@@ -463,7 +444,6 @@ void CNetBoard::Write8(UINT32 a, UINT8 d)
 		default:
 			DebugLog("unknown 400(%x)\n", a & 0xff);
 			ctrlrw[a & 0xff] = d;
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Unknown W8 CTRLRW", NULL);
 			break;
 
 		}
@@ -475,7 +455,6 @@ void CNetBoard::Write8(UINT32 a, UINT8 d)
 		if ((a & 0x3ffff) > 0xffff)
 		{
 			DebugLog("OUT OF RANGE CommRAM[%x]\n", a);
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Out of Range", NULL);
 		}
 		CommRAM[(a & 0xffff) ^ 1] = d;
 		break;
@@ -485,7 +464,6 @@ void CNetBoard::Write8(UINT32 a, UINT8 d)
 		if ((a & 0xfff) > 0xff)
 		{
 			DebugLog("OUT OF RANGE ioreg[%x]\n", a);
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Out of Range", NULL);
 		}
 
 		switch (a & 0xff)
@@ -852,7 +830,6 @@ void CNetBoard::Write8(UINT32 a, UINT8 d)
 		default:
 			DebugLog("unknown c00(%x)\n", a & 0xff);
 			ioreg[(a & 0xff) ^ 1] = d;
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Unknown W8 IOREG", NULL);
 			break;
 
 		}
@@ -862,7 +839,6 @@ void CNetBoard::Write8(UINT32 a, UINT8 d)
 
 	default:
 		DebugLog("NetBoard 68K: Unknown W8 (%x) %06X<-%02X\n", (a >> 16) & 0xF, a, d);
-		SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Unknown W8", NULL);
 		break;
 	}
 }
@@ -876,7 +852,6 @@ void CNetBoard::Write16(UINT32 a, UINT16 d)
 		if (a > 0x0ffff)
 		{
 			DebugLog("OUT OF RANGE RAM[%x]\n", a);
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Out of Range", NULL);
 		}
 		*(UINT16 *)&RAM[a] = d;
 		break;
@@ -886,7 +861,6 @@ void CNetBoard::Write16(UINT32 a, UINT16 d)
 		if ((a & 0xfff) > 0xff)
 		{
 			DebugLog("OUT OF RANGE ctrlrw[%x]\n", a);
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Out of Range", NULL);
 		}
 
 		switch (a & 0xff)
@@ -942,7 +916,6 @@ void CNetBoard::Write16(UINT32 a, UINT16 d)
 		default:
 			*(UINT16 *)&ctrlrw[a & 0xff] = d;
 			DebugLog("unknown 400(%x)\n", a & 0xff);
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Unknown W16 CTRLRW", NULL);
 			break;
 
 		}
@@ -953,7 +926,6 @@ void CNetBoard::Write16(UINT32 a, UINT16 d)
 		if ((a & 0x3ffff) > 0xffff)
 		{
 			DebugLog("OUT OF RANGE CommRAM[%x]\n", a);
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Out of Range", NULL);
 		}
 		*(UINT16 *)&CommRAM[a & 0xffff] = d;
 		break;
@@ -963,7 +935,6 @@ void CNetBoard::Write16(UINT32 a, UINT16 d)
 		if ((a & 0xfff) > 0xff)
 		{
 			DebugLog("OUT OF RANGE ioreg[%x]\n", a);
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Out of Range", NULL);
 		}
 
 		switch (a & 0xff)
@@ -1010,7 +981,6 @@ void CNetBoard::Write16(UINT32 a, UINT16 d)
 
 		default:
 			DebugLog("unknown c00(%x)\n", a & 0xff);
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Unknown W16 IOREG", NULL);
 			break;
 
 		}
@@ -1020,7 +990,6 @@ void CNetBoard::Write16(UINT32 a, UINT16 d)
 
 	default:
 		DebugLog("NetBoard 68K: Unknown W16 (%x) %06X<-%04X\n", (a >> 16) & 0xF,a, d);
-		SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Unknown W16", NULL);
 		break;
 	}
 }
@@ -1034,7 +1003,6 @@ void CNetBoard::Write32(UINT32 a, UINT32 d)
 		if (a > 0x0ffff)
 		{
 			DebugLog("OUT OF RANGE RAM[%x]\n", a);
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Out of Range", NULL);
 		}
 		*(UINT16 *)&RAM[a] = (d >> 16);
 		*(UINT16 *)&RAM[a + 2] = (d & 0xFFFF);
@@ -1056,7 +1024,6 @@ void CNetBoard::Write32(UINT32 a, UINT32 d)
 		if ((a & 0x3ffff) > 0xffff)
 		{
 			DebugLog("OUT OF RANGE CommRAM[%x]\n", a);
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Out of Range", NULL);
 		}
 
 		*(UINT16 *)&CommRAM[a & 0xffff] = (d >> 16);
@@ -1079,7 +1046,6 @@ void CNetBoard::Write32(UINT32 a, UINT32 d)
 
 	default:
 		DebugLog("NetBoard 68K: Unknown W32 (%x) %08X<-%08X\n", (a >> 16) & 0xF,a, d);
-		SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Unknown W32", NULL);
 		break;
 	}
 

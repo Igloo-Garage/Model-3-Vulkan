@@ -81,6 +81,13 @@ void CIRQ::Deassert(unsigned irqBits)
 		ppc_set_irq_line(0);	// if no pending IRQs, deassert CPU IRQ line
 }
 
+void CIRQ::RefreshInterruptLine(void)
+{
+	// Same condition Assert()/Deassert() use: maskable bits that are enabled, plus anything above
+	// the maskable range.
+	ppc_set_irq_line(((irqState & irqEnable) || (irqState & (~0xFFu))) ? 1 : 0);
+}
+
 void CIRQ::WriteIRQEnable(UINT8 data)
 {
 	irqEnable = (unsigned) data;

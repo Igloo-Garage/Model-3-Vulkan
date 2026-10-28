@@ -1,0 +1,10 @@
+Source code for Third-party libraries needs to be placed in here.
+Should look something like
+
+SDL2_net-x.x.x
+SDL2-x.x.x
+SDL3
+Vulkan-Headers
+zlib-x.x.x
+
+Just run the Get_libs.cmd, it'll automatically download and extract the files to the correct places.

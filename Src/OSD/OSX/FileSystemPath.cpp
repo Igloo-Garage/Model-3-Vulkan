@@ -40,12 +40,14 @@ namespace FileSystemPath
             return "Analysis/";
         case Config:
             return "Config/";
+        case Cache:
+            return "Cache/";
         case Log:
             return "";
         case NVRAM:
             return "NVRAM/";
-        case Saves:
-            return "Saves/";
+        case Saves:       return "Saves/";
+        case SavesLegacy: return "Saves_Legacy/";
         case Screenshots:
             return "Screenshots/";
         case Assets:

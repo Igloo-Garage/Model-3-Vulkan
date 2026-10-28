@@ -6,21 +6,13 @@ on:
       - 'v*'
   workflow_dispatch:      # Manual triggering
 
-    inputs:
-      opt:
-        description: "Optimization flags"
-        type: string
-        default: "-O3 -g"
-
 jobs:
   build:
-    uses: ./.github/workflows/build.yml
-    with:
-      opt: ${{ github.event.inputs.opt || '-O3 -g' }}
+    uses: ./.github/workflows/build-model3.yml
   
   release:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    if: startsWith(github.ref, 'refs/tags/')
 
     runs-on: ubuntu-latest
     permissions:
@@ -51,11 +43,9 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           tag_name: "${{ steps.version.outputs.version }}"
-          name: "Supermodel-VK ${{ steps.version.outputs.version }}"
+          name: "Model 3-Vulkan ${{ steps.version.outputs.version }}"
           files: |
-            artifacts/*/*.zip
             artifacts/*/*.tar.gz
-          body: "Automated Supermodel-VK build for Windows, Linux and macOS."
+          body_path: RELEASE_NOTES.md
           draft: false
           prerelease: false
-          generate_release_notes: true

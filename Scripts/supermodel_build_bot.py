@@ -255,7 +255,7 @@ def update_git_snapshot(working_dir, username, password, test_run, make):
       bash.execute(working_dir=working_dir, command="echo Save states go here. >pkg/Saves/DIR.txt")
       bash.execute(working_dir=working_dir, command="echo Recommended \\(but not mandatory\\) location for ROM sets. >pkg/ROMs/DIR.txt")
       bash.execute(working_dir=working_dir, command="cp model3emu/Assets/DIR.txt pkg/Assets && cp model3emu/Assets/p1crosshair.bmp pkg/Assets && cp model3emu/Assets/p2crosshair.bmp pkg/Assets")
-      bash.execute(working_dir=working_dir, command="cp model3emu/Docs/README.txt pkg && cp model3emu/Docs/LICENSE.txt pkg")
+      bash.execute(working_dir=working_dir, command="cp 'model3emu/Docs/README from The Supermodel Team.txt' pkg/README.txt && cp model3emu/Docs/LICENSE.txt pkg")
       bash.execute(working_dir=working_dir, command="cp model3emu/bin64/supermodel.exe pkg/Supermodel.exe")
       #bash.execute(working_dir=working_dir, command="cp /mingw64/bin/SDL2.dll pkg && cp /mingw64/bin/SDL2_net.dll pkg")
       package_files = [

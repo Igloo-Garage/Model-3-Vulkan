@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
 
 bool GameLoader::LoadZipArchive(ZipArchive *zip, const std::string &zipfilename) const
@@ -667,7 +668,7 @@ void GameLoader::IdentifyGamesInZipArchive(
   }
 }
 
-void GameLoader::ChooseGameInZipArchive(std::string *chosen_game, bool *missing_parent_roms, const ZipArchive &zip, const std::string &zipfilename) const
+void GameLoader::ChooseGameInZipArchive(std::string *chosen_game, bool *missing_parent_roms, const ZipArchive &zip, const std::string &zipfilename, bool quiet) const
 {
   chosen_game->clear();
   *missing_parent_roms = false;
@@ -722,13 +723,16 @@ void GameLoader::ChooseGameInZipArchive(std::string *chosen_game, bool *missing_
   }
 
   // Any remaining incomplete games from the unmerged set are legitimate errors
-  for (auto &v: files_missing_by_game)
+  if (!quiet)
   {
-    for (auto &file: v.second)
+    for (auto &v: files_missing_by_game)
     {
-      ErrorLog("'%s' (CRC32 0x%08x) not found in '%s' for game '%s'.", file->filename.c_str(), file->crc32, zipfilename.c_str(), v.first.c_str());
+      for (auto &file: v.second)
+      {
+        ErrorLog("'%s' (CRC32 0x%08x) not found in '%s' for game '%s'.", file->filename.c_str(), file->crc32, zipfilename.c_str(), v.first.c_str());
+      }
+      ErrorLog("Ignoring game '%s' in '%s' because it is missing files.", v.first.c_str(), zipfilename.c_str());
     }
-    ErrorLog("Ignoring game '%s' in '%s' because it is missing files.", v.first.c_str(), zipfilename.c_str());
   }
 
   // Choose game: complete merged game > incomplete child game > complete
@@ -745,7 +749,8 @@ void GameLoader::ChooseGameInZipArchive(std::string *chosen_game, bool *missing_
     chosen_game->assign(*complete_games.begin());
   else
   {
-    ErrorLog("No complete Model 3 games found in '%s'.", zipfilename.c_str());
+    if (!quiet)
+      ErrorLog("No complete Model 3 games found in '%s'.", zipfilename.c_str());
     return;
   }
 
@@ -997,6 +1002,28 @@ bool GameLoader::Load(Game *game, ROMSet *rom_set, const std::string &zipfilenam
   if (missing_parent_roms)
   {
     std::string parent_zipfilename = StripFilename(zipfilename) + game->parent + ".zip";
+
+    /*
+     * The parent's file name is a convention, not data.
+     *
+     * A parent archive that has been renamed - or a merged archive that resolved to a child set -
+     * leaves the child with nothing to merge against, even though the ROMs it needs are sitting next
+     * to it. Look for an archive whose contents identify as the parent before reporting the set as
+     * unloadable; sets are identified by the CRCs inside them everywhere else, so this costs one
+     * extra pass only in the case that would otherwise fail.
+     */
+    std::error_code existsError;
+    if (!std::filesystem::exists(parent_zipfilename, existsError))
+    {
+      std::string found;
+      if (FindArchiveForSet(&found, game->parent, StripFilename(zipfilename)))
+      {
+        InfoLog("Game: '%s' has no '%s.zip'; using '%s' as the parent ROM set.",
+          zipfilename.c_str(), game->parent.c_str(), found.c_str());
+        parent_zipfilename = found;
+      }
+    }
+
     if (LoadZipArchive(&zip, parent_zipfilename))
     {
       ErrorLog("Expected to find parent ROM set of '%s' at '%s'.", game->name.c_str(), parent_zipfilename.c_str());
@@ -1009,6 +1036,49 @@ bool GameLoader::Load(Game *game, ROMSet *rom_set, const std::string &zipfilenam
   if (error)
     *game = Game();
   return error;
+}
+
+bool GameLoader::Identify(Game *game, const std::string &zipfilename) const
+{
+  *game = Game();
+
+  ZipArchive zip;
+  if (LoadZipArchive(&zip, zipfilename))
+    return true;
+
+  std::string chosen_game;
+  bool missing_parent_roms = false;
+  ChooseGameInZipArchive(&chosen_game, &missing_parent_roms, zip, zipfilename, true);
+  if (chosen_game.empty())
+    return true;
+
+  *game = m_game_info_by_game.find(chosen_game)->second;
+  return false;
+}
+
+bool GameLoader::FindArchiveForSet(std::string *path, const std::string &set_name, const std::string &directory) const
+{
+  if (directory.empty())
+    return false;
+
+  std::error_code error;
+  for (const auto &entry : std::filesystem::directory_iterator(directory, error))
+  {
+    if (error || !entry.is_regular_file(error))
+      continue;
+
+    const std::filesystem::path &candidate = entry.path();
+    if (candidate.extension() != ".zip")
+      continue;
+
+    Game other;
+    if (Identify(&other, candidate.string()) || other.name != set_name)
+      continue;
+
+    *path = candidate.string();
+    return true;
+  }
+  return false;
 }
 
 GameLoader::GameLoader(const std::string &xml_file)

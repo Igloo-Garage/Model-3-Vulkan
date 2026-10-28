@@ -30,7 +30,13 @@
 #include <thread>
 #include <vector>
 
-struct SDL_Window;
+namespace OSD
+{
+namespace Platform
+{
+struct Window;
+}
+}
 
 namespace Vulkan3D {
 
@@ -47,7 +53,12 @@ public:
 
 	// deviceName selects the Vulkan physical device by name. An empty string picks the best
 	// available device automatically.
-	Result InitDevice(SDL_Window* window, bool validation, bool vsync, const std::string& deviceName = std::string());
+	//
+	// pipelineCacheTag names the on-disk pipeline cache (Data/Cache/pipelines-<tag>.bin). The settings
+	// window and a game session each own a context and are alive at the same time, so they must not
+	// share one file: whichever was destroyed last would write its older copy over the other's
+	// entries. Two files cost a second warm-up and lose nothing.
+	Result InitDevice(OSD::Platform::Window* window, bool validation, bool vsync, const std::string& deviceName = std::string(), bool disableOverlayLayers = false, const std::string& pipelineCacheTag = std::string("game"));
 	void Shutdown();
 
 	// Acquire the next swapchain image and begin the frame command buffer.
@@ -56,14 +67,47 @@ public:
 	bool BeginFrame();
 	void EndFrame();
 	bool RecreateSwapchain();
+	// volk's entry points are process-wide, not per context.  Creating a second CVulkanContext
+	// (a game session) rebinds them to that instance and device, and destroying it leaves them
+	// pointing at the loader trampolines of a destroyed instance - the next instance-level call,
+	// which is present, then faults inside ntdll.  Call this on a context that has to keep working
+	// after another one has been created and destroyed.
+	void RebindFunctionPointers();
 	// CVulkan2D calls this after the swapchain image is in PRESENT_SRC.
 	// If a frame is acquired but nothing renders, EndFrame still presents it.
 	void MarkSwapchainReady();
 
+	/*
+	 * Display feedback through VK_KHR_present_wait.
+	 *
+	 * Every present carries an id, and vkWaitForPresentKHR blocks until the display has scanned that
+	 * image out. Without it the only timing information available is when vkQueuePresentKHR returned,
+	 * which is a queue insertion rather than a picture - the difference between pacing against the
+	 * display and pacing against a guess.
+	 *
+	 * The wait is bounded by the caller, so a compositor that does not report, or a minimised window
+	 * where nothing is scanned out, can cost the caller only the timeout it was going to spend anyway.
+	 * Returns true when the image reached the screen, false on timeout, when the extension is
+	 * unavailable, or when no present has been submitted on the current swapchain.
+	 */
+	bool WaitForPresentDisplay(uint64_t timeoutNs);
+	bool PresentWaitAvailable() const { return m_presentWait; }
+	// Whether anything has been presented on the current swapchain, i.e. whether a wait has an id
+	// to ask about. Before the first present the answer is always "not displayed", which would
+	// otherwise be read as "the phase is wrong".
+	bool HasPresented() const { return m_swapchainPresentId != 0; }
+
 	bool IsRecording() const { return m_recording; }
 	VkCommandBuffer Cmd() const;
 	VkDevice Device() const { return m_device; }
+	// Read by every pipeline creation call: the driver stores compiled pipelines here and the whole
+	// cache is written back on shutdown, so a session does not recompile the same shaders from cold.
+	VkPipelineCache PipelineCache() const { return m_pipelineCache; }
 	VkPhysicalDevice PhysicalDevice() const { return m_physical; }
+	// The device's own name, so the statistics readout can label its GPU line. Empty until the device is
+	// created; it comes from the physical-device properties, which is where the driver's marketing
+	// string lives.
+	const std::string& DeviceName() const { return m_deviceName; }
 	VkQueue Queue() const { return m_queue; }
 	uint32_t QueueFamily() const { return m_queueFamily; }
 	// Needed by the ImGui Vulkan backend, which fills in ImGui_ImplVulkan_InitInfo from these.
@@ -81,6 +125,15 @@ public:
 	VkDeviceSize UniformAlignment() const { return m_uniformAlign; }
 	VkDeviceSize StorageAlignment() const { return m_storageAlign; }
 	bool HasPushDescriptors() const { return m_pushDescriptors; }
+	// Whether VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE is legal on this device. The texture cache
+	// builds one sampler per wrap-mode pair and has to fall back when the feature is absent.
+	bool SamplerMirrorClampSupported() const { return m_samplerMirrorClamp; }
+	// Required by the sorted-transparency pass: it allocates nodes with atomics and writes to an
+	// image from the fragment stage. A device without these cannot run AlphaSortMode = 1.
+	bool FragmentStoresAndAtomicsSupported() const { return m_fragmentStoresAndAtomics; }
+	// Whether the resolve can run once per sample instead of once per pixel. Only used to keep
+	// antialiased translucent edges under MSAA; without it the mode still works at pixel rate.
+	bool SampleRateShadingSupported() const { return m_sampleRateShading; }
 	bool Validation() const { return m_validation; }
 	/*
 	 * Whether the device is running the backend through Vulkan 1.3 core or through the 1.2 extensions
@@ -116,12 +169,39 @@ public:
 	 */
 	void RequestScreenshot(const std::string& path);
 	bool ScreenshotsAvailable() const { return m_swapTransferSrc; }
+
+	/*
+	 * Synchronous 4:3 thumbnail capture for the save-state container.
+	 *
+	 * Called from the paused game loop, so vkDeviceWaitIdle is acceptable
+	 * here.  The output is 8-bit RGB PNG, scaled from the centre 4:3 region of
+	 * the last presented swapchain image.  Returns true on success.
+	 */
+	bool CaptureThumbnail(const std::string& pngPath, uint32_t width, uint32_t height);
 	// Records the copy and the required layout transitions. Leaves the image back in
 	// COLOR_ATTACHMENT_OPTIMAL so the caller's transition to PRESENT_SRC still applies.
 	void RecordScreenshotCopy(VkCommandBuffer cmd);
 
+	/*
+	 * Save-state thumbnail.
+	 *
+	 * Uses the same deferred readback as a screenshot, with two differences. The copy is recorded
+	 * before the in-game panel, the crosshair and the cabinet backdrop are drawn, so the thumbnail
+	 * shows the picture rather than the interface - RecordScreenshotCopy() runs at the end of the
+	 * frame and deliberately includes them. And the worker scales the frame down to the requested
+	 * size instead of writing a full-resolution PNG.
+	 *
+	 * The file is written under a ".part" name and renamed when complete, so the caller polling for
+	 * it can never read a half-written PNG.
+	 */
+	void RequestThumbnail(const std::string& path, uint32_t width, uint32_t height);
+	void RecordThumbnailCopy(VkCommandBuffer cmd);
+
 private:
 	void WriteScreenshot();
+	// Shared body of the two capture paths above: copies the current swapchain image into the staging
+	// buffer and marks the frame slot for readback. Returns false when a capture is already in flight.
+	bool RecordFrameCopy(VkCommandBuffer cmd);
 	struct Frame
 	{
 		VkCommandPool pool = VK_NULL_HANDLE;
@@ -143,14 +223,29 @@ private:
 	void DestroySwapchain();
 	bool CreateFrames();
 	void DestroyFrames();
+	bool CreatePipelineCache(const std::string& tag);
+	void SavePipelineCache();
 
-	SDL_Window* m_window = nullptr;
+	OSD::Platform::Window* m_window = nullptr;
 	bool m_validation = false;
+	// Developer-only validation modes, requested through the environment so they never end up in a
+	// release configuration: SM3D_VK_SYNC_VALIDATION=1 (race detection) and
+	// SM3D_VK_GPU_VALIDATION=1 (shader/descriptor access checking). Both are far too slow to leave on.
+	bool m_syncValidation = false;
+	bool m_gpuValidation = false;
+	// Set for the settings window: implicit overlay layers (Steam, RTSS, ReShade, ...) are not
+	// useful on an ImGui surface and each one adds its load time to vkCreateInstance.  The game
+	// window passes false, so overlays still attach to the picture that matters.
+	bool m_disableOverlayLayers = false;
 	bool m_vsync = true;
 	std::string m_devicePreference;   // requested physical device name (empty = automatic)
 	bool m_recording = false;
 	bool m_swapReady = false;
 	bool m_pushDescriptors = false;
+	bool m_memoryBudget = false;
+	bool m_samplerMirrorClamp = false;
+	bool m_fragmentStoresAndAtomics = false;
+	bool m_sampleRateShading = false;
 	bool m_vulkan13 = false;
 	uint64_t m_generation = 0;
 	uint32_t m_frame = 0;
@@ -162,12 +257,28 @@ private:
 	VkFormat m_swapFormat = VK_FORMAT_B8G8R8A8_UNORM;
 	VkPresentModeKHR m_presentMode = VK_PRESENT_MODE_FIFO_KHR;
 
+	/*
+	 * VK_KHR_present_wait state.
+	 *
+	 * m_presentId counts every present since the device was created and never goes backwards: the spec
+	 * requires an id to be larger than every id previously submitted for the same swapchain, and a
+	 * global counter stays valid across a recreation. m_swapchainPresentId is the last id submitted on
+	 * the swapchain that exists now, which is the only one a wait may reference - after a recreation the
+	 * old presents belong to a destroyed handle.
+	 */
+	bool m_presentWait = false;
+	uint64_t m_presentId = 0;
+	uint64_t m_swapchainPresentId = 0;
+
 	VkInstance m_instance = VK_NULL_HANDLE;	VkDebugUtilsMessengerEXT m_debug = VK_NULL_HANDLE;
 	VkSurfaceKHR m_surface = VK_NULL_HANDLE;
 	VkPhysicalDevice m_physical = VK_NULL_HANDLE;
 	VkDevice m_device = VK_NULL_HANDLE;
 	VkQueue m_queue = VK_NULL_HANDLE;
 	VkSwapchainKHR m_swapchain = VK_NULL_HANDLE;
+	VkPipelineCache m_pipelineCache = VK_NULL_HANDLE;
+	std::string m_pipelineCachePath;
+	std::string m_deviceName;
 
 	Frame m_frames[kMaxFramesInFlight];
 	std::vector<SwapchainImage> m_images;
@@ -194,6 +305,14 @@ private:
 	// Compression and file writing run here, off the main loop, so a capture cannot starve the audio.
 	std::thread m_screenshotThread;
 	std::atomic<bool> m_screenshotBusy{ false };
+
+	// Thumbnail state. Shares the staging buffer and the worker with screenshots: only one capture is
+	// ever in flight, and m_captureIsThumbnail says how the pending one should be written out.
+	int m_thumbnailRequests = 0;
+	std::string m_thumbnailPath;
+	uint32_t m_thumbnailWidth = 320;
+	uint32_t m_thumbnailHeight = 240;
+	bool m_captureIsThumbnail = false;
 };
 
 } // Vulkan3D

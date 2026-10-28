@@ -30,6 +30,9 @@
 
 #include "Supermodel.h"
 
+#include <algorithm>
+#include <cmath>
+
 /*
  * CSwitchInput
  */
@@ -150,6 +153,28 @@ double CAxisInput::ValueAsFraction() const
 {
 	double frac = (double)(value - m_minVal)/(double)(m_maxVal - m_minVal);
 	return (frac >= 0.0 ? frac : -frac);
+}
+
+double CAxisInput::SignedFraction() const
+{
+	if (value >= m_offVal)
+	{
+		const double range = (double)(m_maxVal - m_offVal);
+		return range > 0.0 ? (double)(value - m_offVal) / range : 0.0;
+	}
+	const double range = (double)(m_offVal - m_minVal);
+	return range > 0.0 ? (double)(value - m_offVal) / range : 0.0;
+}
+
+void CAxisInput::SetSignedFraction(double fraction)
+{
+	fraction = std::clamp(fraction, -1.0, 1.0);
+	long scaled;
+	if (fraction >= 0.0)
+		scaled = (long)m_offVal + std::lround(fraction * (double)(m_maxVal - m_offVal));
+	else
+		scaled = (long)m_offVal - std::lround(-fraction * (double)(m_offVal - m_minVal));
+	value = (UINT16)std::clamp(scaled, (long)m_minVal, (long)m_maxVal);
 }
 
 /*

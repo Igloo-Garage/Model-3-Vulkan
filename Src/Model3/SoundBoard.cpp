@@ -56,9 +56,14 @@
 
 #include "SoundBoard.h"
 
+#include <cstdlib>
+#include <cmath>
+#include <iomanip>
+#include <sstream>
 #include "Supermodel.h"
 #include "OSD/Audio.h"
 #include "Sound/SCSP.h"
+#include "Sound/MPEG/MpegAudio.h"
 
 // DEBUG
 //#define SUPERMODEL_LOG_AUDIO	// define this to log all audio to sound.bin
@@ -79,6 +84,14 @@ static FILE		*soundFP;
 #define OFFSET_AUDIO_REARRIGHT  (OFFSET_AUDIO_REARLEFT + LENGTH_CHANNEL_BUFFER)     // 2940 bytes right audio channel
 
 #define MEMORY_POOL_SIZE        (0x100000 + 0x100000 + 4*LENGTH_CHANNEL_BUFFER)
+
+// Stage markers for SM3D_LOAD_DEBUG. A hang here leaves the last marker in the log,
+// which separates a stuck SCSP_Update() from a stuck DSB or audio output.
+static bool SoundDebugEnabled(void)
+{
+	static const bool enabled = std::getenv("SM3D_LOAD_DEBUG") != nullptr;
+	return enabled;
+}
 
 
 /******************************************************************************
@@ -360,6 +373,9 @@ bool CSoundBoard::RunFrame(void)
 	// 60 Hz, and alternating 766/767 at the arcade rate. Must be fetched once per frame, in step
 	// with OutputAudio() and SCSP_Update().
 	const int numSamplesThisFrame = GetSamplesThisFrame();
+	const bool soundDebug = SoundDebugEnabled();
+	if (soundDebug)
+		InfoLog("LoadDebug sound begin samples=%d", numSamplesThisFrame);
 	SCSP_SetFrameLength(numSamplesThisFrame);
 
 	// Run sound board first to generate SCSP audio
@@ -368,6 +384,18 @@ bool CSoundBoard::RunFrame(void)
 		M68KSetContext(&M68K);
 		SCSP_Update();
 		M68KGetContext(&M68K);
+	}
+	if (soundDebug)
+	{
+		float scspPeak = 0.0f;
+		for (int i = 0; i < numSamplesThisFrame; ++i)
+		{
+			scspPeak = std::max(scspPeak, std::fabs(audioFL[i]));
+			scspPeak = std::max(scspPeak, std::fabs(audioFR[i]));
+			scspPeak = std::max(scspPeak, std::fabs(audioRL[i]));
+			scspPeak = std::max(scspPeak, std::fabs(audioRR[i]));
+		}
+		InfoLog("LoadDebug sound scsp done peak=%.1f", scspPeak);
 	}
 	else
 	{
@@ -391,6 +419,8 @@ bool CSoundBoard::RunFrame(void)
 
 	// Run DSB and mix with existing audio, apply music volume
 	if (NULL != DSB) {
+		if (soundDebug)
+			InfoLog("LoadDebug sound dsb begin");
 		// Will need to mix with proper front, rear channels or both (game specific)
 		constexpr bool mixDSBWithFront = true; // Everything to front channels for now
 		// Case "both" not handled for now
@@ -398,10 +428,27 @@ bool CSoundBoard::RunFrame(void)
 			DSB->RunFrame(audioFL, audioFR, numSamplesThisFrame);
 		else
 			DSB->RunFrame(audioRL, audioRR, numSamplesThisFrame);
+		if (soundDebug)
+			InfoLog("LoadDebug sound dsb done");
 	}
 
 	// Output the audio buffers
+	if (soundDebug)
+		InfoLog("LoadDebug sound output begin");
+	float mixPeak = 0.0f;
+	if (soundDebug)
+	{
+		for (int i = 0; i < numSamplesThisFrame; ++i)
+		{
+			mixPeak = std::max(mixPeak, std::fabs(audioFL[i]));
+			mixPeak = std::max(mixPeak, std::fabs(audioFR[i]));
+			mixPeak = std::max(mixPeak, std::fabs(audioRL[i]));
+			mixPeak = std::max(mixPeak, std::fabs(audioRR[i]));
+		}
+	}
 	bool bufferFull = OutputAudio(numSamplesThisFrame, audioFL, audioFR, audioRL, audioRR, m_config["FlipStereo"].ValueAs<bool>());
+	if (soundDebug)
+		InfoLog("LoadDebug sound output done full=%d peak=%.1f", bufferFull ? 1 : 0, mixPeak);
 
 #ifdef SUPERMODEL_LOG_AUDIO
 	// Output to binary file
@@ -419,6 +466,8 @@ bool CSoundBoard::RunFrame(void)
 	}
 #endif // SUPERMODEL_LOG_AUDIO
 
+	if (soundDebug)
+		InfoLog("LoadDebug sound end");
 	return bufferFull;
 }
 
@@ -474,8 +523,35 @@ void CSoundBoard::LoadState(CBlockFile *SaveState)
 	M68KLoadState(SaveState, "Sound Board 68K");
 	M68KGetContext(&M68K);
 	SCSP_LoadState(SaveState);
+
+	// The 68K IRQ line is derived from the SCSP pending/enable registers and is not part of
+	// either save block. Without this, a state saved with an interrupt pending restores the
+	// sound board with the line low and the 68K never services the effect commands again.
+	SCSP_RefreshIRQ();
+
+	if (std::getenv("SM3D_LOAD_DEBUG") != nullptr)
+	{
+		M68KGetContext(&M68K);
+		InfoLog("LoadDebug sound68k pc=%06X stopped=%u int_level=%u",
+			(unsigned)M68KGetPC(), (unsigned)M68K.musashiCtx.stopped,
+			(unsigned)M68K.musashiCtx.int_level);
+	}
+
 	if (NULL != DSB)
 		DSB->LoadState(SaveState);
+}
+
+std::string CSoundBoard::DebugState(void)
+{
+	std::ostringstream s;
+	M68KGetContext(&M68K);
+	s << "sb68k pc=" << std::hex << std::setw(6) << std::setfill('0') << M68KGetPC()
+		<< " stopped=" << std::dec << (unsigned)M68K.musashiCtx.stopped
+		<< " irq=" << (unsigned)M68K.musashiCtx.int_level
+		<< " mpeg=" << (MpegDec::IsLoaded() ? 1 : 0)
+		<< " mpegpos=" << MpegDec::GetPosition()
+		<< SCSP_DebugState();
+	return s.str();
 }
 
 

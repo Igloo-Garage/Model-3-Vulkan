@@ -29,8 +29,15 @@
 #include "Shaders/composite_vert.spv.h"
 #include "Shaders/composite_frag.spv.h"
 #include "Shaders/post_frag.spv.h"
+#include "Shaders/crosshair_vert.spv.h"
+#include "Shaders/crosshair_frag.spv.h"
+#include "Shaders/border_vert.spv.h"
+#include "Shaders/border_frag.spv.h"
 
 #include <cstring>
+#include <cstdlib>
+#include <string>
+#include <algorithm>
 
 namespace Vulkan3D {
 
@@ -39,6 +46,17 @@ struct LayerPush
 {
 	uint32_t layer;
 	float brightness;
+	int32_t upscaleMode;    // UpscaleMode: 0 nearest, 1 biquintic, 2 bilinear, 3 bicubic
+	// 1 when the 3D pass folded Real3D's transparency layers into the scene target already. The
+	// shader then skips its own two-layer block; the layer's blend is the premultiplied one either
+	// way (see m_pipelineScene).
+	uint32_t sceneComposited;
+	// 1 for AlphaSortMode = 2: the transparency targets hold a checkerboard, so the shader
+	// reconstructs them at half resolution instead of treating both as full coverage.
+	uint32_t checkerboard;
+	// 1 skips that reconstruction and blends the pixel's own cell, which leaves the checkerboard
+	// visible (SM3D_CHECKER_RAW). Test hook only.
+	uint32_t checkerRaw;
 };
 
 /*
@@ -68,7 +86,7 @@ struct LayerPush
  * limit, Vulkan2D cannot initialise and the session ends before the first frame - see the note on
  * CreatePipeline()'s failure logging.
  */
-constexpr uint32_t kCompositeLayerCount = 4;
+constexpr uint32_t kCompositeLayerCount = 6;
 
 // Mirrors the push constant block in post.frag. Keep the two in step.
 struct PostPush
@@ -85,6 +103,31 @@ struct PostPush
 	float gain;
 	int32_t glowLevels;
 	int32_t glowThreshold;
+	int32_t crtColors;          // Regional CRT colour preset (0 = off, 1..5), see post.frag.
+};
+
+/*
+ * Mirrors the push constant block in crosshair.vert. Keep the two in step.
+ *
+ * The trailing padding is deliberate: the shader block ends with a float after a vec4, so its size
+ * rounds up to 16 bytes. Declaring the same size here makes the push constant range cover exactly
+ * what the shader declares instead of relying on the driver accepting a short one.
+ */
+struct CrosshairPush
+{
+	float centre[2];
+	float extent[2];
+	float colour[4];
+	float scale;
+	float padding[3];
+};
+
+// Mirrors the push constant block in border.vert / border.frag. Keep the three in step.
+struct BorderPush
+{
+	float extent[2];
+	float thickness;
+	float brightness;
 };
 
 /*
@@ -141,7 +184,25 @@ void CVulkan2D::ReadPostSettingsFromConfig()
 	if (m_crtMode <= 0)
 		m_crtGain = 1.0f;
 
-	m_postReady = m_fxaa || m_crtMode > 0 || m_glowStrength > 0.0f;
+	// The same five regional presets the OpenGL path passes to SuperAA. Out of range is treated as
+	// off rather than clamped to a preset the user did not choose: a hand-edited value should not
+	// silently change the picture, and a menu can only ever write 0..5 anyway.
+	m_crtColors = config["CRTcolors"].ValueAsDefault<int>(0);
+	if (m_crtColors < 0 || m_crtColors > 5)
+		m_crtColors = 0;
+
+	// Sinden light-gun border. Width is in output pixels and has to leave room for the picture, so
+	// it is clamped against the smaller dimension at draw time as well as here.
+	m_sindenBorder = config["SindenBorder"].ValueAsDefault<bool>(false);
+	m_sindenBorderWidth = config["SindenBorderWidth"].ValueAsDefault<int>(16);
+	if (m_sindenBorderWidth < 0)
+		m_sindenBorderWidth = 0;
+	if (m_sindenBorderWidth > 256)
+		m_sindenBorderWidth = 256;
+	m_sindenBorderBrightness = (float)config["SindenBorderBrightness"].ValueAsDefault<int>(100) / 100.0f;
+	m_sindenBorderBrightness = std::clamp(m_sindenBorderBrightness, 0.0f, 1.0f);
+
+	m_postReady = m_fxaa || m_crtMode > 0 || m_glowStrength > 0.0f || m_crtColors != 0;
 }
 
 /*
@@ -173,8 +234,31 @@ void CVulkan2D::RefreshPostSettings()
 	 * stale value here would leave the 2D layer clipping a widened 3D scene back to 4:3.
 	 */
 	const bool wasWide = m_wide;
-	m_wide = m_config["WideScreen"].ValueAs<bool>();
+	// Low-resolution rendering needs the scene target to be the width of the picture, which a widened
+	// frustum is not; it wins over widescreen, and the settings window greys that option out while it
+	// is on. Same rule as CVulkan3D, from the same key, so the two cannot disagree about the picture.
+	m_wide = m_config["WideScreen"].ValueAs<bool>() && !m_lowRes;
 	m_wideBg = m_config["WideBackground"].ValueAs<bool>();
+
+	// Frosted glass for the interface panels. Re-read here so the in-game panel can switch it off
+	// without a restart; when it is off the overlay draws a solid tint over the picture instead.
+	m_uiFrostEnabled = m_config["UiFrostedGlass"].ValueAsDefault<bool>(true);
+	/*
+	 * Which of the two interface palettes the blurred backdrop is graded for. Read from the
+	 * configuration rather than asked of the interface layer: this is the renderer, and the theme is
+	 * a setting like any other it already reads for the post pass. 0 is the warm light theme.
+	 */
+	m_uiBlur.SetLightMode(m_config["UITheme"].ValueAsDefault<int>(0) == 0);
+
+	// The upscale filter is a per-draw push constant rather than part of the pipeline, so re-reading
+	// it here is what makes the in-game control live. The native-size exception still applies: at
+	// 496x384 a filter would only blur a 1:1 image.
+	int upscale = m_config["UpscaleMode"].ValueAsDefault<int>((int)UpscaleMode::Bilinear);
+	if (upscale < 0)
+		upscale = 0;
+	if (upscale > 3)
+		upscale = 3;
+	m_upscaleMode = m_native2D ? UpscaleMode::Nearest : (UpscaleMode)upscale;
 
 	// A backdrop is not loaded at all while widescreen is on (no bars to fill), so turning the option
 	// off mid-session has to bring it back. UploadBezel() copies it in on the next frame.
@@ -192,7 +276,7 @@ void CVulkan2D::RefreshPostSettings()
 }
 
 CVulkan2D::CVulkan2D(const Util::Config::Node& config, CVulkanContext& context)
-	: m_config(config), m_context(context)
+	: m_config(config), m_context(context), m_uiBlur(context)
 {
 	m_wideBg = config["WideBackground"].ValueAs<bool>();
 	m_wide = config["WideScreen"].ValueAs<bool>();
@@ -208,7 +292,24 @@ CVulkan2D::~CVulkan2D()
 	if (!device)
 		return;
 	vkDeviceWaitIdle(device);
+	m_uiBlur.Destroy();
 	DestroyPost();
+	if (m_crosshairPipeline)
+		vkDestroyPipeline(device, m_crosshairPipeline, nullptr);
+	if (m_crosshairLayout)
+		vkDestroyPipelineLayout(device, m_crosshairLayout, nullptr);
+	if (m_crosshairVert)
+		vkDestroyShaderModule(device, m_crosshairVert, nullptr);
+	if (m_crosshairFrag)
+		vkDestroyShaderModule(device, m_crosshairFrag, nullptr);
+	if (m_borderPipeline)
+		vkDestroyPipeline(device, m_borderPipeline, nullptr);
+	if (m_borderLayout)
+		vkDestroyPipelineLayout(device, m_borderLayout, nullptr);
+	if (m_borderVert)
+		vkDestroyShaderModule(device, m_borderVert, nullptr);
+	if (m_borderFrag)
+		vkDestroyShaderModule(device, m_borderFrag, nullptr);
 	for (auto& layer : m_layers)
 	{
 		m_context.DestroyView(layer.view);
@@ -223,6 +324,8 @@ CVulkan2D::~CVulkan2D()
 	m_context.Memory().DestroyImage(m_bezel);
 	if (m_pipeline)
 		vkDestroyPipeline(device, m_pipeline, nullptr);
+	if (m_pipelineScene)
+		vkDestroyPipeline(device, m_pipelineScene, nullptr);
 	if (m_pipeLayout)
 		vkDestroyPipelineLayout(device, m_pipeLayout, nullptr);
 	if (m_vert)
@@ -235,9 +338,11 @@ CVulkan2D::~CVulkan2D()
 		vkDestroyDescriptorSetLayout(device, m_layout, nullptr);
 	if (m_sampler)
 		vkDestroySampler(device, m_sampler, nullptr);
+	if (m_nearestSampler)
+		vkDestroySampler(device, m_nearestSampler, nullptr);
 }
 
-Result CVulkan2D::Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned yRes, unsigned totalXRes, unsigned totalYRes, unsigned, UpscaleMode)
+Result CVulkan2D::Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned yRes, unsigned totalXRes, unsigned totalYRes, unsigned, UpscaleMode upscaleMode)
 {
 	m_xOff = xOffset;
 	m_yOff = yOffset;
@@ -247,7 +352,12 @@ Result CVulkan2D::Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsign
 	m_totalY = totalYRes;
 	m_correction = (unsigned)((yRes / 384.0) * 2.0 + 0.5);
 	m_wideBg = m_config["WideBackground"].ValueAs<bool>();
-	m_wide = m_config["WideScreen"].ValueAs<bool>();
+	m_lowRes = m_config["InternalResolution"].ValueAsDefault<int>(0) != 0;
+	m_wide = m_config["WideScreen"].ValueAs<bool>() && !m_lowRes;
+	// At the tile layer's native size a filter can only blur: there is no magnification to smooth,
+	// and the offset correction is a whole number of pixels. CRender2D makes the same exception.
+	m_native2D = (xRes == 496 && yRes == 384);
+	m_upscaleMode = m_native2D ? UpscaleMode::Nearest : upscaleMode;
 
 	if (m_layers[0].image)
 		return Result::OKAY;
@@ -267,6 +377,12 @@ Result CVulkan2D::Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsign
 		ErrorLog("Vulkan2D: failed to create the composite pipeline.");
 		return Result::FAIL;
 	}
+	// The crosshair is optional: a driver that cannot build this pipeline should cost the crosshair,
+	// not the game. DrawCrosshairPass() skips itself while the pipeline is null.
+	if (!CreateCrosshairPipeline())
+		ErrorLog("Vulkan2D: failed to create the crosshair pipeline; crosshairs are unavailable.");
+	if (!CreateBorderPipeline())
+		ErrorLog("Vulkan2D: failed to create the light-gun border pipeline; the border is unavailable.");
 	// The post-processing pipeline is only needed when a filter is actually active; creating it
 	// lazily keeps the untouched path exactly as it was.
 	if (m_postReady && !CreatePostPipeline())
@@ -278,6 +394,17 @@ Result CVulkan2D::Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsign
 	// Slot 3 is the bezel backdrop. The image is created here - its size comes from the decoded file
 	// - but only filled on the first frame, because the upload needs a command buffer.
 	LoadBezelImage();
+
+	/*
+	 * Build the frosted-backdrop chain now rather than on first use.
+	 *
+	 * The overlay registers the half-resolution view with ImGui before it builds its panel, and it
+	 * can only do that if the image already exists. Creating it here means the very first Tab press
+	 * draws glass rather than one frame of plain tint; a resize still costs one such frame, because
+	 * the new view is only published once the chain has been rebuilt.
+	 */
+	if (!m_uiBlur.Ensure(m_context.Extent()))
+		ErrorLog("Vulkan2D: frosted-glass backdrop unavailable; panels fall back to a plain tint.");
 
 	VkDescriptorImageInfo infos[kCompositeLayerCount] = {};
 	for (uint32_t i = 0; i < kCompositeLayerCount; i++)
@@ -291,6 +418,10 @@ Result CVulkan2D::Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsign
 	// A descriptor has to name a real view even when the backdrop is off, so it falls back to a
 	// tile layer that is known to exist. Nothing samples slot 3 in that case.
 	infos[3].imageView = m_bezel.image != VK_NULL_HANDLE ? m_bezel.view : m_layers[0].view;
+	// Slots 4 and 5 are the two transparency targets. SetTransColor() rewrites them whenever the
+	// scene targets are rebuilt; until then they must still name a valid view.
+	infos[4].imageView = m_layers[0].view;
+	infos[5].imageView = m_layers[0].view;
 	VkWriteDescriptorSet write = {};
 	write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 	write.dstSet = m_set;
@@ -348,8 +479,17 @@ bool CVulkan2D::CreatePipeline()
 		ErrorLog("Vulkan2D: vkCreateSampler failed (%d).", (int)r);
 		return false;
 	}
+	// Nearest, for UpscaleMode::Nearest and for the native-resolution case. Both are bound to the
+	// composite set; the draw selects between them, so switching the mode costs nothing.
+	sampler.magFilter = VK_FILTER_NEAREST;
+	sampler.minFilter = VK_FILTER_NEAREST;
+	if (VkResult r = vkCreateSampler(device, &sampler, nullptr, &m_nearestSampler); r != VK_SUCCESS)
+	{
+		ErrorLog("Vulkan2D: vkCreateSampler (nearest) failed (%d).", (int)r);
+		return false;
+	}
 
-	VkDescriptorSetLayoutBinding bindings[2] = {};
+	VkDescriptorSetLayoutBinding bindings[3] = {};
 	bindings[0].binding = 0;
 	bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
 	bindings[0].descriptorCount = 1;
@@ -358,9 +498,14 @@ bool CVulkan2D::CreatePipeline()
 	bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
 	bindings[1].descriptorCount = kCompositeLayerCount;
 	bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+	// binding 2 is the nearest sampler used by the tile-layer upscale modes.
+	bindings[2].binding = 2;
+	bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+	bindings[2].descriptorCount = 1;
+	bindings[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 	VkDescriptorSetLayoutCreateInfo setInfo = {};
 	setInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-	setInfo.bindingCount = 2;
+	setInfo.bindingCount = 3;
 	setInfo.pBindings = bindings;
 	if (VkResult r = vkCreateDescriptorSetLayout(device, &setInfo, nullptr, &m_layout); r != VK_SUCCESS)
 	{
@@ -370,7 +515,7 @@ bool CVulkan2D::CreatePipeline()
 
 	VkDescriptorPoolSize sizes[2] = {};
 	sizes[0].type = VK_DESCRIPTOR_TYPE_SAMPLER;
-	sizes[0].descriptorCount = 1;
+	sizes[0].descriptorCount = 2;
 	sizes[1].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
 	// Must match the layout's binding count above, not the number of layers that happen to be filled:
 	// a pool smaller than the set it has to serve fails the allocation below, and the failure is total
@@ -400,16 +545,20 @@ bool CVulkan2D::CreatePipeline()
 		return false;
 	}
 
-	VkDescriptorImageInfo sampInfo = {};
-	sampInfo.sampler = m_sampler;
-	VkWriteDescriptorSet sampWrite = {};
-	sampWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	sampWrite.dstSet = m_set;
-	sampWrite.dstBinding = 0;
-	sampWrite.descriptorCount = 1;
-	sampWrite.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-	sampWrite.pImageInfo = &sampInfo;
-	vkUpdateDescriptorSets(device, 1, &sampWrite, 0, nullptr);
+	VkDescriptorImageInfo sampInfo[2] = {};
+	sampInfo[0].sampler = m_sampler;
+	sampInfo[1].sampler = m_nearestSampler;
+	VkWriteDescriptorSet sampWrite[2] = {};
+	sampWrite[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	sampWrite[0].dstSet = m_set;
+	sampWrite[0].dstBinding = 0;
+	sampWrite[0].descriptorCount = 1;
+	sampWrite[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+	sampWrite[0].pImageInfo = &sampInfo[0];
+	sampWrite[1] = sampWrite[0];
+	sampWrite[1].dstBinding = 2;
+	sampWrite[1].pImageInfo = &sampInfo[1];
+	vkUpdateDescriptorSets(device, 2, sampWrite, 0, nullptr);
 
 	VkPushConstantRange range = {};
 	range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
@@ -467,6 +616,21 @@ bool CVulkan2D::CreatePipeline()
 	blending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
 	blending.attachmentCount = 1;
 	blending.pAttachments = &blend;
+
+	/*
+	 * The scene layer needs the premultiplied source-over instead.
+	 *
+	 * The 3D scene target stores a premultiplied colour: opaque geometry has alpha 1 so nothing
+	 * changes there, and the fog quad scales its colour by the fog amount before storing it. Both
+	 * the subpass composite (scene_composite.glsl) and the compositor's own two-layer block leave the
+	 * result premultiplied, so SRC_ALPHA here would multiply by the scene alpha a second time -
+	 * darkening every pixel the sky shows through. Only layer 1 uses this; the tile layers and the
+	 * bezel backdrop are straight alpha and keep the pipeline above.
+	 */
+	VkPipelineColorBlendAttachmentState blendScene = blend;
+	blendScene.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+	VkPipelineColorBlendStateCreateInfo blendingScene = blending;
+	blendingScene.pAttachments = &blendScene;
 	VkDynamicState dynamics[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
 	VkPipelineDynamicStateCreateInfo dynamic = {};
 	dynamic.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
@@ -491,11 +655,259 @@ bool CVulkan2D::CreatePipeline()
 	pipe.pColorBlendState = &blending;
 	pipe.pDynamicState = &dynamic;
 	pipe.layout = m_pipeLayout;
-	VkResult pipeResult = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipe, nullptr, &m_pipeline);
+	VkResult pipeResult = vkCreateGraphicsPipelines(device, m_context.PipelineCache(), 1, &pipe, nullptr, &m_pipeline);
 	if (pipeResult != VK_SUCCESS)
+	{
 		ErrorLog("Vulkan2D: vkCreateGraphicsPipelines failed (%d).", (int)pipeResult);
-	return pipeResult == VK_SUCCESS;
+		return false;
+	}
+	pipe.pColorBlendState = &blendingScene;
+	pipeResult = vkCreateGraphicsPipelines(device, m_context.PipelineCache(), 1, &pipe, nullptr, &m_pipelineScene);
+	if (pipeResult != VK_SUCCESS)
+	{
+		ErrorLog("Vulkan2D: vkCreateGraphicsPipelines (scene layer) failed (%d).", (int)pipeResult);
+		return false;
+	}
+	return true;
 }
+
+/*
+ * CreateCrosshairPipeline():
+ *
+ * The smallest pipeline in this file: twelve vertices per crosshair, generated in the vertex shader
+ * from gl_VertexIndex, no vertex buffer, no descriptor set, no sampler. It exists so that a frame
+ * whose only overlay content is a crosshair does not have to build an ImGui frame - which is what it
+ * used to do, once per frame, for a shape that does not need text, input or draw lists.
+ *
+ * A failure here is logged and otherwise ignored: the game runs without a crosshair rather than
+ * refusing to start. DrawCrosshairPass() checks the pipeline before recording anything.
+ */
+bool CVulkan2D::CreateCrosshairPipeline()
+{
+	VkDevice device = m_context.Device();
+
+	VkShaderModuleCreateInfo moduleInfo = {};
+	moduleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+	moduleInfo.codeSize = crosshair_vert_spv_size;
+	moduleInfo.pCode = crosshair_vert_spv;
+	if (vkCreateShaderModule(device, &moduleInfo, nullptr, &m_crosshairVert) != VK_SUCCESS)
+	{
+		ErrorLog("Vulkan2D: crosshair vertex shader failed to load.");
+		return false;
+	}
+	moduleInfo.codeSize = crosshair_frag_spv_size;
+	moduleInfo.pCode = crosshair_frag_spv;
+	if (vkCreateShaderModule(device, &moduleInfo, nullptr, &m_crosshairFrag) != VK_SUCCESS)
+	{
+		ErrorLog("Vulkan2D: crosshair fragment shader failed to load.");
+		return false;
+	}
+
+	VkPushConstantRange range = {};
+	range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+	range.size = sizeof(CrosshairPush);
+	VkPipelineLayoutCreateInfo layoutInfo = {};
+	layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	layoutInfo.pushConstantRangeCount = 1;
+	layoutInfo.pPushConstantRanges = &range;
+	if (vkCreatePipelineLayout(device, &layoutInfo, nullptr, &m_crosshairLayout) != VK_SUCCESS)
+	{
+		ErrorLog("Vulkan2D: crosshair pipeline layout creation failed.");
+		return false;
+	}
+
+	VkPipelineShaderStageCreateInfo stages[2] = {};
+	stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+	stages[0].module = m_crosshairVert;
+	stages[0].pName = "main";
+	stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+	stages[1].module = m_crosshairFrag;
+	stages[1].pName = "main";
+
+	VkPipelineVertexInputStateCreateInfo vertex = {};
+	vertex.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+	VkPipelineInputAssemblyStateCreateInfo assembly = {};
+	assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+	assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+	VkPipelineViewportStateCreateInfo viewport = {};
+	viewport.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+	viewport.viewportCount = 1;
+	viewport.scissorCount = 1;
+	VkPipelineRasterizationStateCreateInfo raster = {};
+	raster.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+	raster.polygonMode = VK_POLYGON_MODE_FILL;
+	raster.cullMode = VK_CULL_MODE_NONE;
+	raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+	raster.lineWidth = 1.0f;
+	VkPipelineMultisampleStateCreateInfo multi = {};
+	multi.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+	multi.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+	// Alpha blending, because the caller may hand over a translucent colour later; today both
+	// crosshairs are fully opaque, and this keeps them identical to the ImGui triangles.
+	VkPipelineColorBlendAttachmentState blend = {};
+	blend.blendEnable = VK_TRUE;
+	blend.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+	blend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+	blend.colorBlendOp = VK_BLEND_OP_ADD;
+	blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+	blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+	blend.alphaBlendOp = VK_BLEND_OP_ADD;
+	blend.colorWriteMask = 0xF;
+	VkPipelineColorBlendStateCreateInfo blending = {};
+	blending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+	blending.attachmentCount = 1;
+	blending.pAttachments = &blend;
+
+	VkDynamicState dynamics[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+	VkPipelineDynamicStateCreateInfo dynamic = {};
+	dynamic.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+	dynamic.dynamicStateCount = 2;
+	dynamic.pDynamicStates = dynamics;
+
+	VkFormat format = m_context.SwapFormat();
+	VkPipelineRenderingCreateInfo rendering = {};
+	rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+	rendering.colorAttachmentCount = 1;
+	rendering.pColorAttachmentFormats = &format;
+
+	VkGraphicsPipelineCreateInfo pipe = {};
+	pipe.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+	pipe.pNext = &rendering;
+	pipe.stageCount = 2;
+	pipe.pStages = stages;
+	pipe.pVertexInputState = &vertex;
+	pipe.pInputAssemblyState = &assembly;
+	pipe.pViewportState = &viewport;
+	pipe.pRasterizationState = &raster;
+	pipe.pMultisampleState = &multi;
+	pipe.pColorBlendState = &blending;
+	pipe.pDynamicState = &dynamic;
+	pipe.layout = m_crosshairLayout;
+	if (vkCreateGraphicsPipelines(device, m_context.PipelineCache(), 1, &pipe, nullptr, &m_crosshairPipeline) != VK_SUCCESS)
+	{
+		ErrorLog("Vulkan2D: crosshair pipeline creation failed.");
+		return false;
+	}
+	return true;
+}
+
+/*
+ * CreateBorderPipeline():
+ *
+ * The Sinden light-gun border: four quads, no vertex buffer, no descriptor set, one push constant.
+ * It is kept out of the crosshair pipeline because the crosshair is alpha-blended and takes its
+ * geometry in window pixels from a different push constant block; sharing one layout would tie two
+ * unrelated features to the same constants.
+ */
+bool CVulkan2D::CreateBorderPipeline()
+{
+	VkDevice device = m_context.Device();
+
+	VkShaderModuleCreateInfo moduleInfo = {};
+	moduleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+	moduleInfo.codeSize = border_vert_spv_size;
+	moduleInfo.pCode = border_vert_spv;
+	if (vkCreateShaderModule(device, &moduleInfo, nullptr, &m_borderVert) != VK_SUCCESS)
+	{
+		ErrorLog("Vulkan2D: border vertex shader failed to load.");
+		return false;
+	}
+	moduleInfo.codeSize = border_frag_spv_size;
+	moduleInfo.pCode = border_frag_spv;
+	if (vkCreateShaderModule(device, &moduleInfo, nullptr, &m_borderFrag) != VK_SUCCESS)
+	{
+		ErrorLog("Vulkan2D: border fragment shader failed to load.");
+		return false;
+	}
+
+	VkPushConstantRange range = {};
+	range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+	range.size = sizeof(BorderPush);
+	VkPipelineLayoutCreateInfo layoutInfo = {};
+	layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	layoutInfo.pushConstantRangeCount = 1;
+	layoutInfo.pPushConstantRanges = &range;
+	if (vkCreatePipelineLayout(device, &layoutInfo, nullptr, &m_borderLayout) != VK_SUCCESS)
+	{
+		ErrorLog("Vulkan2D: border pipeline layout creation failed.");
+		return false;
+	}
+
+	VkPipelineShaderStageCreateInfo stages[2] = {};
+	stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+	stages[0].module = m_borderVert;
+	stages[0].pName = "main";
+	stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+	stages[1].module = m_borderFrag;
+	stages[1].pName = "main";
+
+	VkPipelineVertexInputStateCreateInfo vertex = {};
+	vertex.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+	VkPipelineInputAssemblyStateCreateInfo assembly = {};
+	assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+	assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+	VkPipelineViewportStateCreateInfo viewport = {};
+	viewport.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+	viewport.viewportCount = 1;
+	viewport.scissorCount = 1;
+	VkPipelineRasterizationStateCreateInfo raster = {};
+	raster.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+	raster.polygonMode = VK_POLYGON_MODE_FILL;
+	raster.cullMode = VK_CULL_MODE_NONE;
+	raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+	raster.lineWidth = 1.0f;
+	VkPipelineMultisampleStateCreateInfo multi = {};
+	multi.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+	multi.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+	// Opaque: the border is meant to be the brightest thing on the screen for the camera.
+	VkPipelineColorBlendAttachmentState blend = {};
+	blend.blendEnable = VK_FALSE;
+	blend.colorWriteMask = 0xF;
+	VkPipelineColorBlendStateCreateInfo blending = {};
+	blending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+	blending.attachmentCount = 1;
+	blending.pAttachments = &blend;
+
+	VkDynamicState dynamics[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+	VkPipelineDynamicStateCreateInfo dynamic = {};
+	dynamic.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+	dynamic.dynamicStateCount = 2;
+	dynamic.pDynamicStates = dynamics;
+
+	VkFormat format = m_context.SwapFormat();
+	VkPipelineRenderingCreateInfo rendering = {};
+	rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+	rendering.colorAttachmentCount = 1;
+	rendering.pColorAttachmentFormats = &format;
+
+	VkGraphicsPipelineCreateInfo pipe = {};
+	pipe.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+	pipe.pNext = &rendering;
+	pipe.stageCount = 2;
+	pipe.pStages = stages;
+	pipe.pVertexInputState = &vertex;
+	pipe.pInputAssemblyState = &assembly;
+	pipe.pViewportState = &viewport;
+	pipe.pRasterizationState = &raster;
+	pipe.pMultisampleState = &multi;
+	pipe.pColorBlendState = &blending;
+	pipe.pDynamicState = &dynamic;
+	pipe.layout = m_borderLayout;
+	if (vkCreateGraphicsPipelines(device, m_context.PipelineCache(), 1, &pipe, nullptr, &m_borderPipeline) != VK_SUCCESS)
+	{
+		ErrorLog("Vulkan2D: border pipeline creation failed.");
+		return false;
+	}
+
+	return true;
+}
+
 void CVulkan2D::SetSceneColor(VkImageView view)
 {
 	if (view == m_sceneView || !m_set)
@@ -512,6 +924,28 @@ void CVulkan2D::SetSceneColor(VkImageView view)
 	write.descriptorCount = 1;
 	write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
 	write.pImageInfo = &info;
+	vkUpdateDescriptorSets(m_context.Device(), 1, &write, 0, nullptr);
+}
+
+void CVulkan2D::SetTransColor(VkImageView trans1, VkImageView trans2)
+{
+	if ((trans1 == m_trans1View && trans2 == m_trans2View) || !m_set)
+		return;
+	m_trans1View = trans1;
+	m_trans2View = trans2;
+	VkDescriptorImageInfo info[2] = {};
+	info[0].imageView = trans1 ? trans1 : m_layers[0].view;
+	info[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	info[1].imageView = trans2 ? trans2 : m_layers[0].view;
+	info[1].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	VkWriteDescriptorSet write = {};
+	write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	write.dstSet = m_set;
+	write.dstBinding = 1;
+	write.dstArrayElement = 4;
+	write.descriptorCount = 2;
+	write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+	write.pImageInfo = info;
 	vkUpdateDescriptorSets(m_context.Device(), 1, &write, 0, nullptr);
 }
 
@@ -574,7 +1008,7 @@ void CVulkan2D::RenderFrameTop(void) { m_drawTop = true; }
  * Applied to every layer, not just the 2D ones, because OpenGL's scissor is pipeline state and
  * therefore affects all of them.
  */
-void CVulkan2D::DrawLayer(uint32_t layer, int x, int y, int w, int h)
+void CVulkan2D::DrawLayer(uint32_t layer, int x, int y, int w, int h, int upscaleMode)
 {
 	if (w <= 0 || h <= 0)
 		return;
@@ -614,8 +1048,15 @@ void CVulkan2D::DrawLayer(uint32_t layer, int x, int y, int w, int h)
 	scissor.extent = { (uint32_t)cw, (uint32_t)ch };
 	vkCmdSetViewport(cmd, 0, 1, &viewport);
 	vkCmdSetScissor(cmd, 0, 1, &scissor);
+	// The scene target is premultiplied, so its layer blends with ONE / ONE_MINUS_SRC_ALPHA; the
+	// tile layers and the backdrop are straight alpha and keep the SRC_ALPHA pipeline.
+	VkPipeline pipeline = (layer == 1u && m_pipelineScene != VK_NULL_HANDLE) ? m_pipelineScene : m_pipeline;
+	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 	// Unattenuated: the scene and tile layers are the picture itself, not a backdrop.
-	LayerPush push = { layer, 1.0f };
+	LayerPush push = { layer, 1.0f, upscaleMode,
+		(layer == 1u && m_scenePrecomposited) ? 1u : 0u,
+		(layer == 1u && m_arcadeCheckerboard) ? 1u : 0u,
+		(layer == 1u && m_checkerRaw) ? 1u : 0u };
 	vkCmdPushConstants(cmd, m_pipeLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
 	vkCmdDraw(cmd, 4, 1, 0, 0);
 }
@@ -654,7 +1095,8 @@ bool CVulkan2D::EnsureComposite()
 	VkExtent2D extent = m_context.Extent();
 	if (extent.width == 0 || extent.height == 0)
 		return false;
-	if (m_composite.image && m_composite.width == extent.width && m_composite.height == extent.height)
+	if (m_composite.image && m_composite.width == extent.width && m_composite.height == extent.height &&
+		m_composite.format == m_context.SwapFormat())
 		return true;
 
 	if (m_context.Device())
@@ -673,10 +1115,15 @@ bool CVulkan2D::EnsureComposite()
 	m_compositeRenderView = VK_NULL_HANDLE;
 	m_context.Memory().DestroyImage(m_composite);
 
-	if (!m_context.Memory().CreateImage(extent.width, extent.height, m_compositeMips, VK_FORMAT_R8G8B8A8_UNORM,
+	if (!m_context.Memory().CreateImage(extent.width, extent.height, m_compositeMips, m_context.SwapFormat(),
 			VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
 			VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, m_composite))
 		return false;
+	// The composite is created in the swapchain's own format. It is the target of the composite pipeline,
+	// which is built for that format, and the source of the post pass - a different format here would
+	// make the declared attachment format disagree with the real one (and on a BGRA surface would
+	// exchange red and blue on every path through the offscreen image).
+	//
 	// Two views onto the same image, because the two uses have opposite requirements:
 	//
 	//   m_compositeRenderView - level 0 only. Vulkan requires a colour attachment view to cover
@@ -684,8 +1131,8 @@ bool CVulkan2D::EnsureComposite()
 	//                           doing so left the picture black.
 	//   m_composite.view      - the whole chain, which the post pass needs in order to sample the
 	//                           coarser levels for the glow.
-	m_compositeRenderView = m_context.CreateView(m_composite.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1);
-	m_composite.view = m_context.CreateView(m_composite.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT, 0, m_compositeMips);
+	m_compositeRenderView = m_context.CreateView(m_composite.image, m_context.SwapFormat(), VK_IMAGE_ASPECT_COLOR_BIT, 0, 1);
+	m_composite.view = m_context.CreateView(m_composite.image, m_context.SwapFormat(), VK_IMAGE_ASPECT_COLOR_BIT, 0, m_compositeMips);
 	m_compositeLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
 	VkDescriptorImageInfo info = {};
@@ -826,7 +1273,7 @@ bool CVulkan2D::CreatePostPipeline()
 	dynamic.dynamicStateCount = 2;
 	dynamic.pDynamicStates = dynamics;
 
-	VkFormat colorFormat = VK_FORMAT_R8G8B8A8_UNORM;
+	VkFormat colorFormat = m_context.SwapFormat();
 	VkPipelineRenderingCreateInfo rendering = {};
 	rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
 	rendering.colorAttachmentCount = 1;
@@ -846,7 +1293,7 @@ bool CVulkan2D::CreatePostPipeline()
 	info.pDynamicState = &dynamic;
 	info.layout = m_postPipeLayout;
 
-	if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &info, nullptr, &m_postPipeline) != VK_SUCCESS)
+	if (vkCreateGraphicsPipelines(device, m_context.PipelineCache(), 1, &info, nullptr, &m_postPipeline) != VK_SUCCESS)
 	{
 		ErrorLog("Vulkan2D: post-processing pipeline creation failed.");
 		return false;
@@ -863,7 +1310,10 @@ void CVulkan2D::EndFrame(void)
 	if (m_swapSeen.size() <= imageIndex)
 		m_swapSeen.resize(imageIndex + 1, 0);
 	VkImageLayout oldLayout = m_swapSeen[imageIndex] ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_UNDEFINED;
-	CmdTransition(cmd, m_context.SwapImage(), oldLayout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+	// The submit waits on the acquire semaphore at COLOR_ATTACHMENT_OUTPUT; the transition has to be
+	// ordered after that wait or it races vkAcquireNextImageKHR (see CmdTransition's override).
+	CmdTransition(cmd, m_context.SwapImage(), oldLayout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT,
+		0, 1, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT);
 
 	// One-shot staging copy of the backdrop. Attempted every frame until it succeeds so that a ring
 	// allocation failure simply retries rather than losing the picture for the whole session.
@@ -895,13 +1345,58 @@ void CVulkan2D::EndFrame(void)
 		DrawCompositePass(cmd, m_context.SwapView());
 	}
 
+	// A save-state thumbnail is captured here: the game is composited (and filtered, when CRT effects
+	// are on) but the cabinet backdrop, the in-game panel and the crosshair have not been drawn yet,
+	// so the thumbnail shows the picture rather than the interface. Screenshots deliberately capture
+	// the finished frame instead - RecordScreenshotCopy() is called at the end.
+	m_context.RecordThumbnailCopy(cmd);
+
 	// After the filters, so the backdrop reads as the bezel around a screen rather than as part of
 	// the picture: a shadow mask belongs on the glass, not on the cabinet behind it. With no filters
 	// active this still runs, which is why it is outside the branch above.
 	DrawBezelPass(cmd);
 
+	// The Sinden border is the edge of the glass, not part of the picture: after the backdrop so a
+	// cabinet image cannot hide it, before the panel so the panel can still be read over it.
+	DrawBorderPass(cmd);
+
+	/*
+	 * Frosted backdrop for the panel, built from the frame as it stands now.
+	 *
+	 * After the picture, the CRT filter (inside DrawPostPass) and the cabinet backdrop, so the glass
+	 * shows what is actually behind the panel rather than the 3D scene alone; before the overlay,
+	 * because the overlay's draw commands sample it.
+	 *
+	 * Skipped entirely - no passes, no barriers - unless something is about to draw a frosted panel.
+	 * That gate is the whole reason the effect is affordable: a session that never opens the panel
+	 * pays for one boolean per frame.
+	 */
+	static bool frostRunning = false;
+	if (m_uiFrostEnabled && m_uiFrostGate != nullptr && m_uiFrostGate() && m_uiBlur.Ensure(m_context.Extent()))
+	{
+		m_uiBlur.Record(cmd, m_context.SwapImage());
+		// Logged on the transitions rather than per frame, so "does this cost anything when the panel
+		// is closed?" is answerable from the log instead of from a profiler.
+		if (!frostRunning)
+		{
+			frostRunning = true;
+			InfoLog("Vulkan2D: frosted backdrop active (%ux%u, half of the %ux%u frame).",
+				m_uiBlur.Extent().width, m_uiBlur.Extent().height,
+				m_context.Extent().width, m_context.Extent().height);
+		}
+	}
+	else if (frostRunning)
+	{
+		frostRunning = false;
+		InfoLog("Vulkan2D: frosted backdrop idle; nothing is sampling it, so the chain is not recorded.");
+	}
+
 	// Last of all: the in-game settings panel, over everything, including the backdrop.
 	DrawOverlayPass(cmd);
+
+	// The crosshair is drawn after the panel because it must never be covered - the same ordering the
+	// ImGui foreground draw list gave it before this became a pass of its own.
+	DrawCrosshairPass(cmd);
 
 	// Capture the finished frame if one was requested. Done here, while the image is still a colour
 	// attachment, so RecordScreenshotCopy() can put it back the way the transition below expects.
@@ -991,7 +1486,7 @@ void CVulkan2D::DrawCompositePass(VkCommandBuffer cmd, VkImageView targetView)
 	color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 	color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
 	color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-	color.clearValue.color = { { 0, 0, 0, 1 } };
+	color.clearValue.color = VkClearColorValue{ { 0, 0, 0, 1 } };
 	VkRenderingInfo rendering = {};
 	rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
 	rendering.renderArea.extent = m_context.Extent();
@@ -1013,19 +1508,41 @@ void CVulkan2D::DrawCompositePass(VkCommandBuffer cmd, VkImageView targetView)
 		bottomY = (int)extent.height - (glY + bottomH);
 	}
 	if (m_drawBottom && m_uploaded[0])
-		DrawLayer(0, bottomX, bottomY, bottomW, bottomH);
+		DrawLayer(0, bottomX, bottomY, bottomW, bottomH, (int)m_upscaleMode);
 	if (m_sceneView)
 	{
-		// The 3D scene is rendered into an image the size of the swapchain and is already
-		// positioned/scaled correctly inside it (see CVulkan3D), so blit it 1:1.
-		DrawLayer(1, 0, 0, (int)extent.width, (int)extent.height);
+		if (m_lowRes)
+		{
+			/*
+			 * Low-resolution rendering: the scene target is a fixed small image (496x384 or 992x768,
+			 * see InternalResolution) covering the whole picture, so it is upscaled onto the visible
+			 * rectangle. DrawLayer carries uv 0..1 across the rectangle, which is exactly what maps
+			 * the whole small image onto the whole picture - no sub-rectangle, no offset, and therefore
+			 * no way for it to drift out of step with the 2D layers drawn over it.
+			 *
+			 * Linear filtering regardless of the tile-layer mode: the upscale factor is 2-3x, where
+			 * nearest would turn every 3D pixel into a block and bicubic would cost four taps per
+			 * pixel on the one path that exists to be cheap. The scissor inside DrawLayer still crops
+			 * the edges by the 2D/3D correction, as it does in every other mode.
+			 */
+			const int sceneY = (int)extent.height - (int)(m_yOff + m_yRes);
+			DrawLayer(1, (int)m_xOff, sceneY, (int)m_xRes, (int)m_yRes, (int)UpscaleMode::Bilinear);
+		}
+		else
+		{
+			// The 3D scene is rendered into an image the size of the swapchain and is already
+			// positioned/scaled correctly inside it (see CVulkan3D), so it is drawn 1:1. Linear filtering
+			// is used regardless of the tile-layer mode: at an exact size it makes no difference, and on
+			// a mismatched size during a resize smooth beats point sampling.
+			DrawLayer(1, 0, 0, (int)extent.width, (int)extent.height, (int)UpscaleMode::Bilinear);
+		}
 	}
 	if (m_drawTop && m_uploaded[1])
 	{
 		int glY = (int)m_yOff + (int)m_correction;
 		int topH = (int)m_yRes;
 		int topY = (int)extent.height - (glY + topH);
-		DrawLayer(2, (int)m_xOff - (int)m_correction, topY, (int)m_xRes, topH);
+		DrawLayer(2, (int)m_xOff - (int)m_correction, topY, (int)m_xRes, topH, (int)m_upscaleMode);
 	}
 	CmdEndRendering(cmd);
 }
@@ -1083,6 +1600,7 @@ void CVulkan2D::DrawPostPass(VkCommandBuffer cmd)
 		glowLevels = (int)m_compositeMips - 1;
 	push.glowLevels = glowLevels;
 	push.glowThreshold = m_glowThreshold;
+	push.crtColors = m_crtColors;
 	vkCmdPushConstants(cmd, m_postPipeLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
 
 	VkViewport viewport = {};
@@ -1142,7 +1660,7 @@ bool CVulkan2D::LoadBezelImage(bool updateDescriptor)
 	// mode selected is treated the same way rather than leaving the user with a blank screen and no
 	// explanation, which a settings file edited by hand easily produces.
 	if (mode == 1 || path.empty())
-		path = Util::Format() << FileSystemPath::GetPath(FileSystemPath::Assets) << "Supermodel3Bezel.png";
+		path = Util::Format() << FileSystemPath::GetPath(FileSystemPath::Assets) << "Model3VulkanBezel.png";
 
 	std::string error;
 	if (!Util::PNG::LoadRGBA(path, m_bezelPixels, m_bezelWidth, m_bezelHeight, &error))
@@ -1271,7 +1789,7 @@ void CVulkan2D::UpdateBezelDescriptor()
  *
  * The area of the swapchain the emulated picture actually occupies, in Vulkan coordinates (y down
  * from the top). Everything outside it is black bar. The geometry itself lives in BezelLayout.h so
- * that it can be tested without a GPU - see the property test in develop.md.
+ * that it can be tested without a GPU - see the property test in devdocs/TECHLOG.md.
  */
 void CVulkan2D::BezelGameRect(int& x, int& y, int& w, int& h) const
 {
@@ -1385,8 +1903,9 @@ void CVulkan2D::DrawBezelPass(VkCommandBuffer cmd)
 	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
 	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeLayout, 0, 1, &m_set, 0, nullptr);
 
-	// Slot 3 is the backdrop; see kCompositeLayerCount.
-	LayerPush push = { 3u, m_bezelBrightness };
+	// Slot 3 is the backdrop; see kCompositeLayerCount. A backdrop should always be smooth, so it
+	// uses linear filtering whichever upscale mode the tile layers are set to.
+	LayerPush push = { 3u, m_bezelBrightness, (int)UpscaleMode::Bilinear, 0u, 0u, 0u };
 	vkCmdPushConstants(cmd, m_pipeLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
 
 	// The quad covers the whole screen and carries uv 0..1 across it, so a scissor selects which part
@@ -1439,6 +1958,141 @@ void CVulkan2D::DrawOverlayPass(VkCommandBuffer cmd)
 
 	CmdBeginRendering(cmd, &rendering);
 	m_overlayPass(cmd);
+	CmdEndRendering(cmd);
+}
+
+/*
+ * DrawCrosshairPass():
+ *
+ * Draws the light-gun crosshair over the finished frame.
+ *
+ * Load rather than clear, like the overlay pass and for the same reason: the frame is complete and
+ * this only adds the shape. It runs after the overlay so a crosshair is never hidden by the in-game
+ * panel - the ordering the ImGui foreground draw list used to provide.
+ *
+ * The shape is generated entirely in the vertex shader; each player is one push constant write and a
+ * twelve-vertex draw. The scale matches what the ImGui version applied (window height relative to
+ * 480 lines, times the UI scale), so moving the crosshair out of ImGui does not change its size.
+ */
+void CVulkan2D::DrawCrosshairPass(VkCommandBuffer cmd)
+{
+	if (!m_crosshair.visible || m_crosshair.players == 0 || m_crosshairPipeline == VK_NULL_HANDLE)
+		return;
+
+	const VkExtent2D extent = m_context.Extent();
+	if (extent.width == 0 || extent.height == 0)
+		return;
+
+	VkRenderingAttachmentInfo color = {};
+	color.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+	color.imageView = m_context.SwapView();
+	color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	color.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+	color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+	VkRenderingInfo rendering = {};
+	rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+	rendering.renderArea.extent = extent;
+	rendering.layerCount = 1;
+	rendering.colorAttachmentCount = 1;
+	rendering.pColorAttachments = &color;
+
+	CmdBeginRendering(cmd, &rendering);
+	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_crosshairPipeline);
+
+	VkViewport viewport = {};
+	viewport.width = (float)extent.width;
+	viewport.height = (float)extent.height;
+	viewport.maxDepth = 1.0f;
+	VkRect2D scissor = { { 0, 0 }, extent };
+	vkCmdSetViewport(cmd, 0, 1, &viewport);
+	vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+	const float scale = ((float)extent.height / 480.0f) *
+		(m_crosshair.uiScale > 0.0f ? m_crosshair.uiScale : 1.0f);
+	const float colours[2][4] = {
+		{ 1.0f, 0.0f, 0.0f, 1.0f },     // player 1: red, as before
+		{ 0.0f, 1.0f, 0.0f, 1.0f }      // player 2: green, as before
+	};
+
+	for (int player = 0; player < 2; player++)
+	{
+		if ((m_crosshair.players & (1u << player)) == 0)
+			continue;
+
+		CrosshairPush push = {};
+		push.centre[0] = m_crosshair.x[player];
+		push.centre[1] = m_crosshair.y[player];
+		push.extent[0] = (float)extent.width;
+		push.extent[1] = (float)extent.height;
+		push.colour[0] = colours[player][0];
+		push.colour[1] = colours[player][1];
+		push.colour[2] = colours[player][2];
+		push.colour[3] = colours[player][3];
+		push.scale = scale;
+		vkCmdPushConstants(cmd, m_crosshairLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push);
+		vkCmdDraw(cmd, 12, 1, 0, 0);
+	}
+	CmdEndRendering(cmd);
+}
+
+/*
+ * DrawBorderPass():
+ *
+ * Draws the optional Sinden light-gun border as four opaque quads around the finished frame.
+ * Swapchain coordinates and no post-processing: the camera looks for the edge of the lit area, so
+ * the border must be exactly at the edge of the output and at full brightness regardless of the
+ * CRT filter or the backdrop.
+ */
+void CVulkan2D::DrawBorderPass(VkCommandBuffer cmd)
+{
+	if (!m_sindenBorder || m_sindenBorderWidth <= 0 || m_borderPipeline == VK_NULL_HANDLE)
+		return;
+
+	const VkExtent2D extent = m_context.Extent();
+	if (extent.width == 0 || extent.height == 0)
+		return;
+
+	// Half the smaller dimension is the largest border that still leaves a picture; a wider value
+	// would invert the left/right or top/bottom quads and draw garbage.
+	const int limit = (int)std::min(extent.width, extent.height) / 2;
+	const float thickness = (float)std::min(m_sindenBorderWidth, limit);
+	if (thickness <= 0.0f)
+		return;
+
+	VkRenderingAttachmentInfo color = {};
+	color.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+	color.imageView = m_context.SwapView();
+	color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	color.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+	color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+	VkRenderingInfo rendering = {};
+	rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+	rendering.renderArea.extent = extent;
+	rendering.layerCount = 1;
+	rendering.colorAttachmentCount = 1;
+	rendering.pColorAttachments = &color;
+
+	CmdBeginRendering(cmd, &rendering);
+	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_borderPipeline);
+
+	VkViewport viewport = {};
+	viewport.width = (float)extent.width;
+	viewport.height = (float)extent.height;
+	viewport.maxDepth = 1.0f;
+	VkRect2D scissor = { { 0, 0 }, extent };
+	vkCmdSetViewport(cmd, 0, 1, &viewport);
+	vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+	BorderPush push = {};
+	push.extent[0] = (float)extent.width;
+	push.extent[1] = (float)extent.height;
+	push.thickness = thickness;
+	push.brightness = m_sindenBorderBrightness;
+	vkCmdPushConstants(cmd, m_borderLayout,
+		VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+
+	// Four edges, six vertices each: top, bottom, left, right (see border.vert).
+	vkCmdDraw(cmd, 24, 1, 0, 0);
 	CmdEndRendering(cmd);
 }
 

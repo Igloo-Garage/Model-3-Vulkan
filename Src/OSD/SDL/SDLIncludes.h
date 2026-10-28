@@ -29,7 +29,12 @@
 #ifndef INCLUDED_SDLINCLUDES_H
 #define INCLUDED_SDLINCLUDES_H
 
-#ifdef SUPERMODEL_OSX
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_audio.h>
+
+#elif defined(SUPERMODEL_OSX)
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_audio.h>
 #else
@@ -37,10 +42,12 @@
 #include <SDL_audio.h>
 #endif
 
+#if !defined(SUPERMODEL_PLATFORM_SDL3)
 #ifdef SUPERMODEL_OSX
 #include <SDL2_net/SDL_net.h>
 #else
 #include <SDL_net.h>
+#endif
 #endif
 
 #endif  // INCLUDED_SDLINCLUDES_H

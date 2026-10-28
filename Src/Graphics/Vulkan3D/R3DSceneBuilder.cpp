@@ -86,15 +86,48 @@ void CR3DSceneBuilder::SetViewport(unsigned xOff, unsigned yOff, unsigned xRes, 
 
 void CR3DSceneBuilder::BeginFrame()
 {
-	m_polyBufferRam.clear();
+	/*
+	 * Double-buffer the traversal result. The previous frame has to survive so
+	 * the renderer can match instances and interpolate between the two; copying
+	 * culling RAM instead would duplicate several megabytes and still require
+	 * the same traversal. Swapping the vectors is O(1), and the meshes are
+	 * shared_ptrs, so the dynamic geometry is reference counted rather than
+	 * copied.
+	 */
+	std::swap(m_nodes, m_nodesPrev);
 	m_nodes.clear();
+	m_prevValid = m_currValid;
+	m_currValid = false;
+
+	m_polyBufferRam.clear();
 	m_modelMat.Release();
+	m_localMat.Release();
 	m_nodeAttribs.Reset();
+	m_pathHash = 0;
+	m_lastMatrixSlotID = 0;
 }
 
 void CR3DSceneBuilder::Build()
 {
+	m_pathHash = 0;
 	RenderViewport(0x800000);
+	m_currValid = true;
+}
+
+void CR3DSceneBuilder::ResetInterpolation()
+{
+	// Drop the pair, not just the flags: the next BeginFrame() would otherwise
+	// promote the old current scene to "previous" and interpolate across a
+	// reset or a state load.
+	m_nodesPrev.clear();
+	m_prevValid = false;
+	m_currValid = false;
+}
+
+uint64_t CR3DSceneBuilder::MixKey(uint64_t hash, uint64_t value)
+{
+	hash ^= value + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2);
+	return hash;
 }
 
 const uint32_t* CR3DSceneBuilder::TranslateCullingAddress(uint32_t addr) const
@@ -156,7 +189,13 @@ bool CR3DSceneBuilder::DrawModel(uint32_t modelAddr)
 		m->meshes = std::make_shared<std::vector<New3D::Mesh>>();
 
 	for (int i = 0; i < 16; i++)
+	{
 		m->modelMat[i] = m_modelMat.currentMatrix[i];
+		m->localMat[i] = m_localMat.currentMatrix[i];
+	}
+	m->sourceModelAddr = modelAddr;
+	m->matrixSlotID = m_lastMatrixSlotID;
+	m->instanceKey = MixKey(MixKey(m_pathHash, modelAddr), m_lastMatrixSlotID);
 	m->textureOffsetX = m_nodeAttribs.currentTexOffsetX;
 	m->textureOffsetY = m_nodeAttribs.currentTexOffsetY;
 	m->page = m_nodeAttribs.currentPage;
@@ -201,6 +240,12 @@ void CR3DSceneBuilder::DescendCullingNode(uint32_t addr)
 
 	if (!m_nodeAttribs.Push())
 		return;
+
+	// From here on the node's own address is part of every child's identity.
+	const uint64_t savedPathHash = m_pathHash;
+	const uint32_t savedMatrixSlot = m_lastMatrixSlotID;
+	m_pathHash = MixKey(m_pathHash, addr);
+
 	if (!m_offset)
 	{
 		if (node[0x01] & 1)
@@ -216,14 +261,29 @@ void CR3DSceneBuilder::DescendCullingNode(uint32_t addr)
 	}
 
 	m_modelMat.PushMatrix();
+	m_localMat.PushMatrix();
 	if (node[0x00] & 0x10)
 	{
-		m_modelMat.Translate(Util::Uint32AsFloat(node[0x04 - m_offset]), Util::Uint32AsFloat(node[0x05 - m_offset]), Util::Uint32AsFloat(node[0x06 - m_offset]));
+		const float tx = Util::Uint32AsFloat(node[0x04 - m_offset]);
+		const float ty = Util::Uint32AsFloat(node[0x05 - m_offset]);
+		const float tz = Util::Uint32AsFloat(node[0x06 - m_offset]);
+		m_modelMat.Translate(tx, ty, tz);
+		m_localMat.Translate(tx, ty, tz);
+		m_lastMatrixSlotID = 0;
 	}
 	else if (matrixOffset)
+	{
 		MultMatrix(matrixOffset, m_modelMat);
+		MultMatrix(matrixOffset, m_localMat);
+		m_lastMatrixSlotID = m_matrixBaseAddr + matrixOffset;
+	}
+	else
+		m_lastMatrixSlotID = 0;
 	if (resetMatrix)
+	{
 		ResetMatrix(m_modelMat);
+		ResetMatrix(m_localMat);
+	}
 
 	float x = m_modelMat.currentMatrix[12];
 	float y = m_modelMat.currentMatrix[13];
@@ -289,7 +349,10 @@ void CR3DSceneBuilder::DescendCullingNode(uint32_t addr)
 	}
 
 	m_modelMat.PopMatrix();
+	m_localMat.PopMatrix();
 	m_nodeAttribs.Pop();
+	m_pathHash = savedPathHash;
+	m_lastMatrixSlotID = savedMatrixSlot;
 }
 
 void CR3DSceneBuilder::DescendNodePtr(uint32_t nodeAddr)
@@ -314,7 +377,12 @@ void CR3DSceneBuilder::DescendPointerList(uint32_t addr)
 	{
 		if (list[index] & 0x01000000)
 			break;
+		// A pointer list is part of the path: the same culling node can be
+		// referenced from more than one list, and those are different instances.
+		const uint64_t savedPathHash = m_pathHash;
+		m_pathHash = MixKey(m_pathHash, (uint64_t)addr ^ (uint64_t)index);
 		DescendCullingNode(list[index] & 0x00FFFFFF);
+		m_pathHash = savedPathHash;
 		if (list[index] & 0x02000000)
 			break;
 	}
@@ -348,8 +416,13 @@ void CR3DSceneBuilder::InitMatrixStack(uint32_t matrixBaseAddr, New3D::Mat4& mat
 	m[CMINDEX(2, 0)] = -1; m[CMINDEX(2, 1)] = 0; m[CMINDEX(2, 2)] = 0; m[CMINDEX(2, 3)] = 0;
 	m[CMINDEX(3, 0)] = 0; m[CMINDEX(3, 1)] = 0; m[CMINDEX(3, 2)] = 0; m[CMINDEX(3, 3)] = 1;
 	mat.LoadMatrix(m);
+	m_baseMat.LoadMatrix(m);
+	m_localMat.LoadIdentity();
+	m_matrixBaseAddr = matrixBaseAddr;
+	m_lastMatrixSlotID = 0;
 	m_matrixBasePtr = (const float*)TranslateCullingAddress(matrixBaseAddr);
 	MultMatrix(0, mat);
+	MultMatrix(0, m_baseMat);
 }
 
 void CR3DSceneBuilder::ResetMatrix(New3D::Mat4& mat) const
@@ -386,6 +459,7 @@ void CR3DSceneBuilder::RenderViewport(uint32_t addr)
 	m_nodes.emplace_back();
 	m_nodes.back().models.reserve(2048);
 	New3D::Viewport* vp = &m_nodes.back().viewport;
+	vp->sourceAddress = addr & 0x00FFFFFF;
 	vp->priority = (vpnode[0] >> 3) & 0x3;
 	vp->select = (vpnode[0] >> 8) & 0x3;
 	vp->number = (vpnode[0] >> 10);
@@ -394,6 +468,9 @@ void CR3DSceneBuilder::RenderViewport(uint32_t addr)
 	vp->vpWidth = (vpnode[0x14] & 0xFFFF) * (1.0f / 4.0f);
 	vp->vpHeight = (vpnode[0x14] >> 16) * (1.0f / 4.0f);
 	uint32_t matrixBase = vpnode[0x16] & 0xFFFFFF;
+	vp->matrixBaseAddr = matrixBase;
+	vp->fullScreen = (vp->vpX == 0.0f && vp->vpY == 0.0f && vp->vpWidth >= 495.0f && vp->vpHeight >= 383.0f);
+	vp->screenArea = (int)(vp->vpWidth * vp->vpHeight);
 	m_LODBlendTable = (LODBlendTable*)TranslateCullingAddress(vpnode[0x17] & 0xFFFFFF);
 
 	float cv = Util::Uint32AsFloat(vpnode[0x8]);
@@ -466,7 +543,10 @@ void CR3DSceneBuilder::RenderViewport(uint32_t addr)
 	vp->scrollAtt = (vpnode[0x24] & 0xFF) * (1.0f / 255.0f);
 
 	m_nodeAttribs.Reset();
+	m_pathHash = MixKey(0, vp->sourceAddress);
 	InitMatrixStack(matrixBase, m_modelMat);
+	for (int i = 0; i < 16; i++)
+		vp->baseMatrix[i] = m_baseMat.currentMatrix[i];
 	if (!vpDisabled)
 	{
 		uint32_t childptr = vpnode[0x02];
@@ -477,6 +557,23 @@ void CR3DSceneBuilder::RenderViewport(uint32_t addr)
 		RenderViewport(vpnode[0x01]);
 }
 
+/*
+ * Emits one primitive as four consecutive vertex slots, never six.
+ *
+ * The Vulkan backend rasterises quads the way the Real3D hardware does: four
+ * corners, one primitive, and a fragment shader that solves for the quad's own
+ * (s, t) instead of inheriting a triangle's barycentric coordinates. That only
+ * works if the four corners are adjacent in the vertex array and nothing is
+ * duplicated, so the old triangle-list expansion (0,1,2 / 0,2,3) is gone and the
+ * index buffer supplies the two triangles from a fixed pattern instead.
+ *
+ * A triangle still occupies four slots: slot 3 repeats slot 2, which the shader
+ * detects and treats as the degenerate case of the quad parametrisation - the
+ * same trick New3D's OpenGL quad path uses, and what keeps one pipeline serving
+ * both primitive types. Copying vertex 2 rather than inventing a fourth corner
+ * matters: an averaged corner sits off the true triangle and its interpolated
+ * depth and texture coordinates are wrong across the sliver next to it.
+ */
 void CR3DSceneBuilder::CopyVertexData(const New3D::R3DPoly& r3dPoly, std::vector<New3D::FVertex>& vertexArray)
 {
 	if (r3dPoly.faceColour[3] == 0)
@@ -484,12 +581,7 @@ void CR3DSceneBuilder::CopyVertexData(const New3D::R3DPoly& r3dPoly, std::vector
 	vertexArray.emplace_back(r3dPoly, 0);
 	vertexArray.emplace_back(r3dPoly, 1);
 	vertexArray.emplace_back(r3dPoly, 2);
-	if (r3dPoly.number == 4)
-	{
-		vertexArray.emplace_back(r3dPoly, 0);
-		vertexArray.emplace_back(r3dPoly, 2);
-		vertexArray.emplace_back(r3dPoly, 3);
-	}
+	vertexArray.emplace_back(r3dPoly, r3dPoly.number == 4 ? 3 : 2);
 }
 
 void CR3DSceneBuilder::GetCoordinates(int width, int height, uint16_t uIn, uint16_t vIn, float uvScale, float& uOut, float& vOut) const
@@ -565,7 +657,19 @@ void CR3DSceneBuilder::CacheModel(New3D::Model* m, const uint32_t* data)
 	New3D::PolyHeader ph;
 	uint64_t lastHash = ~(uint64_t)0;
 	New3D::SortingMesh* currentMesh = nullptr;
-	std::unordered_map<uint64_t, New3D::SortingMesh> meshes;
+	/*
+	 * Meshes are kept in a vector, in the order their first polygon appeared, rather than in the map
+	 * alone. The map answers "has this state been seen" and the vector fixes the draw order - and
+	 * with it the blend order of the two transparency layers, which is what a window or a puff of
+	 * smoke depends on. Iterating an unordered_map instead hands the polygons to the rasteriser in
+	 * whatever order the buckets happen to have, so two overlapping transparent surfaces can swap
+	 * from frame to frame as the table grows.
+	 */
+	std::vector<New3D::SortingMesh> meshes;
+	// State hash -> index in the vector, for states that are safe to batch. Translucent states are
+	// deliberately absent: see the note where a new mesh is started below.
+	std::unordered_map<uint64_t, size_t> batches;
+	uint32_t submission = 0;                 // polygons seen so far, i.e. the original submit order
 	ph = data;
 	int numTriangles = ph.NumTrianglesTotal();
 
@@ -576,16 +680,43 @@ void CR3DSceneBuilder::CacheModel(New3D::Model* m, const uint32_t* data)
 		uint64_t hash = ph.Hash();
 		if (hash != lastHash)
 		{
-			auto found = meshes.find(hash);
-			if (found == meshes.end())
-			{
-				currentMesh = &meshes.insert({ hash, New3D::SortingMesh() }).first->second;
-				currentMesh->verts.reserve((size_t)numTriangles * 3);
-				SetMeshValues(currentMesh, ph);
-			}
+			/*
+			 * A state that can reach trans1 or trans2 must not share a mesh with an earlier run of the
+			 * same state. Vertices are appended to a mesh in submission order, so merging two separated
+			 * runs would move the second run in front of everything submitted between them - the very
+			 * reordering this is meant to remove. Starting a new run keeps the polygon order intact; the
+			 * cost is one extra draw call per run of translucent geometry, which is a small fraction of
+			 * a model.
+			 *
+			 * The three flags are all part of PolyHeader::Hash(), so every polygon of one state agrees
+			 * on the classification.
+			 */
+			const bool orderSensitive = ph.TextureAlpha() || ph.PolyAlpha() || ph.TranslucencyPatternSelect();
+			auto found = orderSensitive ? batches.end() : batches.find(hash);
+			if (found != batches.end())
+				currentMesh = &meshes[found->second];
 			else
-				currentMesh = &found->second;
+			{
+				meshes.emplace_back();
+				currentMesh = &meshes.back();
+				currentMesh->order = submission;
+				SetMeshValues(currentMesh, ph);
+				if (orderSensitive)
+				{
+					// A run is usually a handful of polygons, so the whole model's vertex count
+					// would be a large over-allocation per run.
+					currentMesh->verts.reserve(4 * 32);
+				}
+				else
+				{
+					// Batched states are created once, so reserving the model's full size is safe.
+					// Four slots per primitive, whether or not it is a quad.
+					currentMesh->verts.reserve((size_t)numTriangles * 4);
+					batches.emplace(hash, meshes.size() - 1);
+				}
+			}
 		}
+		submission++;
 		if (!currentMesh)
 			break;
 
@@ -682,17 +813,21 @@ void CR3DSceneBuilder::CacheModel(New3D::Model* m, const uint32_t* data)
 	} while (ph.NextPoly());
 
 	m->meshes->reserve(meshes.size());
-	for (auto& it : meshes)
+	// The vector is already in submission order; the sort states the guarantee rather than relying on
+	// every future insertion path remembering to append. order is unique per mesh, so this is stable.
+	std::stable_sort(meshes.begin(), meshes.end(),
+		[](const New3D::SortingMesh& a, const New3D::SortingMesh& b) { return a.order < b.order; });
+	for (auto& mesh : meshes)
 	{
 		if (m->dynamic)
 		{
-			it.second.vboOffset = (int)m_polyBufferRam.size();
-			it.second.vertexCount = (int)it.second.verts.size();
-			m_polyBufferRam.insert(m_polyBufferRam.end(), it.second.verts.begin(), it.second.verts.end());
+			mesh.vboOffset = (int)m_polyBufferRam.size();
+			mesh.vertexCount = (int)mesh.verts.size();
+			m_polyBufferRam.insert(m_polyBufferRam.end(), mesh.verts.begin(), mesh.verts.end());
 		}
 		else
 		{
-			if (m_polyBufferRom.size() + it.second.verts.size() >= kMaxRomVerts)
+			if (m_polyBufferRom.size() + mesh.verts.size() >= kMaxRomVerts)
 			{
 				/*
 				 * The cache has reached its ceiling, so it is emptied and rebuilt from scratch. The
@@ -713,11 +848,11 @@ void CR3DSceneBuilder::CacheModel(New3D::Model* m, const uint32_t* data)
 				m_romReset = true;
 				return;
 			}
-			it.second.vboOffset = (int)m_polyBufferRom.size();
-			it.second.vertexCount = (int)it.second.verts.size();
-			m_polyBufferRom.insert(m_polyBufferRom.end(), it.second.verts.begin(), it.second.verts.end());
+			mesh.vboOffset = (int)m_polyBufferRom.size();
+			mesh.vertexCount = (int)mesh.verts.size();
+			m_polyBufferRom.insert(m_polyBufferRom.end(), mesh.verts.begin(), mesh.verts.end());
 		}
-		m->meshes->push_back(it.second);
+		m->meshes->push_back(mesh);
 	}
 }
 

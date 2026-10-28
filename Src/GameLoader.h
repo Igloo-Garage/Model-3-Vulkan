@@ -96,13 +96,20 @@ private:
     const ZipArchive &zip,
     const std::map<std::string, RegionsByName_t> &regions_by_game) const;
   bool ComputeRegionSize(uint32_t *region_size, const Region::ptr_t &region, const ZipArchive &zip) const;
-  void ChooseGameInZipArchive(std::string *chosen_game, bool *missing_parent_roms, const ZipArchive &zip, const std::string &zipfilename) const;
+  void ChooseGameInZipArchive(std::string *chosen_game, bool *missing_parent_roms, const ZipArchive &zip, const std::string &zipfilename, bool quiet = false) const;
+  // Looks through the ROM folder for an archive whose contents identify as `set_name`. Used when the
+  // parent a child set needs is not stored under the name the XML expects.
+  bool FindArchiveForSet(std::string *path, const std::string &set_name, const std::string &directory) const;
   bool LoadRegion(ROM *buffer, const GameLoader::Region::ptr_t &region, const ZipArchive &zip) const;
   bool LoadROMs(ROMSet *rom_set, const std::string &game_name, const ZipArchive &zip) const;
 
 public:
   GameLoader(const std::string &xml_file);
   bool Load(Game *game, ROMSet *rom_set, const std::string &zipfilename) const;
+
+  // Works out which set an archive holds without loading any ROM data. Sets are identified from the
+  // CRCs inside the archive, not from its file name, so the answer can differ from the name.
+  bool Identify(Game *game, const std::string &zipfilename) const;
   const std::map<std::string, Game> &GetGames() const
   {
     return m_game_info_by_game;

@@ -28,6 +28,8 @@
 #ifndef INCLUDED_IEMULATOR_H
 #define INCLUDED_IEMULATOR_H
 
+#include <string>
+
 class CBlockFile;
 struct Game;
 struct ROMSet;
@@ -69,6 +71,19 @@ public:
    *    SaveState   Block file to load state information from.
    */
   virtual void LoadState(CBlockFile *SaveState) = 0;
+
+  /*
+   * DebugSnapshot(tag):
+   *
+   * Read-only diagnostic hook used by the optional SM3D_LOAD_DEBUG watchdog in the SDL front end.
+   * Returns one line describing the state that matters after a load; the default is empty for
+   * emulators that do not implement it. Must not modify any state.
+   */
+  virtual std::string DebugSnapshot(const char *tag)
+  {
+    (void)tag;
+    return std::string();
+  }
   
   /*
    * SaveNVRAM(NVRAM):
@@ -100,16 +115,74 @@ public:
   /*
    * RunFrame(void):
    *
-   * Runs one video frame.
+   * Runs one video frame: simulate it and render it. Kept for the modal-loop
+   * path and for callers that still want the two halves together.
    */
   virtual void RunFrame(void) = 0;
 
   /*
+   * RunSimulationFrame(void):
+   *
+   * Runs one video frame of emulation without touching the swapchain. The
+   * high-refresh loop calls this when the fixed-step accumulator releases a
+   * step, then presents as many times as the display asks for.
+   *
+   * The default is empty: an emulator that has nothing to simulate (the
+   * graphics-state viewer) still renders, it just has no clock to advance.
+   */
+  virtual void RunSimulationFrame(void) {}
+
+  /*
+   * Split form of RunSimulationFrame() for the high-refresh loop.
+   *
+   * BeginSimulationFrame() starts one emulated frame and returns; the PPC, sound
+   * and drive threads run while the renderer presents the previous snapshot.
+   * EndSimulationFrame() waits for that work to finish, publishes the read-only
+   * snapshots and marks the scene dirty. RunSimulationFrame() is the blocking
+   * combination of the two.
+   *
+   * An emulator with no background work can implement Begin as the whole frame
+   * and End as a no-op.
+   */
+  virtual void BeginSimulationFrame() {}
+  virtual void EndSimulationFrame() {}
+
+  /*
+   * Traverses the scene database of the step that just ended into the renderer's
+   * current snapshot.
+   *
+   * Called between EndSimulationFrame() and BeginSimulationFrame(), which is the
+   * only point at which no emulated hardware is writing to the scene memory:
+   * after Begin, the CPU is already building the next frame. Building the scene
+   * there is what keeps a snapshot from mixing a completed frame with a
+   * half-written one.
+   *
+   * The default does nothing, for emulators whose renderer has no such split.
+   */
+  virtual void PrepareSceneSnapshot() {}
+
+  /*
    * RenderFrame(void):
    *
-   * Renders one video frame.
+   * Renders one video frame from the current state.
    */
   virtual void RenderFrame(void) = 0;
+
+  /*
+   * RenderFrame(alpha, newSimulation):
+   *
+   * Renders one presentation frame. alpha is the fraction of a simulation
+   * step since the last one (0 = previous state, 1 = current); it is ignored
+   * by renderers that cannot interpolate. newSimulation says the emulation
+   * state advanced since the previous call, so scene building, texture
+   * synchronisation and dynamic geometry uploads belong to this call only.
+   */
+  virtual void RenderFrame(double alpha, bool newSimulation)
+  {
+    (void)alpha;
+    (void)newSimulation;
+    RenderFrame();
+  }
 
   /*
    * Reset(void):

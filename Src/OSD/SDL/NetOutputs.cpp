@@ -21,6 +21,106 @@
 
 #include "NetOutputs.h"
 
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+
+/*
+ * MAMEHooker-style network outputs are built on SDL_net, which the SDL3 target
+ * does not link.  Rather than failing startup (both executables share the same
+ * Data/Config tree, so "Outputs = net" is a plausible setting in either one),
+ * the class degrades to a no-op and says so once.
+ *
+ * If SDL3_net is ever vendored, flip USE_SDL3_NET on and give this file a real
+ * implementation guarded by that option instead of the backend macro.
+ */
+
+CNetOutputs::CNetOutputs()
+{
+}
+
+CNetOutputs::~CNetOutputs()
+{
+    m_running.store(false);
+    if (m_tcpServerThread.joinable()) {
+        m_tcpServerThread.join();
+    }
+}
+
+bool CNetOutputs::Initialize()
+{
+    ErrorLog("Network outputs are not available in the SDL3 build; outputs are disabled.");
+    return true;
+}
+
+void CNetOutputs::Attached()
+{
+}
+
+void CNetOutputs::SendOutput(EOutputs output, UINT8 prevValue, UINT8 value)
+{
+}
+
+bool CNetOutputs::CreateServerThread()
+{
+    return false;
+}
+
+bool CNetOutputs::CreateTcpServerSocket()
+{
+    return false;
+}
+
+void CNetOutputs::DestroyTcpServerSocket()
+{
+}
+
+bool CNetOutputs::SendUdpBroadcastWithId()
+{
+    return false;
+}
+
+bool CNetOutputs::RegisterClient(void* socket)
+{
+    return false;
+}
+
+void CNetOutputs::SendAllDataToClient(RegisteredClientTcp& client)
+{
+}
+
+bool CNetOutputs::UnregisterAllClients()
+{
+    m_clients.clear();
+    return true;
+}
+
+bool CNetOutputs::UnregisterClient(void* socket)
+{
+    return false;
+}
+
+bool CNetOutputs::SendGameIdString(RegisteredClientTcp& client)
+{
+    return false;
+}
+
+bool CNetOutputs::SendStopString(RegisteredClientTcp& client, bool stopped)
+{
+    return false;
+}
+
+bool CNetOutputs::SendPauseString(RegisteredClientTcp& client, bool paused)
+{
+    return false;
+}
+
+bool CNetOutputs::SendTcpData(RegisteredClientTcp& client, const std::string& data)
+{
+    return false;
+}
+
+#else
+
+#include "SDLIncludes.h"
 
 CNetOutputs::CNetOutputs()
 {
@@ -40,10 +140,10 @@ CNetOutputs::~CNetOutputs()
 
     // Free up resources.
     if (m_tcpSocketSet) {
-        SDLNet_FreeSocketSet(m_tcpSocketSet);
+        SDLNet_FreeSocketSet(static_cast<SDLNet_SocketSet>(m_tcpSocketSet));
     }
     if (m_serverSocket) {
-        SDLNet_TCP_Close(m_serverSocket);
+        SDLNet_TCP_Close(static_cast<TCPsocket>(m_serverSocket));
     }
 
     SDLNet_Quit();
@@ -93,7 +193,7 @@ bool CNetOutputs::CreateServerThread()
     m_running.store(true);
     m_tcpServerThread = std::thread([this] {
         while (m_running.load()) {
-            TCPsocket clientSocket = SDLNet_TCP_Accept(m_serverSocket);
+            TCPsocket clientSocket = SDLNet_TCP_Accept(static_cast<TCPsocket>(m_serverSocket));
             if (clientSocket) {
                 // Handle new client connection (e.g., add to list of clients, send initial state, etc.).
                 IPaddress* clientIP = SDLNet_TCP_GetPeerAddress(clientSocket);
@@ -139,7 +239,8 @@ bool CNetOutputs::CreateTcpServerSocket()
     // Create the socket set to manage multiple clients.
     // It is +1 to include the server socket itself.
     m_tcpSocketSet = SDLNet_AllocSocketSet(m_maxClients + 1);
-    SDLNet_TCP_AddSocket(m_tcpSocketSet, m_serverSocket);
+    SDLNet_TCP_AddSocket(static_cast<SDLNet_SocketSet>(m_tcpSocketSet),
+        static_cast<TCPsocket>(m_serverSocket));
 
     return true;
 
@@ -148,7 +249,7 @@ bool CNetOutputs::CreateTcpServerSocket()
 void CNetOutputs::DestroyTcpServerSocket()
 {
     if (m_serverSocket) {
-        SDLNet_TCP_Close(m_serverSocket);
+        SDLNet_TCP_Close(static_cast<TCPsocket>(m_serverSocket));
         m_serverSocket = nullptr;
     }
 }
@@ -190,8 +291,10 @@ bool CNetOutputs::SendUdpBroadcastWithId()
     return true;
 }
 
-bool CNetOutputs::RegisterClient(TCPsocket socket)
+bool CNetOutputs::RegisterClient(void* socketVoid)
 {
+    TCPsocket socket = static_cast<TCPsocket>(socketVoid);
+
     // Check that given client is not already registered.
     for (auto& client : m_clients) {
         if (client.ClientSocket == socket) {
@@ -202,7 +305,7 @@ bool CNetOutputs::RegisterClient(TCPsocket socket)
     }
 
     // Add the new client socket to the socket set.
-    SDLNet_TCP_AddSocket(m_tcpSocketSet, socket);
+    SDLNet_TCP_AddSocket(static_cast<SDLNet_SocketSet>(m_tcpSocketSet), socket);
 
     // If not, store details about client and send it current state of all outputs.
     RegisteredClientTcp client;
@@ -247,8 +350,10 @@ bool CNetOutputs::UnregisterAllClients()
     return true;
 }
 
-bool CNetOutputs::UnregisterClient(TCPsocket socket)
+bool CNetOutputs::UnregisterClient(void* socketVoid)
 {
+    TCPsocket socket = static_cast<TCPsocket>(socketVoid);
+
     // Find any matching clients and remove them.
     bool found = false;
     std::vector<RegisteredClientTcp>::iterator it = m_clients.begin();
@@ -259,7 +364,7 @@ bool CNetOutputs::UnregisterClient(TCPsocket socket)
             it = m_clients.erase(it);
             found = true;
             // Remove from socket set and close the socket.
-            SDLNet_TCP_DelSocket(m_tcpSocketSet, socket);
+            SDLNet_TCP_DelSocket(static_cast<SDLNet_SocketSet>(m_tcpSocketSet), socket);
             SDLNet_TCP_Close(socket);
         } else {
             it++;
@@ -290,7 +395,7 @@ bool CNetOutputs::SendPauseString(RegisteredClientTcp& client, bool paused)
 
 bool CNetOutputs::SendTcpData(RegisteredClientTcp& client, const std::string& data)
 {
-    auto sentDataLen = SDLNet_TCP_Send(client.ClientSocket, data.c_str(), (int)data.length());
+    auto sentDataLen = SDLNet_TCP_Send(static_cast<TCPsocket>(client.ClientSocket), data.c_str(), (int)data.length());
     DebugLog("Sent to client: %s", data.c_str());
     DebugLog("Bytes sent: %d", sentDataLen);
     DebugLog("Expected bytes: %zu", data.length());
@@ -305,3 +410,5 @@ bool CNetOutputs::SendTcpData(RegisteredClientTcp& client, const std::string& da
     }
     return true;
 }
+
+#endif

@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net11.0</TargetFramework>
+    <AssemblyName>Model3VulkanHostCore</AssemblyName>
+    <RootNamespace>Model3VulkanHostCore</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <!-- Native AOT shared library: plain machine code, C ABI exports, no host runtime. -->
+    <PublishAot>true</PublishAot>
+    <NativeLib>Shared</NativeLib>
+    <SelfContained>true</SelfContained>
+    <OptimizationPreference>Speed</OptimizationPreference>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <StripSymbols>true</StripSymbols>
+    <IlcGenerateStackTraceData>false</IlcGenerateStackTraceData>
+
+    <!-- Cold-path module: no reflection, no dynamic JSON. -->
+    <JsonSerializerIsReflectionEnabledByDefault>false</JsonSerializerIsReflectionEnabledByDefault>
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+    <EventSourceSupport>false</EventSourceSupport>
+    <UseSystemResourceKeys>true</UseSystemResourceKeys>
+  </PropertyGroup>
+
+  <!--
+    Zstandard codec. .NET 11 still has no zstd stream in the BCL, so the module
+    uses the pure managed ZstdSharp.Port instead of a native libzstd binary.
+
+    The port is one IL assembly: there is no DllImport, no runtime loader probe
+    and no CPU-feature dispatch to a second DLL. Native AOT compiles it together
+    with the module, which makes Model3VulkanHostCore.dll self-contained and
+    removes the libzstd.dll/libzstd.so/libzstd.dylib deployment problem.
+
+    The package has no reflection surface (it is a direct port of the reference
+    C implementation), so it is trim- and AOT-safe. Its `net9.0` asset is used
+    on net11.0; no extra package dependencies are pulled in.
+  -->
+  <ItemGroup>
+    <PackageReference Include="ZstdSharp.Port" Version="0.8.8" />
+  </ItemGroup>
+
+</Project>

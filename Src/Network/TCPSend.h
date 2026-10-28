@@ -24,7 +24,6 @@
 #define _TCPSEND_H_
 
 #include <string>
-#include "SDLIncludes.h"
 
 class TCPSend
 {
@@ -39,7 +38,7 @@ private:
 
 	std::string	m_ip;
 	int			m_port;
-	TCPsocket	m_socket;		// sdl socket
+	void*	m_socket;
 
 };
 

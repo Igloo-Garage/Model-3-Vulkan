@@ -26,7 +26,6 @@
 #include <thread>
 #include <atomic>
 #include <vector>
-#include "SDLIncludes.h"
 
 class TCPReceive
 {
@@ -42,9 +41,9 @@ private:
 
 	void ListenFunc();
 
-	TCPsocket m_listenSocket;
-	std::atomic<TCPsocket> m_receiveSocket;
-	SDLNet_SocketSet m_socketSet;
+	void* m_listenSocket;
+	std::atomic<void*> m_receiveSocket;
+	void* m_socketSet;
 	std::thread m_listenThread;
 	std::atomic_bool m_running;
 	std::vector<char> m_recBuffer;

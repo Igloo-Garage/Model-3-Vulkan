@@ -118,20 +118,24 @@
       <Command>"$(TargetPath)" ..\..\Src\CPU\68K\Musashi\ ..\..\Src\CPU\68K\Musashi\m68k_in.c</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
-  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
       <Optimization>MaxSpeed</Optimization>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <WarningLevel>Level3</WarningLevel>
+      <!-- m68kmake.c is a command-line tool built from upstream sources; the CRT deprecation
+           wrappers have never applied to it. Without this it prints ~30 C4996 lines whenever the
+           generator is rebuilt. -->
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
     </ClCompile>
     <Link>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <OptimizeReferences>true</OptimizeReferences>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
-      <TargetMachine>MachineX86</TargetMachine>
+      <TargetMachine>MachineX64</TargetMachine>
     </Link>
     <PostBuildEvent>
       <Command>"$(TargetPath)" ..\..\Src\CPU\68K\Musashi\ ..\..\Src\CPU\68K\Musashi\m68k_in.c</Command>
@@ -160,7 +164,13 @@
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="..\..\Src\CPU\68K\Musashi\m68kmake.c" />
+    <!--
+      The generator has the same integer-width conversions the generated code does; see the note in
+      Supermodel.vcxproj. Silenced so a regeneration does not bury the rest of the build output.
+    -->
+    <ClCompile Include="..\..\Src\CPU\68K\Musashi\m68kmake.c">
+      <DisableSpecificWarnings>4244;4267;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+    </ClCompile>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

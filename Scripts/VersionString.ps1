@@ -1,4 +1,4 @@
-# Prints this build's version string, e.g. "v0.9.2.3a".
+# Prints this build's version string, e.g. "v1.2.3a".
 #
 # Read from Src/Version.h rather than written here as well: the number is recorded once, in that
 # header, and compiled into the executable. A second copy in a build script is a copy that will

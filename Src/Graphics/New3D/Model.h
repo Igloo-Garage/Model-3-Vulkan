@@ -171,6 +171,10 @@ struct Mesh
 struct SortingMesh : public Mesh		// This struct temporarily holds the model data, before it gets copied to the main buffer
 {
 	std::vector<FVertex> verts;
+	// Index of the first polygon that contributed to this mesh, in the model's original submission
+	// order. Used by the Vulkan scene builder to emit meshes in that order, so translucent blending
+	// happens in the order the Real3D hardware would have blended them.
+	UINT32	order			= 0;
 };
 
 struct Model
@@ -187,6 +191,16 @@ struct Model
 
 	//matrices
 	float modelMat[16];
+	// The model transform relative to the viewport's base matrix (base * local =
+	// modelMat). Kept separately so the camera and the instance can be
+	// interpolated independently: the camera moves every frame, the instance
+	// usually does not.
+	float localMat[16] = {};
+
+	// Identity for matching this instance across frames.
+	uint32_t sourceModelAddr = 0;
+	uint32_t matrixSlotID = 0;
+	uint64_t instanceKey = 0;
 
 	//model scale step 1.5+
 	float scale = 1.0f;
@@ -231,6 +245,15 @@ struct Viewport
 	float	scrollAtt;
 
 	int		hardwareStep;			// not really a viewport param but will do here
+
+	// The culling viewport node this came from. Stable for the life of a scene
+	// graph, and the key the interpolation code uses to keep the main view and
+	// a rear-view mirror apart.
+	uint32_t sourceAddress = 0;
+	uint32_t matrixBaseAddr = 0;
+	float	baseMatrix[16] = {};	// C * matrix slot 0
+	bool	fullScreen = false;		// 0,0,496x384 - the gameplay view
+	int		screenArea = 0;
 };
 
 class NodeAttributes

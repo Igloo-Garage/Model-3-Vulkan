@@ -116,6 +116,15 @@ void ApplyLightAppearance()
         [NSApp setAppearance:[NSAppearance appearanceNamed:NSAppearanceNameAqua]];
 }
 
+void ApplyDarkAppearance()
+{
+    // DarkAqua arrived in 10.14. On an older system the lookup returns nil and
+    // setAppearance:nil simply returns the application to the system default, which is the right
+    // fallback: the setting is cosmetic and must never be the reason a launch fails.
+    if (NSApp != nil)
+        [NSApp setAppearance:[NSAppearance appearanceNamed:NSAppearanceNameDarkAqua]];
+}
+
 bool BrowseFolder(SDL_Window* window, std::string& path)
 {
     (void)window;

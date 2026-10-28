@@ -32,11 +32,17 @@
  *         Data\
  *             Config\      Supermodel.ini, Games.xml, Music.xml
  *             NVRAM\       per-game .nv files
- *             Saves\       per-game save states
+ *             Saves\       per-game save states (the Vulkan build's .zst containers and legacy .st)
+ *             Saves_Legacy\ the OpenGL-only build's raw .st save states
  *             Screenshots\
  *             Analysis\
  *             Assets\      crosshair bitmaps
  *             Supermodel.log
+ *
+ * The two save folders are the one exception to "both executables share Data\". The OpenGL-only
+ * build writes raw .st block files and cannot read the Vulkan build's .zst containers, so keeping
+ * them in one folder made the slot lists depend on which executable last wrote a save. Config,
+ * NVRAM, screenshots and everything else are still shared.
  *
  * Two decisions are worth stating explicitly.
  *
@@ -105,33 +111,6 @@ namespace FileSystemPath
         return path.size() >= 2 && path[1] == ':';
     }
 
-    /*
-     * Which of the two layouts this installation uses.
-     *
-     * 0.9.2 archives put everything under the Data folder, while the Makefile-built packages and
-     * earlier releases kept Config, Assets and the runtime folders next to the executable. The
-     * choice is made once, from what is actually on disk, and it prefers the directory that
-     * contains a Config folder: that is the one which can actually be read. A stray Data folder -
-     * the log creates one on the first run if the configured log path says so - therefore cannot
-     * make the setup look like the new layout and hide Games.xml.
-     */
-    const std::string& DataPrefix()
-    {
-        static const std::string prefix = []() -> std::string
-        {
-            const std::string& base = BasePath();
-            if (!base.empty())
-            {
-                if (PathExists(base + kDataDir + "Config"))
-                    return kDataDir;
-                if (PathExists(base + "Config"))
-                    return "";
-            }
-            return kDataDir;        // fresh installation
-        }();
-        return prefix;
-    }
-
         void MakeDirRecursive(const std::string& dir)
         {
             // Creating "Data/NVRAM/" means creating "Data" first, so walk the separators. Cheap
@@ -155,9 +134,11 @@ namespace FileSystemPath
             {
             case Analysis:    return "Analysis/";
             case Config:      return "Config/";
+            case Cache:       return "Cache/";
             case Log:         return "";
             case NVRAM:       return "NVRAM/";
             case Saves:       return "Saves/";
+            case SavesLegacy: return "Saves_Legacy/";
             case Screenshots: return "Screenshots/";
             case Assets:      return "Assets/";
             }
@@ -185,7 +166,7 @@ namespace FileSystemPath
     {
         static std::vector<std::string> created;
 
-        std::string path = BasePath() + DataPrefix() + SubPath(pathType);
+        std::string path = BasePath() + kDataDir + SubPath(pathType);
 
         // Create it once. Without this a fresh archive relies on the directories having been shipped,
         // and writing fails silently if the user removes one.
@@ -227,17 +208,6 @@ namespace FileSystemPath
         const std::string& base = BasePath();
         if (base.empty())
             return path;        // leave it relative to the working directory
-
-        /*
-         * A flat installation has no Data folder, so a path stored as "Data/Supermodel.log" by a
-         * newer default must not create a second tree beside Config. Strip the prefix there.
-         */
-        if (DataPrefix().empty())
-        {
-            const std::string prefix = kDataDir;
-            if (path.compare(0, prefix.size(), prefix) == 0)
-                return base + path.substr(prefix.size());
-        }
 
         return base + path;
     }

@@ -24,6 +24,67 @@
 #include "OSD/Logger.h"
 #include <utility>
 
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+
+/*
+ * The SDL3 target does not link SDL3_net, so netplay sends are inert.  The
+ * send thread is still started and torn down normally so that callers do not
+ * need any special casing: with no connected socket every Send() fails
+ * immediately and the queue stays empty.
+ */
+
+static const int RETRY_COUNT = 10;			// shrugs
+
+TCPSendAsync::TCPSendAsync(std::string& ip, int port) :
+	m_ip(ip),
+	m_port(port),
+	m_socket(nullptr),
+	m_hasData(false)
+{
+	m_sendThread = std::thread(&TCPSendAsync::SendThread, this);
+}
+
+TCPSendAsync::~TCPSendAsync()
+{
+	{
+		std::unique_lock<std::mutex> lock(m_mutex);
+		m_dataBuffers.clear();
+		m_hasData = true;		// must set data ready in case of spurious wake up
+		m_cv.notify_one();		// tell locked thread it can wake up
+	}
+
+	if (m_sendThread.joinable()) {
+		m_sendThread.join();
+	}
+}
+
+bool TCPSendAsync::Send(const void* data, int length)
+{
+	return false;
+}
+
+bool TCPSendAsync::Connected()
+{
+	return false;
+}
+
+void TCPSendAsync::SendThread()
+{
+	// See the comment at the top: nothing can ever be queued, so just park
+	// until the destructor signals shutdown.
+	std::unique_lock<std::mutex> lock(m_mutex);
+	m_cv.wait(lock, [this] { return m_hasData.load(); });
+}
+
+bool TCPSendAsync::Connect()
+{
+	return false;
+}
+
+#else
+
+#include "SDLIncludes.h"
+
 #if defined(_DEBUG)
 #include <stdio.h>
 #define DPRINTF DebugLog
@@ -47,14 +108,14 @@ TCPSendAsync::TCPSendAsync(std::string& ip, int port) :
 TCPSendAsync::~TCPSendAsync()
 {
 	if (m_socket) {
-		SDLNet_TCP_Close(m_socket);
+		SDLNet_TCP_Close(static_cast<TCPsocket>(m_socket));
 		m_socket = nullptr;
 	}
 
 	{
 		std::unique_lock<std::mutex> lock(m_mutex);
 		m_dataBuffers.clear();
-		m_hasData = true;		// must set data ready in case of spurious wake up 
+		m_hasData = true;		// must set data ready in case of spurious wake up
 		m_cv.notify_one();		// tell locked thread it can wake up
 	}
 
@@ -88,8 +149,8 @@ bool TCPSendAsync::Send(const void * data, int length)
 	{
 		std::unique_lock<std::mutex> lock(m_mutex);
 		m_dataBuffers.emplace_back(std::move(dataBuffer));
-		
-		m_hasData = true;	// must set data ready in case of spurious wake up 
+
+		m_hasData = true;	// must set data ready in case of spurious wake up
 		m_cv.notify_one();	// tell locked thread it can wake up
 	}
 
@@ -130,9 +191,9 @@ void TCPSendAsync::SendThread()
 		// get send size (which is packed at the start of the data
 		auto sendSize = *((int32_t*)sendData.get()) + 4;		// send size doesn't include 'header'
 
-		int sent = SDLNet_TCP_Send(m_socket, sendData.get(), sendSize);		// pack the length at the start of transmission.
+		int sent = SDLNet_TCP_Send(static_cast<TCPsocket>(m_socket), sendData.get(), sendSize);		// pack the length at the start of transmission.
 		if (sent < sendSize) {
-			SDLNet_TCP_Close(m_socket);
+			SDLNet_TCP_Close(static_cast<TCPsocket>(m_socket));
 			m_socket = nullptr;
 			break;
 		}
@@ -162,3 +223,5 @@ bool TCPSendAsync::Connect()
 
 	return Connected();
 }
+
+#endif

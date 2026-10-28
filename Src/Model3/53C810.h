@@ -28,6 +28,7 @@
 #ifndef INCLUDED_53C810_H
 #define INCLUDED_53C810_H
 
+#include <string>
 #include "IRQ.h"
 #include "PCI.h"
 #include "BlockFile.h"
@@ -93,6 +94,15 @@ public:
 	 *		SaveState	Block file to load state information from.
 	 */
 	void LoadState(CBlockFile *SaveState);
+
+	/*
+	 * DebugState(void):
+	 *
+	 * Read-only diagnostic for SM3D_LOAD_DEBUG. Returns the SCRIPTS execution
+	 * state that is not part of the save image (notably halt) plus the DMA
+	 * registers. Must not modify state.
+	 */
+	std::string DebugState(void) const;
 
 	/*
 	 * ReadRegister(reg):

@@ -1,0 +1,225 @@
+Supported games in Supermodel 0.3a (from Config/Games.xml)
+======================================================================
+
+ROM sets defined : 63
+Distinct titles  : 27
+Sets needing a parent set : 41
+
+A 'parent' set must be present in the same folder under exactly that name,
+<parent>.zip - the loader asks for it by name. Without it the game cannot load.
+
+======================================================================
+BY GAME
+======================================================================
+
+Scud Race
+  1996   Scud Race stepping 1.5
+    scud       Export, Twin/DX                       
+    scudau     Australia, Twin/DX                       <- needs parent: scud.zip
+    scuddx     Export, Deluxe, Revision A               <- needs parent: scud.zip
+    scuddxo    Export, Deluxe                           <- needs parent: scud.zip
+
+Virtua Fighter 3
+  1996   Virtua Fighter 3 stepping 1.0
+    vf3        Japan, Revision D                     
+    vf3a       Japan, Revision A                        <- needs parent: vf3.zip
+    vf3c       Japan, Revision C                        <- needs parent: vf3.zip
+
+Virtua Fighter 3 Team Battle
+  1996   Virtua Fighter 3 Team Battle stepping 1.0
+    vf3tb      Japan                                    <- needs parent: vf3.zip
+
+Get Bass: Sega Bass Fishing
+  1997   Get Bass: Sega Bass Fishing stepping 1.0
+    getbass    Japan, Standard                          <- needs parent: bassdx.zip
+    getbassdx  Japan, Deluxe                            <- needs parent: bassdx.zip
+    getbassur  Japan, Upright                           <- needs parent: bassdx.zip
+
+Harley-Davidson and L.A. Riders
+  1997   Harley-Davidson and L.A. Riders stepping 2.0
+    harley     Export, Revision B                    
+    harleya    Export, Revision A                       <- needs parent: harley.zip
+
+Le Mans 24
+  1997   Le Mans 24 stepping 1.5
+    lemans24   Japan, Revision B                     
+
+Scud Race Plus
+  1997   Scud Race Plus stepping 1.5
+    scudplus   Export, Twin/DX, Revision A              <- needs parent: scud.zip
+    scudplusa  Export, Twin/DX                          <- needs parent: scud.zip
+
+Sega Bass Fishing
+  1997   Sega Bass Fishing stepping 1.0
+    bassdx     USA, Deluxe                           
+
+The Lost World
+  1997   The Lost World stepping 1.5
+    lostwsga   Japan, Revision A                     
+    lostwsgp   Location Test                            <- needs parent: lostwsga.zip
+
+Virtua Striker 2
+  1997   Virtua Striker 2 stepping 2.0
+    vs2        Step 2.0, Export, USA                 
+    vs215      Step 1.5, Export, USA                    <- needs parent: vs2.zip
+    vs215o     Step 1.5, Japan (test?)                  <- needs parent: vs2.zip
+
+Cyber Troopers Virtual-On Oratorio Tangram
+  1998   Cyber Troopers Virtual-On Oratorio Tangram stepping 2.0
+    von2       Japan, Revision B                     
+    von254g    Japan, Ver 5.4g                          <- needs parent: von2.zip
+    von2a      Japan, Revision A                        <- needs parent: von2.zip
+    von2o      Japan                                    <- needs parent: von2.zip
+
+Daytona USA 2 - Battle on the Edge
+  1998   Daytona USA 2 - Battle on the Edge stepping 2.1
+    daytona2   Japan, Revision A                     
+
+Daytona USA 2 - Power Edition
+  1998   Daytona USA 2 - Power Edition stepping 2.1
+    dayto2pe   Japan                                    <- needs parent: daytona2.zip
+
+Dirt Devils
+  1998   Dirt Devils stepping 2.1
+    dirtdvls   Export, Revision A                    
+    dirtdvlsau Australia, Revision A                    <- needs parent: dirtdvls.zip
+    dirtdvlsg  Export, Ver. G?                          <- needs parent: dirtdvls.zip
+    dirtdvlsj  Japan, Revision A                        <- needs parent: dirtdvls.zip
+    dirtdvlsu  USA, Revision A                          <- needs parent: dirtdvls.zip
+
+Fighting Vipers 2
+  1998   Fighting Vipers 2 stepping 2.0
+    fvipers2   Japan, Revision A                     
+    fvipers2o  Japan                                    <- needs parent: fvipers2.zip
+
+L.A. Machineguns: Rage of the Machines
+  1998   L.A. Machineguns: Rage of the Machines stepping 2.1
+    lamachin   Japan                                 
+
+Magical Truck Adventure
+  1998   Magical Truck Adventure stepping 2.1
+    magtruck   Japan                                 
+    mgtrkbad   Japan                                    <- needs parent: magtruck.zip
+
+Sega Rally 2
+  1998   Sega Rally 2 stepping 2.0
+    srally2    Export                                
+    srally2dx  Export, Deluxe                           <- needs parent: srally2.zip
+    srally2p   Prototype                                <- needs parent: srally2.zip
+    srally2pa  Prototype Version A                      <- needs parent: srally2.zip
+
+Ski Champ
+  1998   Ski Champ stepping 2.0
+    skichamp   Japan                                 
+
+Spikeout
+  1998   Spikeout stepping 2.1
+    spikeout   Export, Revision C                    
+
+Star Wars Trilogy Arcade
+  1998   Star Wars Trilogy Arcade stepping 2.1
+    swtrilgy   Export, Revision A                    
+    swtrilgya  Export                                   <- needs parent: swtrilgy.zip
+    swtrilgyp  Location Test, 16.09.98                  <- needs parent: swtrilgy.zip
+
+The Ocean Hunter
+  1998   The Ocean Hunter stepping 2.1
+    oceanhun   Japan, Revision A                     
+    oceanhuna  Japan                                    <- needs parent: oceanhun.zip
+
+Virtua Striker 2 '98
+  1998   Virtua Striker 2 '98 stepping 2.0
+    vs298      Step 2.0, Japan                       
+    vs29815    Step 1.5, Japan                          <- needs parent: vs298.zip
+
+Emergency Call Ambulance
+  1999   Emergency Call Ambulance stepping 2.1
+    eca        Export                                
+    ecaj       Japan                                    <- needs parent: eca.zip
+    ecap       US location test?                        <- needs parent: eca.zip
+    ecau       USA                                      <- needs parent: eca.zip
+
+Spikeout Final Edition
+  1999   Spikeout Final Edition stepping 2.1
+    spikeofe   Export                                
+
+Virtua Striker 2 '99
+  1999   Virtua Striker 2 '99 stepping 2.1
+    vs299      Export, USA                              <- needs parent: vs2v991.zip
+    vs29915a   Step 1.5 Export, USA                     <- needs parent: vs2v991.zip
+    vs299a     Export, USA, Revision A                  <- needs parent: vs2v991.zip
+
+Virtua Striker 2 '99.1
+  1999   Virtua Striker 2 '99.1 stepping 2.1
+    vs29915    Step 1.5 Export, USA, Revision B         <- needs parent: vs2v991.zip
+    vs29915j   Step 1.5 Japan, Revision B               <- needs parent: vs2v991.zip
+    vs299j     Japan, Revision B                        <- needs parent: vs2v991.zip
+    vs2v991    Export, USA, Revision B               
+
+======================================================================
+FLAT LIST BY SET NAME (for grepping against a ROM folder)
+======================================================================
+
+  bassdx     Sega Bass Fishing                        USA, Deluxe
+  dayto2pe   Daytona USA 2 - Power Edition            Japan  [parent: daytona2]
+  daytona2   Daytona USA 2 - Battle on the Edge       Japan, Revision A
+  dirtdvls   Dirt Devils                              Export, Revision A
+  dirtdvlsau Dirt Devils                              Australia, Revision A  [parent: dirtdvls]
+  dirtdvlsg  Dirt Devils                              Export, Ver. G?  [parent: dirtdvls]
+  dirtdvlsj  Dirt Devils                              Japan, Revision A  [parent: dirtdvls]
+  dirtdvlsu  Dirt Devils                              USA, Revision A  [parent: dirtdvls]
+  eca        Emergency Call Ambulance                 Export
+  ecaj       Emergency Call Ambulance                 Japan  [parent: eca]
+  ecap       Emergency Call Ambulance                 US location test?  [parent: eca]
+  ecau       Emergency Call Ambulance                 USA  [parent: eca]
+  fvipers2   Fighting Vipers 2                        Japan, Revision A
+  fvipers2o  Fighting Vipers 2                        Japan  [parent: fvipers2]
+  getbass    Get Bass: Sega Bass Fishing              Japan, Standard  [parent: bassdx]
+  getbassdx  Get Bass: Sega Bass Fishing              Japan, Deluxe  [parent: bassdx]
+  getbassur  Get Bass: Sega Bass Fishing              Japan, Upright  [parent: bassdx]
+  harley     Harley-Davidson and L.A. Riders          Export, Revision B
+  harleya    Harley-Davidson and L.A. Riders          Export, Revision A  [parent: harley]
+  lamachin   L.A. Machineguns: Rage of the Machines   Japan
+  lemans24   Le Mans 24                               Japan, Revision B
+  lostwsga   The Lost World                           Japan, Revision A
+  lostwsgp   The Lost World                           Location Test  [parent: lostwsga]
+  magtruck   Magical Truck Adventure                  Japan
+  mgtrkbad   Magical Truck Adventure                  Japan  [parent: magtruck]
+  oceanhun   The Ocean Hunter                         Japan, Revision A
+  oceanhuna  The Ocean Hunter                         Japan  [parent: oceanhun]
+  scud       Scud Race                                Export, Twin/DX
+  scudau     Scud Race                                Australia, Twin/DX  [parent: scud]
+  scuddx     Scud Race                                Export, Deluxe, Revision A  [parent: scud]
+  scuddxo    Scud Race                                Export, Deluxe  [parent: scud]
+  scudplus   Scud Race Plus                           Export, Twin/DX, Revision A  [parent: scud]
+  scudplusa  Scud Race Plus                           Export, Twin/DX  [parent: scud]
+  skichamp   Ski Champ                                Japan
+  spikeofe   Spikeout Final Edition                   Export
+  spikeout   Spikeout                                 Export, Revision C
+  srally2    Sega Rally 2                             Export
+  srally2dx  Sega Rally 2                             Export, Deluxe  [parent: srally2]
+  srally2p   Sega Rally 2                             Prototype  [parent: srally2]
+  srally2pa  Sega Rally 2                             Prototype Version A  [parent: srally2]
+  swtrilgy   Star Wars Trilogy Arcade                 Export, Revision A
+  swtrilgya  Star Wars Trilogy Arcade                 Export  [parent: swtrilgy]
+  swtrilgyp  Star Wars Trilogy Arcade                 Location Test, 16.09.98  [parent: swtrilgy]
+  vf3        Virtua Fighter 3                         Japan, Revision D
+  vf3a       Virtua Fighter 3                         Japan, Revision A  [parent: vf3]
+  vf3c       Virtua Fighter 3                         Japan, Revision C  [parent: vf3]
+  vf3tb      Virtua Fighter 3 Team Battle             Japan  [parent: vf3]
+  von2       Cyber Troopers Virtual-On Oratorio Tangram Japan, Revision B
+  von254g    Cyber Troopers Virtual-On Oratorio Tangram Japan, Ver 5.4g  [parent: von2]
+  von2a      Cyber Troopers Virtual-On Oratorio Tangram Japan, Revision A  [parent: von2]
+  von2o      Cyber Troopers Virtual-On Oratorio Tangram Japan  [parent: von2]
+  vs2        Virtua Striker 2                         Step 2.0, Export, USA
+  vs215      Virtua Striker 2                         Step 1.5, Export, USA  [parent: vs2]
+  vs215o     Virtua Striker 2                         Step 1.5, Japan (test?)  [parent: vs2]
+  vs298      Virtua Striker 2 '98                     Step 2.0, Japan
+  vs29815    Virtua Striker 2 '98                     Step 1.5, Japan  [parent: vs298]
+  vs299      Virtua Striker 2 '99                     Export, USA  [parent: vs2v991]
+  vs29915    Virtua Striker 2 '99.1                   Step 1.5 Export, USA, Revision B  [parent: vs2v991]
+  vs29915a   Virtua Striker 2 '99                     Step 1.5 Export, USA  [parent: vs2v991]
+  vs29915j   Virtua Striker 2 '99.1                   Step 1.5 Japan, Revision B  [parent: vs2v991]
+  vs299a     Virtua Striker 2 '99                     Export, USA, Revision A  [parent: vs2v991]
+  vs299j     Virtua Striker 2 '99.1                   Japan, Revision B  [parent: vs2v991]
+  vs2v991    Virtua Striker 2 '99.1                   Export, USA, Revision B

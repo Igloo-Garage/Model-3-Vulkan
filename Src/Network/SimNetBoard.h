@@ -52,6 +52,7 @@ public:
 
 	void SaveState(CBlockFile* SaveState);
 	void LoadState(CBlockFile* SaveState);
+	std::string DebugState(void) const override;
 
 	Result Init(uint8_t* netRAMPtr, uint8_t* netBufferPtr);
 	void RunFrame(void);
@@ -86,6 +87,7 @@ private:
 	uint16_t port_in = 0;
 	uint16_t port_out = 0;
 	std::string addr_out;
+	bool m_localLoop = false;	// self-linked: local loopback, no sockets needed
 	std::thread m_connectThread;
 	std::atomic_bool m_quit = false;
 	std::atomic_bool m_connected = false;

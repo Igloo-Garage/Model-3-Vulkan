@@ -28,6 +28,7 @@
 #ifndef INCLUDED_SCSP_H
 #define INCLUDED_SCSP_H
 
+#include <string>
 #include "BlockFile.h"
 #include "Types.h"
 #include "Util/NewConfig.h"
@@ -83,6 +84,11 @@ UINT32 SCSP_Slave_r32(UINT32 addr);
 // Supermodel interface functions
 void SCSP_SaveState(CBlockFile *StateFile);
 void SCSP_LoadState(CBlockFile *StateFile);
+// Re-drives the 68K IRQ line from both SCSPs' restored pending/enable registers. The line is
+// derived state (like the PPC IRQ line) and is not part of either save block.
+void SCSP_RefreshIRQ(void);
+// Read-only diagnostic for SM3D_LOAD_DEBUG: IRQ state, active slots and MIDI FIFO positions.
+std::string SCSP_DebugState(void);
 void SCSP_SetBuffers(float *leftBufferPtr, float *rightBufferPtr, float* leftRearBufferPtr, float* rightRearBufferPtr, int bufferLength);
 // Sets how many samples the next SCSP_Update() should generate. The emulator advances a variable
 // amount of emulated time per frame, so this varies frame to frame (see GetSamplesThisFrame()).

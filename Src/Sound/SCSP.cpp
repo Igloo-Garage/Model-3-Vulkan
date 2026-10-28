@@ -55,7 +55,7 @@ Fixes made: buggy timing, better envelope processing, better FM support, a more 
 But the new core isn't without its to-do list:
 - Fix low sound volume when changing music in Harley-Davidson & LA Riders (Maybe the MVOL code from MAME will fix this?)
 - Prevent music in Fighting Vipers 2 Bahn's stage from hanging with MAME's SCSP DSP core.
-- Figure out why Sega Rally 2 navigator voice can cut off sometimes (Legacy DSP)
+- Figure out why Sega Rally 2 navigator voice can cut off sometimes (DSB routing)
 
 Since I (Paul) started this code overhaul in November 2019, I have also removed some obsolete features like the REVERB software effect.
 It doesn't sound good at all.
@@ -74,11 +74,12 @@ Anyways credit to R. Belmont and ElSemi for the code, and for being awesome emul
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <iomanip>
+#include <sstream>
 
 
 static const Util::Config::Node *s_config = 0;
 static bool s_multiThreaded = false;
-bool legacySound; // For LegacySound (SCSP DSP) config option.
 
 #define USEDSP
 //#define RB_VOLUME
@@ -400,6 +401,54 @@ void CheckPendingIRQ()
 	Int68kCB(irqLevel);
 }
 
+void SCSP_RefreshIRQ(void)
+{
+	if (Int68kCB == nullptr)
+		return;
+
+	// Both SCSPs can raise the shared 68K IRQ. Check each restored pending/enable pair and
+	// drive the line with the highest level; do not clear any pending bit here, the 68K
+	// acknowledge path owns that.
+	unsigned int irqLevel = 0;
+	for (int i = 0; i < 2; ++i)
+	{
+		const unsigned short pend = SCSPs[i].data[0x20 / 2] & 0xfff;
+		const unsigned short en = SCSPs[i].data[0x1e / 2] & 0xfff;
+
+		if ((pend & en & 0x40) && IrqTimA > irqLevel)
+			irqLevel = IrqTimA;
+		if ((pend & en & 0x180) && IrqTimBC > irqLevel)
+			irqLevel = IrqTimBC;
+		if ((pend & en & 0x8) && IrqMidi > irqLevel)
+			irqLevel = IrqMidi;
+	}
+
+	Int68kCB((int)irqLevel);
+}
+
+std::string SCSP_DebugState(void)
+{
+	std::ostringstream s;
+	for (int i = 0; i < 2; ++i)
+	{
+		int active = 0;
+		for (int j = 0; j < 32; ++j)
+		{
+			if (SCSPs[i].Slots[j].active)
+				++active;
+		}
+
+		s << " scsp" << i
+			<< " pend=" << std::hex << (SCSPs[i].data[0x20 / 2] & 0xfff)
+			<< " en=" << (SCSPs[i].data[0x1e / 2] & 0xfff)
+			<< " slots=" << std::dec << active
+			<< " midiIn=" << (unsigned)MidiInFill
+			<< " midiW=" << (unsigned)MidiW
+			<< " midiR=" << (unsigned)MidiR;
+	}
+	return s.str();
+}
+
 //void ResetInterrupts() // Can't get this to work correctly in Supermodel.
 //{
 //	unsigned int reset = SCSP->data[0x22 / 2];
@@ -594,7 +643,6 @@ Result SCSP_Init(const Util::Config::Node &config, int n)
 {
 	s_config = &config;
 	s_multiThreaded = config["MultiThreaded"].ValueAs<bool>();
-	legacySound = config["LegacySoundDSP"].ValueAs<bool>();
 
 	if(n==2)
 	{
@@ -1023,38 +1071,24 @@ void SCSP_w8(unsigned int addr,unsigned char val)
 		SCSP->RINGBUF[(addr-0x600)/2]=val;
 	else
 	{
-		if (legacySound == true) {
 #ifdef USEDSP
-			//DSP
-			if (addr < 0x780)	//COEF
-				((unsigned char *)SCSP->DSP.COEF)[(addr - 0x700) ^ 1] = val;
-			else if (addr < 0x7C0)
-				((unsigned char *)SCSP->DSP.MADRS)[(addr - 0x780) ^ 1] = val;
-			else if (addr >= 0x800 && addr < 0xC00)
-				((unsigned char *)SCSP->DSP.MPRO)[(addr - 0x800) ^ 1] = val;
-			if (addr == 0xBF0)
-			{
-				SCSPDSP_Start(&SCSP->DSP);
-			}
-#endif
+		// DSP RAM. 0x7C0-0x7FF is the reserved hole between MADRS and MPRO: it is not
+		// DSP memory and must not be mirrored into MADRS. Fighting Vipers 2 uploads a
+		// whole DSP image and fills the hole with zero; mirroring that into MADRS used
+		// to clear the offset table written moments earlier at 0x780-0x7BF, turning
+		// every sample read into an address of 0 and producing the self-oscillating
+		// loop described in devdocs/DSP.md. Writes there are discarded, as on hardware.
+		if (addr < 0x780)	//COEF
+			((unsigned char *)SCSP->DSP.COEF)[(addr - 0x700) ^ 1] = val;
+		else if (addr < 0x7C0)
+			((unsigned char *)SCSP->DSP.MADRS)[(addr - 0x780) ^ 1] = val;
+		else if (addr >= 0x800 && addr < 0xC00)
+			((unsigned char *)SCSP->DSP.MPRO)[(addr - 0x800) ^ 1] = val;
+		if (addr == 0xBF0)
+		{
+			SCSPDSP_Start(&SCSP->DSP);
 		}
-		else {
-#ifdef USEDSP
-			//DSP
-			if (addr < 0x780)	//COEF
-				((unsigned char *)SCSP->DSP.COEF)[(addr - 0x700) ^ 1] = val;
-			else if (addr < 0x7C0)
-				((unsigned char *)SCSP->DSP.MADRS)[(addr - 0x780) ^ 1] = val;
-			else if (addr < 0x800)
-				((unsigned char *)SCSP->DSP.MADRS)[(addr - 0x7c0) ^ 1] = val;
-			else if (addr < 0xC00)
-				((unsigned char *)SCSP->DSP.MPRO)[(addr - 0x800) ^ 1] = val;
-			if (addr == 0xBF0)
-			{
-				SCSPDSP_Start(&SCSP->DSP);
-			}
 #endif
-		}
 	}
 }
 
@@ -1084,36 +1118,23 @@ void SCSP_w16(unsigned int addr,unsigned short val)
 		SCSP->RINGBUF[(addr - 0x600) / 2] = val;
 	else
 	{
-		if (legacySound == true) {
 #ifdef USEDSP
-			// ElSemi's legacy DSP. For now we will need this for Fighting Vipers 2.
-			if (addr < 0x780)	//COEF
-				*(unsigned short *) &(SCSP->DSP.COEF[(addr - 0x700) / 2]) = val;
-			else if (addr < 0x800)
-				*(unsigned short *) &(SCSP->DSP.MADRS[(addr - 0x780) / 2]) = val;
-			else if (addr < 0xC00)
-				*(unsigned short *) &(SCSP->DSP.MPRO[(addr - 0x800) / 2]) = val;
-			if (addr == 0xBF0)
-				SCSPDSP_Start(&SCSP->DSP);
-#endif
+		// See SCSP_w8(): 0x7C0-0x7FF is reserved, not a second MADRS window.
+		if (addr < 0x780)  //COEF
+			*((UINT16 *)(SCSP->DSP.COEF + (addr - 0x700) / 2)) = val;
+		else if (addr < 0x7c0)
+			*((UINT16 *)(SCSP->DSP.MADRS + (addr - 0x780) / 2)) = val;
+		else if (addr < 0x800)
+		{
+			// Reserved hole: discard.
 		}
-		else {
-#ifdef USEDSP
-			// MAME DSP
-			if (addr < 0x780)  //COEF
-				*((UINT16 *)(SCSP->DSP.COEF + (addr - 0x700) / 2)) = val;
-			else if (addr < 0x7c0)
-				*((UINT16 *)(SCSP->DSP.MADRS + (addr - 0x780) / 2)) = val;
-			else if (addr < 0x800) // MADRS is mirrored twice
-				*((UINT16 *)(SCSP->DSP.MADRS + (addr - 0x7c0) / 2)) = val;
-			else if (addr < 0xC00)
-			{
-				*((UINT16 *)(SCSP->DSP.MPRO + (addr - 0x800) / 2)) = val;
-			}
-			if (addr == 0xBF0)
-				SCSPDSP_Start(&SCSP->DSP);
-#endif
+		else if (addr < 0xC00)
+		{
+			*((UINT16 *)(SCSP->DSP.MPRO + (addr - 0x800) / 2)) = val;
 		}
+		if (addr == 0xBF0)
+			SCSPDSP_Start(&SCSP->DSP);
+#endif
 	}
 }
 
@@ -1149,23 +1170,26 @@ void SCSP_w32(unsigned int addr,unsigned int val)
 		rotl(val, 16);
 			if(addr<0x780)	//COEF
 			{
-				SCSP->DSP.COEF[(addr-0x700)/2]     = (INT16)(val & 0xFFFF);
-				SCSP->DSP.COEF[(addr-0x700)/2 + 1] = (INT16)(val >> 16);
+				SCSP->DSP.COEF[(addr-0x700)/2] = (INT16)(val & 0xFFFF);
+				if (addr + 2 < 0x780)
+					SCSP->DSP.COEF[(addr-0x700)/2 + 1] = (INT16)(val >> 16);
 			}
 			else if (addr < 0x7c0)
 			{
-				SCSP->DSP.MADRS[(addr-0x780)/2]     = (UINT16)(val & 0xFFFF);
-				SCSP->DSP.MADRS[(addr-0x780)/2 + 1] = (UINT16)(val >> 16);
+				SCSP->DSP.MADRS[(addr-0x780)/2] = (UINT16)(val & 0xFFFF);
+				if (addr + 2 < 0x7c0)
+					SCSP->DSP.MADRS[(addr-0x780)/2 + 1] = (UINT16)(val >> 16);
 			}
-			else if (addr < 0x800) // MADRS is mirrored twice
+			else if (addr < 0x800)
 			{
-				SCSP->DSP.MADRS[(addr-0x7c0)/2]     = (UINT16)(val & 0xFFFF);
-				SCSP->DSP.MADRS[(addr-0x7c0)/2 + 1] = (UINT16)(val >> 16);
+				// Reserved hole: discard. Falling through to the MPRO branch would compute
+				// (addr - 0x800) / 2 unsigned, i.e. a ~4 GB offset. See SCSP_w8().
 			}
 			else if(addr<0xC00)
 			{
-				SCSP->DSP.MPRO[(addr-0x800)/2]     = (UINT16)(val & 0xFFFF);
-				SCSP->DSP.MPRO[(addr-0x800)/2 + 1] = (UINT16)(val >> 16);
+				SCSP->DSP.MPRO[(addr-0x800)/2] = (UINT16)(val & 0xFFFF);
+				if (addr + 2 < 0xC00)
+					SCSP->DSP.MPRO[(addr-0x800)/2 + 1] = (UINT16)(val >> 16);
 			}
 			if(addr==0xBF0)
 				SCSPDSP_Start(&SCSP->DSP);
@@ -1230,7 +1254,7 @@ unsigned short SCSP_r16(unsigned int addr)
 		else if (addr < 0x7c0)
 			v = *((UINT16 *)(SCSP->DSP.MADRS + (addr - 0x780) / 2));
 		else if (addr < 0x800)
-			v = *((UINT16 *)(SCSP->DSP.MADRS + (addr - 0x7c0) / 2));
+			v = 0;	// reserved hole, mirroring the write path (see SCSP_w8/SCSP_w16)
 		else if (addr < 0xC00)
 			v = *((UINT16 *)(SCSP->DSP.MPRO + (addr - 0x800) / 2));
 		else if (addr < 0xE00)
@@ -1614,41 +1638,22 @@ void SCSP_DoMasterSamples(int nsamples)
 		for (INT32 i = 0; i < 16; ++i)
 		{
 			_SLOT *slot = SCSPs[0].Slots + i;
-			if (legacySound == true) {
-				if (EFSDL(slot))
-				{
-					// For legacy option, 14 is the most reasonable value I can set at the moment for the EFSDL slot. - Paul
-					UINT16 Enc = ((EFPAN(slot)) << 0x8) | ((EFSDL(slot)) << 0xe);
-					smpfl += (int)(masterBalance*(float)(((SCSPs[0].DSP.EFREG[i] * LPANTABLE[Enc]) >> SHIFT)));
-					smpfr += (int)(masterBalance*(float)(((SCSPs[0].DSP.EFREG[i] * RPANTABLE[Enc]) >> SHIFT)));
-				}
-				if (HasSlaveSCSP)
-				{
-					_SLOT *slot1 = SCSPs[1].Slots + i;
-					if (EFSDL(slot1))
-					{
-						UINT16 Enc = ((EFPAN(slot1)) << 0x8) | ((EFSDL(slot1)) << 0xe);
-						smprl += (int)(slaveBalance*(float)(((SCSPs[1].DSP.EFREG[i] * LPANTABLE[Enc]) >> SHIFT)));
-						smprr += (int)(slaveBalance*(float)(((SCSPs[1].DSP.EFREG[i] * RPANTABLE[Enc]) >> SHIFT)));
-					}
-				}
+			if (EFSDL(slot))
+			{
+				// EFSDL is a 3-bit field sitting in bits 13..15 of the level index, which is how
+				// LPANTABLE/RPANTABLE are built (see SCSP_Init).
+				UINT16 Enc = ((EFPAN(slot)) << 0x8) | ((EFSDL(slot)) << 0xd);
+				smpfl += (int)(masterBalance*(float)(((SCSPs[0].DSP.EFREG[i] * LPANTABLE[Enc]) >> SHIFT)));
+				smpfr += (int)(masterBalance*(float)(((SCSPs[0].DSP.EFREG[i] * RPANTABLE[Enc]) >> SHIFT)));
 			}
-			else {
-				if (EFSDL(slot))
+			if (HasSlaveSCSP)
+			{
+				_SLOT *slot1 = SCSPs[1].Slots + i;
+				if (EFSDL(slot1))
 				{
-					UINT16 Enc = ((EFPAN(slot)) << 0x8) | ((EFSDL(slot)) << 0xd);
-					smpfl += (int)(masterBalance*(float)(((SCSPs[0].DSP.EFREG[i] * LPANTABLE[Enc]) >> SHIFT)));
-					smpfr += (int)(masterBalance*(float)(((SCSPs[0].DSP.EFREG[i] * RPANTABLE[Enc]) >> SHIFT)));
-				}
-				if (HasSlaveSCSP)
-				{
-					_SLOT *slot1 = SCSPs[1].Slots + i;
-					if (EFSDL(slot1))
-					{
-						UINT16 Enc = ((EFPAN(slot1)) << 0x8) | ((EFSDL(slot1)) << 0xd);
-						smprl += (int)(slaveBalance*(float)(((SCSPs[1].DSP.EFREG[i] * LPANTABLE[Enc]) >> SHIFT)));
-						smprr += (int)(slaveBalance*(float)(((SCSPs[1].DSP.EFREG[i] * RPANTABLE[Enc]) >> SHIFT)));
-					}
+					UINT16 Enc = ((EFPAN(slot1)) << 0x8) | ((EFSDL(slot1)) << 0xd);
+					smprl += (int)(slaveBalance*(float)(((SCSPs[1].DSP.EFREG[i] * LPANTABLE[Enc]) >> SHIFT)));
+					smprr += (int)(slaveBalance*(float)(((SCSPs[1].DSP.EFREG[i] * RPANTABLE[Enc]) >> SHIFT)));
 				}
 			}
 		}

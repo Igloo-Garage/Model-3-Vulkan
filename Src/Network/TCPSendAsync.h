@@ -30,7 +30,6 @@
 #include <atomic>
 #include <memory>
 #include <thread>
-#include "SDLIncludes.h"
 
 class TCPSendAsync
 {
@@ -47,7 +46,7 @@ private:
 
 	std::string				m_ip;
 	int						m_port;
-	TCPsocket				m_socket;		// sdl socket
+	void*					m_socket;
 	std::atomic<bool>		m_hasData;
 	std::condition_variable m_cv;
 	std::vector<char>		m_buffer;

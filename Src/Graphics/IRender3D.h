@@ -13,6 +13,41 @@ class IRender3D
 {
 public:
   virtual void RenderFrame(void) = 0;
+
+  /*
+   * PrepareFrame(void):
+   *
+   * Builds the renderer's CPU-side view of the simulation state for the frame
+   * about to be presented: scene traversal, draw list, material table and the
+   * previous/current motion pair. Called once per emulated frame, before the
+   * swapchain image is acquired, and performs no GPU work.
+   *
+   * Renderers that rebuild inside RenderFrame() can leave this empty.
+   */
+  virtual void PrepareFrame(void) {}
+
+  /*
+   * Discards the previous/current motion pair. Called when the emulation state
+   * is reset or loaded: interpolating across a state discontinuity would show a
+   * camera flying between two unrelated scenes.
+   */
+  virtual void ResetInterpolation() {}
+
+  /*
+   * RenderFrame(alpha, newSimulation):
+   *
+   * Presents one frame. alpha selects between the previous and current
+   * simulation state; newSimulation says PrepareFrame() has new state to upload.
+   * When newSimulation is false the renderer must replay its existing geometry,
+   * textures and materials and only update the per-instance matrices.
+   */
+  virtual void RenderFrame(double alpha, bool newSimulation)
+  {
+    (void)alpha;
+    (void)newSimulation;
+    RenderFrame();
+  }
+
   virtual void BeginFrame(void) = 0;
   virtual void EndFrame(void) = 0;
   virtual void UploadTextures(unsigned level, unsigned x, unsigned y, unsigned width, unsigned height) = 0;

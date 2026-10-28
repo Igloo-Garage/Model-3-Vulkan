@@ -21,6 +21,7 @@
 
 #include "FileSystemPath.h"
 #include "Util/Format.h"
+#include <filesystem>
 #include <string>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -64,6 +65,9 @@ namespace FileSystemPath
         case Config:
             strPathType = "Config";
             break;
+        case Cache:
+            strPathType = "Cache";
+            break;
         case Log:
             strPathType = "Log";
             break;
@@ -72,6 +76,9 @@ namespace FileSystemPath
             break;
         case Saves:
             strPathType = "Saves";
+            break;
+        case SavesLegacy:
+            strPathType = "Saves_Legacy";
             break;
         case Screenshots:
             strPathType = "Screenshots";
@@ -165,13 +172,42 @@ namespace FileSystemPath
 
     std::string GetBasePath()
     {
+#if defined(__linux__)
+        // /proc/self/exe is the one reliable way to find the installation folder on Linux. The
+        // settings themselves still live under XDG (~/.config/supermodel); this is only used for
+        // files that are meant to sit beside the executable, such as a portable roms/ folder and
+        // the optional Model3VulkanHostCore library.
+        static const std::string base = []() -> std::string
+        {
+            std::error_code error;
+            const std::filesystem::path executable =
+                std::filesystem::read_symlink("/proc/self/exe", error);
+            if (error || executable.empty())
+                return "";
+
+            const std::filesystem::path directory = executable.parent_path();
+            if (directory.empty())
+                return "";
+
+            return directory.string() + "/";
+        }();
+        return base;
+#else
+        // Other Unix systems have no portable equivalent that is worth guessing at; keep the
+        // historical working-directory behaviour there.
         return "";
+#endif
     }
 
-    // Kept for the Unix build's historical behaviour. The macOS implementation returns the ROMs
-    // folder next to the executable instead; this platform has no single installation directory.
+    // The portable layout: an empty "roms" folder next to the executable is created on first run,
+    // and the settings window scans it before falling back to anything else. The value is stored
+    // relative so the whole folder can be moved without breaking the setting.
     std::string GetDefaultRomPath()
     {
-        return "C:/Downloads";
+        const std::string base = GetBasePath();
+        if (!base.empty())
+            (void)mkdir((base + "roms/").c_str(), 0775);
+
+        return "roms/";
     }
 }

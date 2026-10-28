@@ -34,6 +34,7 @@
 #include "Inputs/InputSystem.h"
 
 #include <SDL.h>
+#include "OSD/Platform/Platform.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define DIRECTINPUT_VERSION 0x0800
@@ -128,7 +129,7 @@ private:
 
 	bool m_initializedCOM;
 	bool m_activated;
-	SDL_Window *m_window = nullptr;
+	OSD::Platform::Window *m_window = nullptr;
 	
 	// Function pointers for RawInput API
 	GetRawInputDeviceListPtr m_getRIDevListPtr;
@@ -238,7 +239,7 @@ public:
 	 * to the same shared axis and so cannot be distinguished when pressed together.
 	 * If enableFFeedback is true then force feedback is enabled (for those joysticks which are force feedback capable).
 	 */
-	CDirectInputSystem(const Util::Config::Node &config, SDL_Window *window, bool useRawInput, bool useXInput);
+	CDirectInputSystem(const Util::Config::Node &config, OSD::Platform::Window *window, bool useRawInput, bool useXInput);
 
 	~CDirectInputSystem();
 

@@ -213,11 +213,18 @@
  */
 
 #include "Model3.h"
+#include "Model3Timing.h"
+
+#if !defined(SUPERMODEL_PURE_VULKAN)
+#include "Graphics/SuperAA.h"
+#endif
 
 #include <new>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iomanip>
+#include <sstream>
 #include "Supermodel.h"
 #include "DriveBoard/BillBoard.h"
 #include "DriveBoard/JoystickBoard.h"
@@ -1027,7 +1034,6 @@ UINT8 CModel3::Read8(UINT32 addr)
         if (addr > 0xc00101ff)
         {
           printf("R8 ATTENTION OUT OF RANGE\n");
-          SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Out of Range", NULL);
         }
         return (UINT8)NetBoard->ReadIORegister((addr & 0x1FF) / 2);
 
@@ -1037,7 +1043,6 @@ UINT8 CModel3::Read8(UINT32 addr)
 
       default:
         printf("R8 ATTENTION OUT OF RANGE\n");
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Out of Range", NULL);
         break;
       }
     }
@@ -1161,7 +1166,6 @@ UINT16 CModel3::Read16(UINT32 addr)
   // Unknown
   default:
     printf("CMODEL3 : unknown R16 : %x (%x)\n", addr, addr >> 24);
-    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "CMODEL3 : Unknown R16", NULL);
     break;
   }
 
@@ -1875,6 +1879,9 @@ void CModel3::SaveState(CBlockFile *SaveState)
   DriveBoard->SaveState(SaveState);
   m_cryptoDevice.SaveState(SaveState);
   m_jtag.SaveState(SaveState);
+
+  if (std::getenv("SM3D_LOAD_DEBUG") != nullptr)
+    InfoLog("%s", DebugSnapshot("save").c_str());
 }
 
 void CModel3::LoadState(CBlockFile *SaveState)
@@ -1905,15 +1912,95 @@ void CModel3::LoadState(CBlockFile *SaveState)
   // All devices...
   GPU.LoadState(SaveState);
   TileGen.LoadState(SaveState);
+  // The renderer's previous/current snapshot pair describes the state that was
+  // just discarded. Force a rebuild and invalidate interpolation.
+  m_sceneDirty = true;
+  m_simInFlight = false;
+  /*
+   * A load can arrive while a frame is in flight (F7 in the middle of a step).
+   * PauseThreads() has already waited for the workers to stop, but their completion
+   * flags still say "done". Leaving them set makes the next EndSimulationFrame()
+   * skip the wait for the newly posted frame, so SyncGPUs() can copy culling RAM
+   * while the PPC thread is still writing it. The loaded state discards that frame,
+   * so its completion flags have to be cleared with it.
+   */
+  ppcBrdThreadDone = false;
+  sndBrdThreadDone = false;
+  drvBrdThreadDone = false;
+  GPU.ResetInterpolation();
   EEPROM.LoadState(SaveState);
   SCSI.LoadState(SaveState);
   PCIBridge.LoadState(SaveState);
   IRQ.LoadState(SaveState);
   ppc_load_state(SaveState);
+  //
+  // The CPU's interrupt input is a line that is only re-evaluated when an interrupt is asserted or
+  // acknowledged, so neither block carries it. Without this, a state saved with an interrupt still
+  // pending loads with the controller reporting it and the CPU never seeing it - the game then spins
+  // in a wait loop that only that interrupt's handler could break. Seen in Scud Race: a save taken on
+  // the course-start transition restored with IRQ bit 0 pending and the PowerPC polling a byte at
+  // 0x00100037 forever.
+  IRQ.RefreshInterruptLine();
   SoundBoard.LoadState(SaveState);
   DriveBoard->LoadState(SaveState);
   m_cryptoDevice.LoadState(SaveState);
   m_jtag.LoadState(SaveState);
+
+  if (std::getenv("SM3D_LOAD_DEBUG") != nullptr)
+    InfoLog("%s", DebugSnapshot("after-load").c_str());
+}
+
+/*
+ * Read-only diagnostic for SM3D_LOAD_DEBUG.
+ *
+ * The first line after a load is the interesting one: it shows whether the SCRIPTS engine was left
+ * halted and what the network board's handshake state and shared buffers contain at that instant.
+ * The SDL front end also polls this once a second from a watchdog thread, so a hang shows the PPC
+ * PC/LR repeating while the emulated frame never completes.
+ *
+ * This must not modify any state, must not be called on a hot path unless SM3D_LOAD_DEBUG is set,
+ * and must never be part of a save-state image.
+ */
+static uint32_t LoadDebugChecksum(const UINT8 *data, size_t size)
+{
+  uint32_t hash = 2166136261u;
+  for (size_t i = 0; i < size; ++i)
+  {
+    hash ^= data[i];
+    hash *= 16777619u;
+  }
+  return hash;
+}
+
+std::string CModel3::DebugSnapshot(const char *tag)
+{
+  std::ostringstream s;
+  s << "LoadDebug " << (tag != nullptr ? tag : "?")
+    << " game=" << m_game.name
+    << " simInFlight=" << (m_simInFlight ? 1 : 0)
+    << " mt=" << (m_multiThreaded ? 1 : 0)
+    << " gpuMt=" << (m_gpuMultiThreaded ? 1 : 0)
+    << " syncSnd=" << (syncSndBrdThread ? 1 : 0)
+    << " pause=" << (pauseThreads ? 1 : 0)
+    << " stop=" << (stopThreads ? 1 : 0)
+    << " ppcDone=" << (ppcBrdThreadDone ? 1 : 0)
+    << " sndDone=" << (sndBrdThreadDone ? 1 : 0)
+    << " sndRunning=" << (sndBrdThreadRunning ? 1 : 0)
+    << " drvDone=" << (drvBrdThreadDone ? 1 : 0)
+    << " pc=" << std::hex << std::setw(8) << std::setfill('0') << ppc_get_pc()
+    << " lr=" << std::setw(8) << ppc_get_lr()
+    << " irqEn=" << std::setw(2) << (unsigned)IRQ.ReadIRQEnable()
+    << " irqState=" << std::setw(2) << (unsigned)IRQ.ReadIRQState()
+    << std::dec;
+  if (NetBoard != nullptr)
+    s << " " << NetBoard->DebugState();
+  s << " " << SCSI.DebugState();
+  s << " " << SoundBoard.DebugState();
+  if (netRAM != nullptr)
+    s << " netRAM=" << std::hex << LoadDebugChecksum(netRAM, 0x10000) << std::dec;
+  if (netBuffer != nullptr)
+    s << " netBuf=" << std::hex << LoadDebugChecksum(netBuffer, 0x20000) << std::dec;
+  return s.str();
 }
 
 void CModel3::SaveNVRAM(CBlockFile *NVRAM)
@@ -1948,6 +2035,123 @@ void CModel3::ClearNVRAM(void)
 
 void CModel3::RunFrame(void)
 {
+  RunFrameInternal(true);
+}
+
+void CModel3::RunSimulationFrame(void)
+{
+  BeginSimulationFrame();
+  EndSimulationFrame();
+}
+
+void CModel3::BeginSimulationFrame(void)
+{
+  if (m_simInFlight)
+    return;
+
+  m_simStartTicks = CThread::GetTicks();
+
+  if (!m_multiThreaded)
+  {
+    // Nothing to overlap. Run the whole frame here; End is a no-op.
+    RunMainBoardFrame();
+    SyncGPUs();
+    RunSoundBoardFrame();
+    if (DriveBoard->IsAttached())
+      RunDriveBoardFrame();
+    if (NetBoard->IsRunning())
+      RunNetBoardFrame();
+
+    timings.frameTicks = CThread::GetTicks() - m_simStartTicks;
+    timings.frameId++;
+    m_sceneDirty = true;
+    return;
+  }
+
+  if (!StartThreads())
+  {
+    // StartThreads() already switched to single-threaded mode.
+    BeginSimulationFrame();
+    return;
+  }
+
+  if ((m_gpuMultiThreaded       && !ppcBrdThreadSync->Post()) ||
+      (syncSndBrdThread         && !sndBrdThreadSync->Post()) ||
+      (DriveBoard->IsAttached()  && !drvBrdThreadSync->Post()))
+    goto ThreadError;
+
+  // Without a PPC thread the main board runs here, before returning. The sound
+  // and drive boards may still be running on their own threads; End waits for
+  // them. This is still a split: the renderer presents the previous snapshot
+  // while those finish.
+  if (!m_gpuMultiThreaded)
+  {
+    RunMainBoardFrame();
+    SyncGPUs();
+  }
+
+  m_simInFlight = true;
+  return;
+
+ThreadError:
+  ErrorLog("Threading error in CModel3::BeginSimulationFrame: %s\nSwitching back to single-threaded mode.\n", CThread::GetLastError());
+  m_multiThreaded = false;
+  m_simInFlight = false;
+  BeginSimulationFrame();
+}
+
+void CModel3::EndSimulationFrame(void)
+{
+  if (!m_simInFlight)
+    return;
+
+  if (!m_multiThreaded)
+  {
+    m_simInFlight = false;
+    return;
+  }
+
+  if (!notifyLock->Lock())
+    goto ThreadError;
+
+  while ((m_gpuMultiThreaded      && !ppcBrdThreadDone) ||
+         (syncSndBrdThread        && !sndBrdThreadDone) ||
+         (DriveBoard->IsAttached() && !drvBrdThreadDone))
+  {
+    if (!notifySync->Wait(notifyLock))
+      goto ThreadError;
+  }
+  ppcBrdThreadDone = false;
+  sndBrdThreadDone = false;
+  drvBrdThreadDone = false;
+
+  if (!notifyLock->Unlock())
+    goto ThreadError;
+
+  if (m_gpuMultiThreaded)
+    SyncGPUs();
+
+  if (NetBoard->IsRunning() && m_config["SimulateNet"].ValueAs<bool>())
+    RunNetBoardFrame();
+
+  m_simInFlight = false;
+  // Publish the new read-only snapshots to the renderer. The flag survives a
+  // present that the window could not service, so the scene is built on the
+  // next present rather than lost.
+  m_sceneDirty = true;
+
+  timings.frameTicks = CThread::GetTicks() - m_simStartTicks;
+  timings.frameId++;
+  return;
+
+ThreadError:
+  ErrorLog("Threading error in CModel3::EndSimulationFrame: %s\nSwitching back to single-threaded mode.\n", CThread::GetLastError());
+  m_multiThreaded = false;
+  m_simInFlight = false;
+}
+
+void CModel3::RunFrameInternal(bool render)
+{
   UINT32 start = CThread::GetTicks();
 
   // See if currently running multi-threaded
@@ -1970,8 +2174,12 @@ void CModel3::RunFrame(void)
       SyncGPUs();
     }
 
-    // Render frame
-    RenderFrame();
+    // The combined path renders while the main-board thread is still working,
+    // exactly as it always did. The split path waits for the frame first, so the
+    // scene it presents is the one this step produced rather than the previous
+    // one; the high-refresh loop then interpolates that pair.
+    if (render)
+      RenderFrame();
 
     // Enter notify wait critical section
     if (!notifyLock->Lock())
@@ -2005,7 +2213,8 @@ void CModel3::RunFrame(void)
     // If not multi-threaded, then just process and render a single frame for PPC main board, sound board and drive board in turn in this thread
     RunMainBoardFrame();
     SyncGPUs();
-    RenderFrame();
+    if (render)
+      RenderFrame();
     RunSoundBoardFrame();
     if (DriveBoard->IsAttached())
       RunDriveBoardFrame();
@@ -2059,7 +2268,7 @@ void CModel3::RunMainBoardFrame(void)
    * 424 lines total: 384 display and 40 blanking/vsync.
 	 */ 
 	unsigned ppcCycles		= GetCPUClockFrequencyInHz(m_game, m_config);
-	unsigned frameCycles	= (unsigned)((float)ppcCycles / 57.524160f);
+	unsigned frameCycles	= (unsigned)((float)ppcCycles / (float)kModel3RefreshHz);
 	unsigned lineCycles     = frameCycles / 424;
     unsigned vBlankCycles   = lineCycles * 40;
 
@@ -2161,27 +2370,69 @@ void CModel3::SyncGPUs(void)
 
 void CModel3::RenderFrame(void)
 {
+  RenderFrame(1.0, true);
+}
+
+void CModel3::RenderFrame(double alpha, bool newSimulation)
+{
   UINT32 start = CThread::GetTicks();
+
+  // Remember the request even if the window cannot service it. BeginFrameVideo
+  // fails while minimised and during a swapchain rebuild, and the scene must
+  // still be built on the next present that succeeds.
+  //
+  // A snapshot that was prepared at the simulation boundary must not be built a
+  // second time here: the second traversal would swap the just-built scene into
+  // the "previous" slot, so every instance would compare against itself and
+  // interpolation would silently degrade to static frames. newSimulation only
+  // has to force a build when nobody has prepared one yet - which is the case on
+  // the combined RunFrame() path.
+  if (newSimulation && !m_scenePrepared)
+    m_sceneDirty = true;
 
   // Call OSD video callbacks
   if (BeginFrameVideo() && gpusReady)
   {
+    // Usually already done at the simulation boundary (see PrepareSceneSnapshot),
+    // which is where the Culling RAM is guaranteed to be the completed frame.
+    // Doing it here too covers the combined path and a failed present.
+    PrepareSceneSnapshot();
+    const bool rebuild = m_scenePrepared;
+
     // Render frame
     TileGen.BeginFrame();
     GPU.BeginFrame();
-    TileGen.PreRenderFrame();
+    if (rebuild)
+    {
+      TileGen.PreRenderFrame();    // 2D layers, once per emulated frame
+    }
     TileGen.RenderFrameBottom();
-    GPU.RenderFrame();
+    GPU.RenderFrame(alpha, rebuild);
     TileGen.RenderFrameTop();
     GPU.EndFrame();
     TileGen.EndFrame();
+#if !defined(SUPERMODEL_PURE_VULKAN)
     if (m_superAA)
       m_superAA->Draw();
+#endif
+
+    m_sceneDirty = false;
+    m_scenePrepared = false;
   }
 
   EndFrameVideo();
 
   timings.renderTicks = CThread::GetTicks() - start;
+}
+
+void CModel3::PrepareSceneSnapshot(void)
+{
+  if (!m_sceneDirty || !gpusReady)
+    return;
+
+  GPU.PrepareFrame();
+  m_sceneDirty = false;
+  m_scenePrepared = true;
 }
 
 bool CModel3::RunSoundBoardFrame(void)
@@ -2815,6 +3066,11 @@ void CModel3::Reset(void)
   // MIDI
   midiCtrlPort = 0;
 
+  // The renderer's snapshot pair no longer describes anything in this state.
+  m_sceneDirty = true;
+  m_simInFlight = false;
+  GPU.ResetInterpolation();
+
   // Reset all devices
   ppc_reset();
   IRQ.Reset();
@@ -3261,6 +3517,10 @@ CModel3::CModel3(Util::Config::Node &config)
 
   securityPtr = 0;
 
+  m_sceneDirty = true;
+  m_simInFlight = false;
+  m_simStartTicks = 0;
+
   startedThreads = false;
   pauseThreads = false;
   stopThreads = false;
@@ -3285,6 +3545,20 @@ CModel3::CModel3(Util::Config::Node &config)
   // AsyncSoundBoardThread = true selects the callback-driven mode. The wake-up race that previously
   // made it unreliable is fixed (see WakeSoundBoardThread).
   syncSndBrdThread = !m_config["AsyncSoundBoardThread"].ValueAsDefault<bool>(false);
+  /*
+   * The high-refresh path presents several times per emulated frame, so audio has
+   * to be generated by the fixed step rather than by the sound card's callback:
+   * an async board would free-run against the simulation clock, and the whole
+   * point of the fixed step is that SCSP/DSB advance exactly once per step.
+   * Original mode still presents one step at a time, so it keeps the async
+   * option for the window-drag case it was added for.
+   */
+  if (m_config["RefreshRateMode"].ValueAsDefault<int>(1) != 0)
+  {
+    if (!syncSndBrdThread)
+      InfoLog("Audio: async sound board disabled in high-refresh mode; SCSP/DSB run inside the fixed logic step.");
+    syncSndBrdThread = true;
+  }
   ppcBrdThreadSync = NULL;
   sndBrdThreadSync = NULL;
   drvBrdThreadSync = NULL;

@@ -30,7 +30,7 @@
 [CmdletBinding()]
 param(
     # Root to audit. The main tree and the upload copy are kept in step, so either can be checked.
-    [string] $Root = 'UploadToGithub_20261017',
+    [string] $Root = '202610_archived/UploadToGithub_20261017',
 
     # Compare against this upstream tree and only report files that differ. Set to '' to scan
     # every file the platform builds, which produces a lot of pre-existing noise.

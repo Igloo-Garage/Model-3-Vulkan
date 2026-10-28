@@ -22,7 +22,13 @@
 #ifndef _STATS_OSD_H_
 #define _STATS_OSD_H_
 
-struct SDL_Window;
+namespace OSD
+{
+	namespace Platform
+	{
+		struct Window;
+	}
+}
 
 namespace Util
 {
@@ -60,8 +66,10 @@ enum class StatsSyncMode
  *   renderer        the configuration - which backend is actually running
  *   sync / rate     the fullscreen mode, the emulator's pacing rate and the arcade's own
  *   panel           the display mode the window is on, from the desktop mode
- *   CPU             frequency and load, over the performance cores on a hybrid CPU
- *   GPU             frequency, load and video memory, from NVML when an NVIDIA driver is present
+ *   CPU             model, average and peak frequency, thread count and load, over the performance
+ *                   cores on a hybrid CPU
+ *   GPU             model, frequency, load and video memory: NVML where an NVIDIA driver is present,
+ *                   otherwise the load alone from the Windows "GPU Engine" counters
  *   memory          this process's working set
  *   FPS              measured from the emulator's own frame loop, not from the display
  *   1% low          the 99th percentile frame time over the last few seconds, inverted
@@ -72,10 +80,16 @@ enum class StatsSyncMode
  * describes a machine nobody owns: too many threads, a clock the slow cores drag down, and a load
  * diluted by cores the emulator never runs on.
  *
- * The GPU figures are the only ones that can be absent, because they need a vendor API: NVML ships
- * with the NVIDIA driver and there is no equivalent for every other vendor. When it is missing those
- * lines are left out rather than shown as zero, which would read as "the GPU is idle" instead of
- * "this build cannot see it".
+ * The GPU figures need a vendor API: NVML ships with the NVIDIA driver. Where it is missing, the
+ * Windows GPU Engine counters still provide the load - the one figure that says whether the GPU is
+ * the limit - but not the clock or the video memory, and Windows offers no vendor-neutral source for
+ * either. Whatever cannot be read is left out rather than shown as zero, which would read as "the GPU
+ * is idle" instead of "this build cannot see it".
+ *
+ * Both frequency figures are printed for the CPU because they answer different questions: the average
+ * describes the package, and the peak describes the core the emulation thread is actually on. On a
+ * 15 W laptop the two differ by a factor of two, and showing only the average invites the conclusion
+ * that the CPU refuses to boost when it is in fact boosting on the one core that matters.
  *
  * The labels are deliberately English and untranslated. CPU, GPU, VRAM, FPS and 1% low are the terms
  * these figures are looked up by, and they are the same words in every language the settings window
@@ -93,7 +107,7 @@ enum class StatsSyncMode
  * Set once when a game session starts. Only the refresh rate line needs it - everything else is either
  * a process statistic or a driver query - but the display mode cannot be read without a window to ask.
  */
-void StatsOsdSetWindow(SDL_Window* window);
+void StatsOsdSetWindow(OSD::Platform::Window* window);
 
 /*
  * Which renderer this session actually got.
@@ -111,6 +125,18 @@ enum class StatsRenderer
 };
 
 void StatsOsdSetRenderer(StatsRenderer renderer);
+
+/*
+ * The name of the graphics device, for the GPU line.
+ *
+ * Passed in because the renderer is the only part of the program that knows it: the Vulkan context
+ * has it from the physical-device properties. NVML supplies its own name when it is available, so
+ * this is what puts a name on the line on machines where only the Windows GPU Engine counters are
+ * readable - the ones where the GPU matters most and the readout used to be blank.
+ *
+ * Optional. An empty string leaves the line in its unnamed single-line form.
+ */
+void StatsOsdSetGpuName(const char* name);
 
 /*
  * Anti-aliasing, and which kind.
@@ -170,6 +196,53 @@ void StatsOsdSetRenderInfo(const StatsRenderInfo& info);
  * is a stale value after the setting is changed.
  */
 void StatsOsdSetTargetRate(float hz);
+
+/*
+ * Fixed-step pacing, for the Pace line.
+ *
+ * The emulator advances at 57.524 Hz regardless of what the display does; the
+ * pacer decides how many presents fall between two simulation steps and hands
+ * out the alpha weight that the renderer interpolates by. This line exists so
+ * that the difference between the two clocks is visible: logic near 57.52 and
+ * present near the panel rate mean the pipeline works; a present rate that has
+ * collapsed onto the logic rate means the display is the limit (vsync, or a
+ * compositor), and the ratio explains what is on screen.
+ *
+ * `cuts` is cumulative for the session, not per second: a camera cut is an
+ * event, and a counter that decays would read as "no cuts right now" even on a
+ * scene that cuts every few seconds.
+ */
+struct StatsPaceInfo
+{
+	double logicHz = 0.0;
+	double presentHz = 0.0;
+	double targetHz = 0.0;
+	double panelHz = 0.0;
+	double alpha = 1.0;
+	double ratio = 0.0;
+	unsigned cuts = 0;
+	bool interpolating = false;
+	bool valid = false;
+
+	/*
+	 * Phase-locked presentation (VRR 2x and up).
+	 *
+	 * phaseCount is 0 in the clock-driven modes, where alpha is measured and
+	 * moves continuously; a non-zero count means the presents per emulated frame
+	 * are fixed and alpha takes one of a few exact values. The readout has to say
+	 * which of the two it is looking at, because "alpha 0.50" means something
+	 * quite different in each: a locked value is the design, a measured one is a
+	 * snapshot of where the clock happened to be.
+	 */
+	const char* modeLabel = "";
+	bool phaseLocked = false;
+	int phaseIndex = 0;              // 0-based
+	int phaseCount = 0;
+	float phaseAlpha[8] = {};
+	double subFrameMs = 0.0;         // cost of a present that carries no simulation
+};
+
+void StatsOsdSetPaceInfo(const StatsPaceInfo& info);
 
 /*
  * Whether the readout would currently be showing a borderless judder warning.

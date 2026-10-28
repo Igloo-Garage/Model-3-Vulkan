@@ -1,383 +1,321 @@
-# Supermodel-VK
-
-**A Vulkan-focused fork of [Supermodel](https://github.com/trzy/Supermodel), the open-source Sega
-Model 3 arcade emulator.**
-
-## 🚧 Sega Model 3 Arcade Emulator ## released **v0.9.2**!  
-This update focuses heavily on refining the UI/launcher experience and introducing a seamless in-game overlay menu, alongside several long-awaited bug fixes.
-
-### 🎮 UI & Launcher Enhancements
-* **Integrated Box Art & Cover Display:** Game covers are finally here! The game list now displays box art, making title browsing much more visual and intuitive.
-* **Smoother Input Configuration:** Resolved the micro-stutter/lag that occurred whenever navigating to the controls page. Button mapping has also been moved forward for quicker, more ergonomic access.
-* **Streamlined UI Text:** Stripped away redundant and cluttered descriptions from the original interface for a cleaner, modern look.
-* **Custom Resolution Fix:** Fixed a bug where custom resolution settings failed to take effect.
-
 <div align="center">
-  <img src="./Assets/UI_v0.9.2_preview.webp" width="750" alt="UI and Launcher Preview">
-  <p><em>▲ New UI layout featuring integrated box art display</em></p>
+
+  <h1>Model 3-Vulkan</h1>
+
+  <p><strong>A modern, standalone Sega Model 3 arcade emulator powered by pure Vulkan 1.3 & SDL3.</strong></p>
+  <p><em>(Formerly Supermodel-VK, an independent evolution tracking upstream <a href="https://github.com/trzy/Supermodel">Supermodel</a>)</em></p>
+
+  <p>
+    <a href="https://github.com/Igloo-Garage/Model-3-Vulkan/releases">
+      <img src="https://img.shields.io/github/v/release/Igloo-Garage/Model-3-Vulkan?include_prereleases&style=flat-square" alt="Release">
+    </a>
+    <a href="Docs/LICENSE.txt">
+      <img src="https://img.shields.io/badge/License-GPLv3-blue.svg?style=flat-square" alt="License">
+    </a>
+    <a href="https://www.reddit.com/r/Model3Vulkan/">
+      <img src="https://img.shields.io/badge/Reddit-r%2FModel3Vulkan-orange.svg?style=flat-square" alt="Reddit">
+    </a>
+    <a href="https://ko-fi.com/igloogarage">
+      <img src="https://img.shields.io/badge/Support%20on-Ko--fi-F16061?style=flat-square&logo=ko-fi&logoColor=white" alt="Ko-fi">
+    </a>
+  </p>
+
 </div>
+---
 
-### 🖥️ In-Game Experience & Graphical Fixes
-* **New In-Game Quick Menu (OSD):** Bring up an in-game menu at any time during gameplay to toggle widescreen mode on the fly, cycle through CRT shaders/filters, and manage save states—all without having to exit back to check.
+## 🌟 Overview
 
-<div align="center">
-  <img src="./Assets/OSD_v0.9.2_preview.webp" width="750" alt="In-Game OSD Menu Preview">
-  <p><em>▲ Quick in-game overlay for real-time video, shader, and save state adjustments</em></p>
-</div>
+**Model 3-Vulkan** is an independent, high-performance evolution of the open-source Sega Model 3 arcade emulator. 
 
-* **Visual & Rendering Fixes:**
-  * Fixed an issue where an abnormal blue line would occasionally appear along the top edge of the screen in certain titles.
-  * Resolved geometry rendering bugs (e.g., the dinosaur boss glitch in *The Lost World: Jurassic Park* where the eyes and flesh separated from the skeleton).
+Re-architected from the ground up, the project transitions away from legacy OpenGL constraints in favor of a modern **pure Vulkan 1.3 rendering pipeline**, a cycle-accurate **Real3D graphics simulation**, a **native HD Texture Pack engine**, and an intuitive **frosted-glass eye-care UI**.
 
 ---
-## Download and run
 
-No installer. Grab the archive for your platform from the
-[latest release](https://github.com/Igloo-Garage/Supermodel-VK/releases/latest):
+## 🚧 What's New in Milestone v0.9.8.3a
 
-| Platform | Archive | Start it with |
-| --- | --- | --- |
-| Windows 10/11 (64-bit) | `Supermodel-VK.v…for.Windows.zip` | double-click `supermodel.exe` |
-| Linux (x86-64) | `Supermodel-VK.v…for.Linux.tar.gz` | `./supermodel` |
-| macOS 11+ (universal) | `Supermodel-VK.v…for.macOS.tar.gz` | `./supermodel` |
+This release marks the official graduation of the project into **Model 3-Vulkan**, decoupling the modern Vulkan path from legacy OpenGL into a dedicated, high-performance architecture:
 
-### Windows
+### 🎨 Visuals & Real3D Emulation Accuracy
+* **100% Hardware Quad Pull-Model (SSBO)**: Completely eliminated geometry shaders. Quads are pulled via SSBOs with an inverse-bilinear solver right inside the shaders, recovering perspective-correct `(s, t)` coordinates while keeping GPU Early-Z culling intact.
+* **4x EWA Anisotropic Filtering**: Custom 2×2 Gram matrix eigenvalue filtering with dynamic tap calculation to eliminate shimmering tracks and cross-seam edge bleeding.
+* **Groundbreaking 3-Tier Transparency System**:
+  * **Mode 0 (Bit-exact Two-Pass)**: Fast on-chip pass for low-bandwidth integrated GPUs.
+  * **Mode 1 (Per-Pixel Sorted A-Buffer OIT)**: 4-slot A-buffer with constant-time sorting (<0.75ms at 4K).
+  * **Mode 2 (Arcade Hardware Checkerboard — *World First*)**: Faithfully revives Real3D’s 1996 single-pass 50% stipple dither mask and transparent Z-write depth competition. **Permanently fixes the 20-year-old snow/fog blowout in *Sega Rally 2***, eliminates **blinding solid-white tire/exhaust smoke in *Daytona USA 2* and *Scud Race***, and cleans dirty black foliage outlines in *The Lost World*.
 
-1. Extract the `.zip` anywhere you can write to. Keep the folder together — the executable and the
-   data folders beside it are the program.
-2. Run `supermodel.exe`. The settings window opens directly.
-3. Use the path field at the top of the left column (or its **Browse** button) to point at the folder
-   holding your ROM set `.zip` files. The archive ships an empty `ROMs/` folder you can use.
+![Transparency System](Docs/images/transparency%20mode.webp)
+
+* **Native HD Texture Pack Engine**:
+  * Real3D sub-textures are cleanly dumped and loaded via 64-bit coordinate/format hashes `(page, x, y, w, h, format)`.
+  * Built-in automatic hardware Mipmap generation and `textureGrad` bypass to eliminate texture seam bleeding.
+  * Native support for `.png` (lossless quality) and `.webp` (compact downloads), with hardware-direct **`.dds` (BC7 VRAM streaming)** actively in development.
+
+![HD Texture Options](Docs/images/UI003-HD%20texture%20options.webp)
+
+![Game Screenshot 1](Docs/images/Daytona2%20PE_HD001.webp)
+![Game Screenshot 1](Docs/images/Daytona2_HD001.webp)
+
+### 🔊 Audio Modernization & The FV2 Ear-Exploder Fix
+* **Dedicated Real-Time Audio Thread**: Motorola 68000 + SCSP/DSB sound emulation runs on its own high-priority thread. Moving or resizing windows, streaming scene assets, or sudden GPU hiccups will **never stutter, crackle, or drop out audio again**.
+* **Retired `LegacySoundDSP`**: Resolved a 6-year-old bug where `0x7C0–0x7FF` (reserved memory hole) was mistakenly mirrored to `MADRS`, zeroing out delay tables and causing a runaway 0dB feedback loop screech on the victory screen in *Fighting Vipers 2* (and muting reverb in *VF3* and *Sega Rally 2*). All games now use the unified, hardware-accurate SCSP path.
+
+### 💾 Modern Save State Management (Zstd `.zst`)
+* **16 Visual Save Slots**: Right-click games in the launcher or open the in-game quick menu (`Tab`) to save and load across 16 slots with real-time screenshot thumbnails.
+* **Next-Gen Zstandard (`.zst`) Compression**: Slashes save file size to roughly **1/6th of legacy uncompressed `.st` dumps** (reducing 30–50MB+ dumps down to a few megabytes—a massive storage saver for handhelds like the **Steam Deck**).
+![Save State Management](Docs/images/manage%20saves.webp)
+
+### 🖥️ UI & Display Pacing Enhancements
+* **Smarter Window Lifecycle & Multi-Monitor Scaling**: Window size is preserved across restarts. Moving windows between displays with different resolutions or DPI scaling rescales the interface on the fly with crisp text and zero stretching.
+* **Warm Eye-Care Themes**: Three hand-crafted themes (warm light, warm dark and the original interface), with the warm light theme set as default to eliminate blue-white glare during long gaming sessions.
+
+![Light Theme](Docs/images/UI001-light.webp)
+![Dark Theme](Docs/images/UI002-dark.webp)
+
+* **Arcade-Exact 57.524 Hz Pacing (CDisplayPacer)**: Native 57.524 Hz arcade refresh pacing + 120Hz/144Hz+ motion interpolation via SDL3 for VRR/G-Sync monitors.
+![Refresh Pacing](Docs/images/Video%20settings02.webp)
+
+* **Low-Resolution 3D Rendering**: Render the 3D scene at 496×384 (native) or 992×768 (2x native) and upscale it onto the picture rectangle, while the 2D HUD keeps its own resolution. This is the cheapest way to hold 60 Hz on integrated GPUs without softening the HUD.
+* **Dual-Binary Architecture**: Includes `Model3-Vulkan.exe` (Default modern path) and `Supermodel-LegacyOG.exe` (SDL2 + OpenGL fallback for Haswell/older iGPUs).
+
+* **SDL3 Ultra-Low Latency Input Foundation**: Replaced legacy fragmented APIs with unified SDL3 Raw Input & HIDAPI polling. Minimizes input latency, guarantees seamless controller hot-plugging, and establishes the groundwork for advanced multi-device sim-racing and dual-lightgun peripherals.
+
+
+---
+
+## 📦 Download and Run
+
+No installer required. Grab the archive for your platform from the [latest release](https://github.com/Igloo-Garage/Model-3-Vulkan/releases/latest):
+
+| Platform | Archive | Start Command / Executable |
+| :--- | :--- | :--- |
+| **Windows 10/11 (64-bit)** | `Model3-Vulkan.v…for.Windows.zip` | Double-click `Model3-Vulkan.exe` |
+| **Linux (x86-64)** | `Model3-Vulkan.v…for.Linux.tar.gz` | `./Model3-Vulkan` |
+| **macOS 11+ (Universal)** | `Model3-Vulkan.v…for.macOS.tar.gz` | `./Model3-Vulkan` |
+
+### Windows Setup
+
+1. Extract the `.zip` anywhere you have write permissions. Keep the folder together — the executable and the data folders beside it are the program.
+2. Run `Model3-Vulkan.exe`. The settings launcher window opens directly.
+3. Use the path field at the top of the left column (or its **Browse** button) to point at the folder holding your ROM set `.zip` files. The archive ships an empty `roms/` folder you can use.
 4. Double-click a game, or select it and press **Start Game**.
+5. *Fallback:* If your machine lacks Vulkan 1.3 (or 1.2 with the required extensions), e.g. Intel 4th Gen Haswell, run `Supermodel-LegacyOG.exe` instead.
 
-### Before first run
+### Linux Setup (Ubuntu / Debian)
 
-**For Ubuntu / Debian users:**
+Install the required runtime libraries:
 
 ```bash
 sudo apt update
-sudo apt install libsdl2-2.0-0 libsdl2-net-2.0-0 libglu1-mesa libgl1 zlib1g
-sudo apt install libvulkan1 mesa-vulkan-drivers   # Vulkan renderer; OpenGL works without it
-sudo apt install zenity fonts-noto-cjk            # optional: Browse dialogs + Chinese UI text
+sudo apt install libsdl2-2.0-0 libsdl2-net-2.0-0 libglu1-mesa libgl1 zlib1g libwebp-dev
+sudo apt install libvulkan1 mesa-vulkan-drivers   # Vulkan runtime; OpenGL works without it
+sudo apt install zenity fonts-noto-cjk            # Optional: Browse dialogs + Chinese UI text
 ```
 
-- `zenity` is what the **Browse** buttons call. KDE users can install `kdialog` instead. Without
-  either, type the path by hand.
-- `fonts-noto-cjk` is only for the Chinese interface; `fonts-wqy-microhei` is a much smaller
-  substitute. The English UI works without either.
-- `mesa-vulkan-drivers` provides Vulkan for AMD/Intel GPUs. NVIDIA's proprietary driver ships its
-  own ICD, so the package is unnecessary there (and harmless if installed).
-- Then extract and run:
+* `zenity` is what the **Browse** buttons call. KDE users can install `kdialog` instead. Without either, type the path by hand.
+* `fonts-noto-cjk` is only for the Chinese interface; `fonts-wqy-microhei` is a much smaller substitute. The English UI works without either.
+* `mesa-vulkan-drivers` provides Vulkan for AMD/Intel GPUs. NVIDIA's proprietary driver ships its own ICD, so the package is unnecessary there (and harmless if installed).
 
-  ```bash
-  tar -xzf Supermodel-VK.*.for.Linux.tar.gz
-  cd Supermodel-VK.*
-  ./supermodel
-  ```
+Extract and launch:
 
-- `Permission denied` → `chmod +x supermodel`.
-- `error while loading shared libraries` → `ldd ./supermodel | grep "not found"` names what is
-  missing.
-- No window over SSH: it needs an X11/Wayland session. If Wayland misbehaves, try
-  `SDL_VIDEODRIVER=x11 ./supermodel`.
-- Optional diagnostics: `sudo apt install vulkan-tools mesa-utils`, then `vulkaninfo --summary`
-  and `glxinfo -B`. If OpenGL fails on a minimal install, add `libgl1-mesa-dri`.
-- No sound: make sure PipeWire (`pipewire-pulse`) or PulseAudio is running.
-- Linux builds are less battle-tested than Windows; please report issues with your GPU/driver and
-  the terminal output. Add `-log-output=Supermodel.log` to write a log file next to the executable.
+```bash
+tar -xzf Model3-Vulkan.*.for.Linux.tar.gz
+cd Model3-Vulkan.*
+./Model3-Vulkan
+```
 
-**For macOS users:**
+**Linux Troubleshooting:**
+* `Permission denied` → Run `chmod +x Model3-Vulkan`.
+* `error while loading shared libraries` → Run `ldd ./Model3-Vulkan | grep "not found"` to identify missing packages.
+* **No window over SSH:** The emulator requires an active X11 or Wayland session. If Wayland misbehaves, try launching with `SDL_VIDEODRIVER=x11 ./Model3-Vulkan`.
+* **Audio output:** Ensure PipeWire (`pipewire-pulse`) or PulseAudio is running.
+* **Diagnostic tools:** `sudo apt install vulkan-tools mesa-utils`, then run `vulkaninfo --summary` and `glxinfo -B`. If OpenGL fails on minimal installs, add `libgl1-mesa-dri`. Add `-log-output=Supermodel.log` to write a log file next to the binary.
 
-macOS Gatekeeper fix: because the build isn't Apple-notarized, macOS will block it as an
-"unidentified developer." To unblock it:
+### macOS Setup
+
+**Gatekeeper Fix:** Because the build is not Apple-notarized, macOS will block it as coming from an "unidentified developer." To unblock it:
 
 1. Open **Terminal**.
-2. Type `xattr -c -r ` *(make sure there is a space after `-c -r`)*.
-3. Drag the unzipped Supermodel-VK folder directly into the Terminal window (it will paste the full
-   path automatically).
+2. Type `xattr -c -r ` *(ensure there is a space after `-c -r`)*.
+3. Drag the unzipped Model 3-Vulkan folder directly into the Terminal window (this pastes the full directory path).
 4. Press **Enter**. You can now launch the emulator normally.
 
-**macOS performance:** Vulkan runs via MoltenVK (translating Vulkan to Metal). On some setups this
-overhead can lower frame rates. If you encounter slowdowns, switch the renderer to **OpenGL** in the
-settings window — it shares the same emulation core and visual features.
+**macOS Performance Note:** Vulkan runs via MoltenVK (translating Vulkan calls to Apple Metal). On some configurations this overhead can lower frame rates. If you encounter slowdowns, switch the renderer to **OpenGL** in the settings window — it shares the exact same emulation core.
 
-### All platforms
+### All Platforms (General Notes)
 
-- No game data is included. You need your own Model 3 ROM sets, one `.zip` per game.
-- The build is not code-signed. If Windows SmartScreen shows "Windows protected your PC", choose
-  **More info → Run anyway**.
-- Vulkan is the default renderer and needs a Vulkan 1.3 driver (1.2 with dynamic rendering and
-  synchronisation2 also qualifies); otherwise the emulator falls back to OpenGL 4.1 for that
-  session and says so in the settings window.
-- `Esc` returns to the settings window instead of quitting; `Tab` opens the in-game quick settings.
-- Settings, NVRAM, save states and logs stay next to the executable (`Data\` on Windows;
-  `Config/`, `NVRAM/`, `Saves/`, `Screenshots/` in the extracted folder on Linux and macOS).
-  Moving the executable on its own starts with fresh settings.
+* **No game data is included.** You must provide your own legally dumped Model 3 ROM sets, one `.zip` per game.
+* **Windows SmartScreen:** The build is not code-signed. If Windows SmartScreen displays *"Windows protected your PC"*, click **More info → Run anyway**.
+* **Driver Requirements:** Vulkan is the default renderer and requires a Vulkan 1.3 driver (or Vulkan 1.2 with `VK_KHR_dynamic_rendering` and `VK_KHR_synchronization2`); otherwise the emulator falls back to OpenGL 4.1 and indicates so in the launcher.
+* **Navigation:** `Esc` returns to the settings window instead of quitting; `Tab` opens the in-game quick settings overlay.
+* **Portable Directory Structure:** Settings, NVRAM, save states, and logs stay next to the executable (`Data\` on Windows; `Config/`, `NVRAM/`, `Saves/`, `Screenshots/` on Linux and macOS). Moving the executable on its own starts with fresh settings.
 
 ---
 
-## What this fork changes
+## 🌟 Visual & Presentation Systems
 
-The emulation core comes from Supermodel. The rendering, presentation, audio, input and
-interface layers are reworked here:
+### CRT Post-Processing
+Scanlines, phosphor masks (aperture grille, slot, and shadow mask), and glass glow are computed from an integrated beam profile rather than point-sampled. Point sampling beats into broad light and dark bands at 4K; integrating over each pixel's footprint removes that dependency and lets any scanline count render smoothly. *(Note: Geometry curvature is intentionally omitted to avoid spherical tube distortion).*
 
-**Vulkan 1.3 backend** — `Src/Graphics/Vulkan3D/`, alongside the original OpenGL renderers. Per-frame
-vertex arenas are protected by fences, so long sessions do not leak or develop black patches.
-
-**CRT post-processing** — scanlines, phosphor masks (aperture grille / slot / shadow) and glass glow,
-all computed from an integrated beam profile rather than point-sampled. Point sampling beats into
-broad light and dark bands at 4K; integrating over each pixel's footprint removes that dependency and
-lets any scanline count render smoothly. There is no geometry or curvature option — this does not
-attempt to simulate a spherical tube.
-
-![Game Screenshot 1](Docs/images/02game.jpg)
-
-![Game Screenshot 2](Docs/images/03game.jpg)
-
-**Widescreen without stretching** — Widescreen widens the 3D field of view instead of scaling the
-picture horizontally, so the extra width is real scenery and the HUD stays anchored to the screen
-edges. The image below alternates between native aspect and widescreen; both are the same scene,
-car and camera position.
-
-<p align="center">
-  <img src="Docs/images/compare-aspect.gif" width="900" alt="Native aspect vs widescreen">
-</p>
+Continuous Shader Tuning: The internal CRT shader pipeline will continue to be refined in upcoming builds, aiming to deliver high-efficiency CRT rendering that rivals leading modern standalone retro shaders out of the box with negligible performance overhead.
 
 
-**Standalone ImGui settings window** — the settings screen is the application shell. It stays alive
-for the whole run, so `Esc` returns to it instead of quitting the program, the way PCSX2 and other
-emulators behave. Settings that need a fresh session say so; the rest apply immediately.
+### True Widescreen (Without Stretching)
+Widescreen expands the horizontal 3D field of view instead of scaling the picture horizontally. The extra width is real geometry rendering, while the HUD remains cleanly anchored to the screen edges.
 
-**Three exclusive sync modes** — exclusive fullscreen at a fixed 57.5242 Hz arcade rate, exclusive
-fullscreen where G-SYNC/VRR tracks the emulator rate, and borderless. The statistics panel reports
-which one is actually in effect and what the panel is doing, because a mode being selected and a mode
-being honoured are different things.
 
-**Decoupled multi-threaded audio** — sample generation is fractional per frame rather than rounded,
-the sound board runs on its own thread, and the output buffer adapts. A non-integer ratio between
-57.5242 Hz and a 60 Hz display produces a click every few seconds otherwise.
-
-**Integer scaling that reports itself** — the multiple is derived from the panel's real resolution
-(`384 × N ≤ panel rows`), never from the resolution preset, and the settings window shows the multiple
-actually in effect plus the row count the next step would need. A 2160-row 4K panel reaches 5×
-(2480×1920) and no further; 6× needs 2304 rows, which no 16:9 4K panel has.
-
-**Hot-plug gamepads** — on the `sdl` and `sdlgamepad` input systems, a pad attached or detached
-mid-game is picked up without restarting. The other backends still enumerate once at start-up.
-
-**Chinese and English interface** — with the input binding table translated in both directions, since
-those strings originate in English for the console and the log.
-
-No game data is included or distributed. You need your own ROMs.
+### Self-Reporting Integer Scaling
+The scaling multiple is derived from the display panel's real physical resolution (`384 × N ≤ panel rows`), never from resolution presets. The settings window displays the active multiplier plus the row count the next step would need (e.g. a 2160p 4K panel reaches 5× at 2480×1920; 6× requires 2304 rows, which standard 16:9 4K panels lack).
 
 ---
 
-## Build from source
+## ⚙️ Build from Source
 
-Only needed if you want to modify the code or build for a platform without a release archive.
-Release users can stop after **Download and run** above.
+Source builds are only needed if you want to modify code or compile for unsupported platforms. Release users can skip this section.
 
-### Fetch the libraries first
+### 1. Fetch Third-Party Libraries
+Third-party dependency trees are restored on demand:
 
-The third-party trees are deliberately not committed — they are large and are restored on demand:
-
-```
+```cmd
 Libraries\Get_Libs.cmd
 ```
 
-This pulls SDL2, zlib, Vulkan-Headers and glslang. On Linux or macOS use the equivalent
-`git clone` commands in `Libraries/DIR.txt`, or install the distribution packages.
+On Linux or macOS, the CMake build restores the same sources with:
 
-### Windows (Visual Studio)
-
-Open `MSVC\Supermodel.sln` and build **Release x64**, or from a developer command prompt:
-
+```bash
+bash Scripts/fetch-cmake-deps.sh
 ```
+
+### 2. Windows (Visual Studio)
+Open `MSVC\Supermodel.sln` and build **Release x64**, or run from a Visual Studio Developer Command Prompt:
+
+```cmd
 msbuild MSVC\Supermodel.sln /m /p:Configuration=Release /p:Platform=x64
 ```
 
-`build.bat` does the same and then assembles a runnable folder under `dist\`.
+`build.bat` runs the same compilation and automatically packages a runnable distribution folder under `dist\`. (Toolsets v143 and v145 are supported across Visual Studio 2022 and 2026).
 
-The project asks for the v145 toolset and falls back to the newest installed one, so Visual Studio
-2022 works as well as 2026.
+### 3. Windows (MSYS2 / GCC)
+In an MSYS2 shell, install the MinGW-w64 toolchain:
 
-### Windows (MSYS2 / GCC)
-
-After installing MSYS2:
-
-```
+```bash
 pacman -S mingw64/mingw-w64-x86_64-gcc
 pacman -S mingw64/mingw-w64-x86_64-make
 pacman -S mingw64/mingw-w64-x86_64-SDL2
 pacman -S mingw64/mingw-w64-x86_64-SDL2_net
 ```
 
-Ensure `gcc` and `mingw32-make` are on your path (`/mingw64/bin` in the MSYS2 shell, or
-`C:\msys64\mingw64\bin` for a normal command prompt), then:
+Ensure `gcc` and `mingw32-make` are on your system `PATH`, then execute:
 
-```
+```bash
 mingw32-make -f Makefiles/Makefile.Win32
 ```
 
-### Linux
+### 4. Linux Build
 
-```
+```bash
 sudo apt install build-essential pkg-config libsdl2-dev libsdl2-net-dev libglu1-mesa-dev zlib1g-dev libwebp-dev
-sudo apt install libvulkan1 mesa-vulkan-drivers   # runtime for the Vulkan renderer
+sudo apt install libvulkan1 mesa-vulkan-drivers
 make -f Makefiles/Makefile.UNIX
 ```
 
-The binary is written to `bin/supermodel`; run it from the repository root so it picks up `Config/`
-and `Assets/`. Vulkan headers are vendored under `Libraries/Vulkan-Headers`, so no Vulkan SDK is
-required to build.
+The Makefile build writes `bin/supermodel` (SDL2 + OpenGL/Vulkan). The pure Vulkan `Model3-Vulkan`
+target is built with CMake and written to `build-cmake/bin/`:
 
-### macOS
-
+```bash
+cmake -S . -B build-cmake -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    -DUSE_SDL2=OFF -DUSE_SDL3=ON -DSUPERMODEL_SDL3_PURE_VULKAN=ON
+cmake --build build-cmake
+./build-cmake/bin/Model3-Vulkan -gui
 ```
+
+Run either binary from the repository root so it resolves `Config/` and `Assets/`.
+
+### 5. macOS Build
+
+```bash
 xcode-select --install
-```
-
-Install SDL2 and SDL_net from <https://github.com/libsdl-org/SDL/releases> and
-<https://github.com/libsdl-org/SDL_net/releases> into `/Library/Frameworks`, then:
-
-```
 make -f Makefiles/Makefile.OSX
 ```
 
-A binary downloaded or built elsewhere needs one-time execution permission: right-click it in
-Finder, choose **Open**, and confirm. See
-<https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unidentified-developer-mh40616/mac>.
+The Makefile creates `Frameworks/` and downloads SDL2, SDL_net and MoltenVK on first use, so no Homebrew installation or Vulkan SDK is required. The same folder is what makes the macOS package run Vulkan 3D out of the box.
 
-The macOS release is a universal binary (Apple Silicon and Intel), but it is packaged as a bare
-Unix executable rather than a `.app`. Keep `supermodel` in the extracted folder next to
-`Frameworks/`, open Terminal there, and run `./supermodel`. MoltenVK is bundled in `Frameworks/`,
-so Vulkan 3D works without Homebrew or the Vulkan SDK; a system MoltenVK is also detected if
-present. Without either, the emulator falls back to the OpenGL New 3D renderer. The bundled
-MoltenVK is Apache-2.0; see `Frameworks/LICENSE-MoltenVK.txt`.
-
-### Shaders
-
-The Vulkan shaders are compiled to SPIR-V by `Scripts/CompileVulkanShaders.cmd` (Windows) or
-`Scripts/CompileVulkanShaders.sh`. The generated `.spv.h` headers are committed, so a plain source
-build does not need glslang installed; the `.spv` intermediates are not committed.
+### 6. Shaders Compilation
+Vulkan shaders compile to SPIR-V via `Scripts/CompileVulkanShaders.cmd` (Windows) or `Scripts/CompileVulkanShaders.sh` (Linux/macOS). The generated `.spv.h` headers are committed into the repository, so plain source builds do not require `glslang` installed.
 
 ---
 
-## Requirements
+## 🔍 Core Architecture & Upstream Tracking
 
-| | |
-|---|---|
-| OS | Windows 10/11 (64-bit), Linux, or macOS 11+ |
-| Vulkan | Driver providing Vulkan 1.3, or Vulkan 1.2 with `VK_KHR_dynamic_rendering` and `VK_KHR_synchronization2` — for the Vulkan 3D renderer |
-| OpenGL | Driver providing OpenGL 4.1+ — for the New 3D and Legacy 3D renderers |
-
-Nothing else needs installing on Windows: the C++ runtime, SDL2 and SDL2_net are linked
-statically, so the executable has no DLL dependencies beyond `vulkan-1.dll`, which the graphics
-driver provides. The Linux build links SDL2, SDL2_net, GL and GLU dynamically, so those runtime
-packages must be installed (see the `apt` line above). Vulkan is loaded at runtime and is optional:
-without `libvulkan1` and a driver the emulator uses OpenGL.
-
----
-
-## Version numbering
-
-The version is written down in exactly one place, `Src/Version.h`:
-
-```c
-#define SUPERMODEL_VERSION      "0.3a-WIP"     /* upstream core; recorded in save states */
-#define SUPERMODEL_FORK_VERSION "0.9.0.3a"
-#define SUPERMODEL_FORK_DATE    "20261017"
-```
-
-`SUPERMODEL_TITLE_FULL` is assembled from the last two, and `build.bat` reads the same lines through
-`Scripts/VersionString.ps1`. `SUPERMODEL_VERSION` is kept separate on purpose: it is stored in save
-states and NVRAM, so changing it would invalidate every save a user already has.
-
----
-
-## Relationship to Upstream
-
-Supermodel-VK maintains an ongoing synchronization tracking upstream Supermodel's hardware emulation
-core, while intentionally preserving independent modern subsystems.
+Model 3-Vulkan maintains an ongoing synchronization tracking upstream Supermodel's hardware emulation core, while intentionally preserving independent modern subsystems:
 
 ### Core Emulation Tracking
-
-- **Instruction Semantics:** Regularly backports MAME-aligned PowerPC arithmetic and bit-rotation
-  fixes (`sraw`, `subfme`, `rlw*`) and standardized cross-architecture NaN handling across x86-64
-  and ARM.
-- **Topology Architecture vs. QuadTriFix:** Upstream's New3D pipeline relies on a geometry shader
-  fix (QuadTriFix) to handle synthetic quad degradation. Supermodel-VK's Vulkan pipeline bypasses
-  this defect at the architectural level: `CopyVertexData` splits quads directly into native dual
-  triangles (`0,1,2` and `0,2,3`) submitted via `VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST`, ensuring
-  zero degenerate vertex overhead or depth corruption.
+* **Instruction Semantics:** Regularly backports MAME-aligned PowerPC arithmetic and bit-rotation fixes (`sraw`, `subfme`, `rlw*`) and standardized cross-architecture NaN handling across x86-64 and ARM.
+* **Topology Architecture vs. QuadTriFix:** Upstream's New3D pipeline relies on a geometry shader fix (QuadTriFix) to handle synthetic quad degradation. Model 3-Vulkan's Vulkan pipeline bypasses this defect entirely at the architectural level: `CopyVertexData` splits quads directly into native dual triangles (`0,1,2` and `0,2,3`) submitted via `VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST`, ensuring zero degenerate vertex overhead or depth corruption.
 
 ### Intentional Divergences
-
-- **Decoupled Low-Latency Audio:** Supermodel-VK maintains a proprietary, decoupled multi-threaded
-  audio architecture (fractional per-frame sample accumulators and adaptive buffer scaling).
-  Monolithic upstream audio merges are intentionally isolated to prevent audio underruns and thread
-  starvation.
-- **Specialized Machine Profiles:** Upstream PRO-1000 experimental profiles remain decoupled until
-  their storage and tilegen logic can be cleanly mapped onto the modern Vulkan memory arena.
+* **Decoupled Real-Time Audio:** Proprietary decoupled multi-threaded audio architecture with fractional sample accumulation and adaptive buffer scaling. Monolithic upstream audio merges are isolated to prevent underruns and audio clicks.
+* **Specialized Machine Profiles:** Upstream PRO-1000 experimental profiles remain decoupled until storage and tilegen logic map cleanly onto our modern Vulkan memory arena.
 
 ---
 
-## Documentation
+## 🛠️ Hardware Notes & Technical Limits
 
-- [`Docs/README.txt`](Docs/README.txt) — Comprehensive upstream hardware reference, emulator CLI
-  parameters, and system manual.
-- [`Docs/README-VK.txt`](Docs/README-VK.txt) — Detailed technical manual for Vulkan renderer
-  configurations, VRR presentation, and shader tuning.
-- [`Docs/安装说明.txt`](Docs/安装说明.txt) — 简体中文快速配置指南（控制器映射推荐、Vulkan 驱动兼容性与常用画质选项）。
-
----
-
-## Hardware Notes & Technical Limits
-
-- **Gamepad Hot-Plugging:** Dynamic device reconciliation is supported on modern SDL input paths
-  (`sdl` and `sdlgamepad`). Legacy API targets (`xinput`, `dinput`, `rawinput`) enumerate devices
-  once at initialization and require a session restart.
-- **Controller Trigger Topologies:** Certain hardware (such as 8BitDo gamepads operating in Nintendo
-  Switch mode) maps L2/R2 triggers digitally, reporting discrete binary on/off states rather than
-  analogue continuous ranges. This reflects vendor hardware firmware protocol behavior rather than
-  emulator input polling.
-- **Integer Scaling Multiples on 16:9 Displays:** Integer scaling factors ($\times4$, $\times6$,
-  $\times8$) require native vertical pixel bounds of 1536, 2304, and 3072 scanlines. On standard
-  16:9 displays, 1440p panels cap cleanly at $\times3$, while 2160p (4K) panels advance to $\times5$.
-- **Widescreen Frustum & CRT Beam Alignment:** Enabling widescreen geometry widens the visible 3D
-  frustum into sub-rectangles outside the classic 4:3 raster viewport. CRT beam-profile scanline
-  masks compute across the native display raster grid, accurately mirroring physical tube phosphor
-  alignment.
+* **Gamepad Hot-Plugging:** Dynamic device reconciliation is supported on modern SDL input paths (`sdl` and `sdlgamepad`). Legacy API targets (`xinput`, `dinput`, `rawinput`) enumerate devices once at initialization.
+* **Controller Trigger Topologies:** Certain hardware (such as 8BitDo gamepads operating in Nintendo Switch mode) maps L2/R2 triggers digitally, reporting discrete binary on/off states rather than analogue continuous ranges. This reflects vendor hardware firmware protocol behavior rather than emulator input polling.
+* **Integer Scaling Multiples on 16:9 Displays:** Integer scaling factors ($\times4$, $\times6$, $\times8$) require native vertical pixel bounds of 1536, 2304, and 3072 scanlines. On standard 16:9 displays, 1440p panels cap cleanly at $\times3$, while 2160p (4K) panels advance to $\times5$.
+* **Widescreen Frustum & CRT Beam Alignment:** Enabling widescreen geometry widens the visible 3D frustum into sub-rectangles outside the classic 4:3 raster viewport. CRT beam-profile scanline masks compute across the native display raster grid, accurately mirroring physical tube phosphor alignment.
 
 ---
 
-## Support & Sponsorship
+## 🔢 Version Numbering Scheme
 
-Supermodel-VK and our arcade rendering tools are 100% free and open-source. Development is fueled by
-late-night reverse engineering, hardware validation, and community passion.
+The version string is defined in exactly one location: `Src/Version.h`:
 
-If you find this project valuable and would like to support display testbeds, hardware acquisitions,
-or early release previews, consider supporting via Ko-fi:
+```c
+#define SUPERMODEL_VERSION      "0.3a-WIP"     /* Upstream core; recorded in save states */
+#define SUPERMODEL_BASE_RELEASE "0.3a-2026.09.28"
+#define SUPERMODEL_FORK_VERSION "0.9.8.3a"
+```
 
-[![Ko-fi](https://img.shields.io/badge/Support%20on-Ko--fi-F16061?style=for-the-badge&logo=ko-fi&logoColor=white)](https://ko-fi.com/igloogarage)
-
-*Monthly backers get early testing snapshot builds and devlogs covering low-level Vulkan rendering
-milestones.*
-
----
-
-## Community
-
-- **Discord:** *Coming soon (server in setup)*
-- **GitHub Discussions / Issues:** Open for technical discussions, bug reports, and hardware feedback.
+`SUPERMODEL_TITLE_FULL` is assembled from the title and the fork version, and `build.bat` reads these definitions via `Scripts/VersionString.ps1`. `SUPERMODEL_VERSION` is deliberately preserved: it is recorded in save states and NVRAM, preventing existing saves from being invalidated.
 
 ---
 
-## License & Credits
+## 🚀 Upcoming Milestones: "Netplay 2.0" + "Modern Peripherals"
 
-Supermodel-VK is licensed under the **GNU General Public License v3.0 (GPLv3)**. See
-[`Docs/LICENSE.txt`](Docs/LICENSE.txt) for details.
+### Part 1: Modern Peripherals Overhaul & Diagnostic Probe
+* Native plug-and-play Force Feedback curves for Fanatec, Moza, Simagic, Thrustmaster, and Logitech wheels.
+* Multi-device raw input separation for *The Lost World*, *L.A. Machineguns*, and *The Ocean Hunter* (native calibration for **Sinden, Gun4IR, Aimtrak, and Wiimotes**).
+* In-game visual mapping wizard + a lightweight crowdsourced **Device Probe Tool** to capture community rig telemetry.
 
-This project is a modernized Vulkan 1.3 architecture fork building upon the reverse-engineering
-foundations laid by Bart Trzynadlowski, Nik Henson, Ville Linde, Stefano Teso, and the Supermodel
-team. Third-party components and attribution details are documented in [`NOTICE.md`](NOTICE.md).
+### Part 2: Netplay 2.0 (Zero-Config Arcade Racing)
+* 6-digit room codes with automated P2P NAT punch-through (no Hamachi, no port forwarding).
+* Non-blocking asynchronous Star UDP keeping local gameplay locked at **57.524 Hz / 120 Hz+** regardless of network latency.
+* Drop-in / drop-out fault tolerance (disconnected racers safely coast to the roadside without crashing the active room).
+
+---
+
+## 📖 Documentation Reference
+
+* [Docs/README from The Supermodel Team.txt](Docs/README%20from%20The%20Supermodel%20Team.txt) — Comprehensive upstream hardware reference, CLI parameters, and system manual (written by the Supermodel team).
+* [usermanual.md](usermanual.md) — Player manual: renderers, presentation, audio, input, save states and troubleshooting.
+* [usermanual_chs.md](usermanual_chs.md) — 简体中文精简手册：画质、输入、存档与常见问题。
+* [supported-games.txt](supported-games.txt) — ROM set names known to run.
+
+---
+
+## 💖 Community & Support
+
+* **Reddit Community:** [r/Model3Vulkan](https://www.reddit.com/r/Model3Vulkan/) *(Join us for HD texture pack sharing, compatibility discussions, and netplay updates)*
+* **GitHub Discussions / Issues:** Open for technical discussions, bug reports, and hardware feedback.
+* **Support via Ko-fi:** Development is fueled by late-night reverse engineering, hardware validation, and community passion. If you find this project valuable, consider supporting via Ko-fi:
+
+[](https://ko-fi.com/igloogarage)
+
+---
+
+## 📜 License & Credits
+
+Model 3-Vulkan is licensed under the **GNU General Public License v3.0 (GPLv3)**. See [Docs/LICENSE.txt](Docs/LICENSE.txt) for details.
+
+This project builds upon the reverse-engineering foundations laid by **Bart Trzynadlowski**, **Nik Henson**, **Ian (dukey)**, **Ville Linde**, **Stefano Teso**, and the original **Supermodel** team. Third-party components and attribution details are documented in [`NOTICE.md`](NOTICE.md).

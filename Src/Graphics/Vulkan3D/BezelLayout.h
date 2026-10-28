@@ -33,7 +33,7 @@ namespace Vulkan3D {
  * seam between two bars, reads as "the backdrop looks slightly off" rather than as a bug, and the
  * two cases that matter (4:3 with side bars, point-to-point with bars on all four edges) are easy to
  * test by inspection only at one resolution. The arithmetic is therefore a pure function with a
- * property test beside it - see Scripts/../the note in develop.md.
+ * property test beside it - see Scripts/../docs: `devdocs/TECHLOG.md`.
  *
  * Deliberately free of Vulkan types so a test can include it and nothing else.
  */

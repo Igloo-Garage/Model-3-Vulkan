@@ -22,12 +22,14 @@
 #ifndef _OVERLAY_H_
 #define _OVERLAY_H_
 
+#if !defined(SUPERMODEL_OPENGL_ONLY)
 #include "Graphics/Vulkan3D/VulkanCommon.h"
+#endif
 
+#include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <vector>
-
-struct SDL_Window;
 
 namespace Util
 {
@@ -42,26 +44,13 @@ namespace Vulkan3D
   class CVulkanContext;
 }
 
-/*
- * Crosshair state, drawn by the in-game overlay on top of everything else.
- *
- * Coordinates are window pixels, already mapped through the game viewport. The overlay renders the
- * crosshair in its foreground draw list, which is recorded after the panel and the statistics
- * readout and after every game layer, so nothing can cover it.
- */
-struct OverlayCrosshairState
+namespace OSD
 {
-  bool visible = false;
-  unsigned players = 0;       // Bit 0 = player 1, bit 1 = player 2
-  float x[2] = {};
-  float y[2] = {};
-};
-
-/*
- * Queues the crosshair for the next overlay frame. Safe to call every frame, including when the
- * overlay backend is not available (the state is then simply ignored).
- */
-void OverlaySetCrosshair(const OverlayCrosshairState& state);
+namespace Platform
+{
+struct Window;
+}
+}
 
 /*
  * In-game settings overlay.
@@ -95,7 +84,9 @@ void OverlaySetCrosshair(const OverlayCrosshairState& state);
  * is unavailable, in which case the game runs without it - it is a convenience, not something to fail
  * a launch over.
  */
-bool OverlayInit(Vulkan3D::CVulkanContext& context, SDL_Window* window, float uiScale);
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+bool OverlayInit(Vulkan3D::CVulkanContext& context, OSD::Platform::Window* window, float uiScale);
+#endif
 
 /*
  * Creates the OpenGL backend for the overlay, for the New 3D and Legacy 3D renderers.
@@ -108,7 +99,7 @@ bool OverlayInit(Vulkan3D::CVulkanContext& context, SDL_Window* window, float ui
  * Called *instead of* OverlayInit(), not in addition to it: a session uses one backend or the other.
  * Must be called with the game window's OpenGL context already current.
  */
-bool OverlayInitGL(SDL_Window* window, float uiScale);
+bool OverlayInitGL(OSD::Platform::Window* window, float uiScale);
 
 void OverlayShutdown();
 
@@ -154,6 +145,15 @@ struct OverlaySaveSlot
   bool exists = false;
   bool active = false;        // the slot F5/F7 currently use
   double ageSeconds = 0.0;    // age of the file; 0 when it does not exist
+
+  /*
+   * The file the slot was found in and a revision that changes when it is rewritten. The overlay
+   * reads thumb.png from this path only when the row is hovered, and keeps the uploaded texture
+   * until the revision changes; passing the path through the callback is what lets the UI stay
+   * independent of the container format and of HostCore.
+   */
+  std::filesystem::path path;
+  std::uint64_t revision = 0;
 };
 
 struct OverlaySaveHandlers
@@ -171,7 +171,42 @@ void OverlayClearSaveHandlers();
  * Must be called with a rendering scope already open on the swapchain image, since the ImGui backend
  * only issues draw commands. The renderer wraps this in its own scope; see CVulkan2D::OverlayPass.
  */
+#if !defined(SUPERMODEL_OPENGL_ONLY)
 void OverlayRender(VkCommandBuffer cmd);
+
+/*
+ * Blurred copy of the frame behind the panel, published by the game's renderer.
+ *
+ * The panel draws its own background instead of a flat fill, and that background is the frame the
+ * player is looking at, blurred. Producing it needs the swapchain, so it is the renderer's job; the
+ * overlay only samples the result.
+ *
+ * `generation` changes whenever the image is replaced. Comparing it rather than the view handle
+ * matters because the allocator reuses addresses: a resize can hand back the same VkImageView while
+ * it names different memory.
+ */
+struct OverlayFrostTexture
+{
+  VkImageView view = VK_NULL_HANDLE;
+  std::uint32_t generation = 0;
+};
+
+/*
+ * Installed once per session by the game loop, and called once per built frame. Returning an empty
+ * texture (a null view) makes the panel fall back to a solid tint.
+ */
+using OverlayFrostTextureFn = OverlayFrostTexture (*)();
+void OverlaySetFrostTextureSource(OverlayFrostTextureFn fn);
+#endif
+
+/*
+ * True when the panel is drawing frosted glass this frame, so the renderer should run its blur chain.
+ *
+ * Asked per frame rather than set on open and close, because the panel can also be dismissed by its
+ * own Close button and the config option can be switched while it is open. A false answer is what
+ * keeps a session that never opens the panel at exactly zero cost.
+ */
+bool OverlayWantsFrost();
 
 /*
  * Records the panel into the currently bound framebuffer, for the OpenGL renderers.

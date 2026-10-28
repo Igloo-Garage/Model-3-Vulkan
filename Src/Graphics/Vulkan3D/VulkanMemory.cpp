@@ -26,16 +26,50 @@ namespace Vulkan3D {
 
 static constexpr VkDeviceSize kBlockBytes = 64ull * 1024ull * 1024ull;
 
-bool CVulkanMemory::Init(VkPhysicalDevice physical, VkDevice device)
+bool CVulkanMemory::Init(VkPhysicalDevice physical, VkDevice device, bool budgetExtension)
 {
 	m_physical = physical;
 	m_device = device;
+	m_budget = budgetExtension;
 	vkGetPhysicalDeviceMemoryProperties(physical, &m_props);
 	return true;
 }
 
+void CVulkanMemory::LogMemoryBudget(const char* reason) const
+{
+	// Without the extension the driver reports no budget, and logging zeroes would look like an
+	// exhausted device. Say nothing instead.
+	if (!m_budget || m_physical == VK_NULL_HANDLE)
+		return;
+
+	VkPhysicalDeviceMemoryBudgetPropertiesEXT budget = {};
+	budget.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT;
+	VkPhysicalDeviceMemoryProperties2 props = {};
+	props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2;
+	props.pNext = &budget;
+	vkGetPhysicalDeviceMemoryProperties2(m_physical, &props);
+
+	for (uint32_t i = 0; i < props.memoryProperties.memoryHeapCount; i++)
+	{
+		if ((props.memoryProperties.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) == 0)
+			continue;
+		// heapBudget is what the driver believes this process may use; heapUsage is what everything
+		// on the machine currently uses. On Windows the two differ from the Vulkan allocation total,
+		// which is why both are printed: "our blocks" is in TotalAllocated(), this is the context.
+		InfoLog("Vulkan memory (%s): heap %u device-local, %llu MB budget, %llu MB in use, "
+			"%llu MB held by this session across %u block(s).",
+			reason, i,
+			(unsigned long long)(budget.heapBudget[i] / (1024 * 1024)),
+			(unsigned long long)(budget.heapUsage[i] / (1024 * 1024)),
+			(unsigned long long)(TotalAllocated() / (1024 * 1024)), (unsigned)m_blocks.size());
+	}
+}
+
 void CVulkanMemory::Shutdown()
 {
+	if (!m_blocks.empty())
+		InfoLog("Vulkan: releasing %llu MB of device memory across %u block(s).",
+			(unsigned long long)(TotalAllocated() / (1024 * 1024)), (unsigned)m_blocks.size());
 	for (auto& block : m_blocks)
 	{
 		if (block.memory)
@@ -207,6 +241,7 @@ bool CVulkanMemory::Suballocate(uint32_t typeIndex, VkDeviceSize size, VkDeviceS
 			(unsigned long long)(blockSize / (1024 * 1024)), (unsigned long long)size,
 			(unsigned long long)(TotalAllocated() / (1024 * 1024)), (unsigned)m_blocks.size(),
 			(unsigned long long)(TotalFree() / (1024 * 1024)));
+		LogMemoryBudget("allocation failed");
 		return false;
 	}
 	block.free.push_back(Block::Span{ 0, blockSize });
