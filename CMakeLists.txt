@@ -123,6 +123,13 @@ target_compile_definitions(supermodel_zlib PRIVATE
     _CRT_SECURE_NO_DEPRECATE
     _CRT_NONSTDC_NO_DEPRECATE)
 
+# zlib's zconf.h only includes <unistd.h> when HAVE_UNISTD_H is defined. The
+# Windows build gets the declarations from <io.h> via _WIN32; the Unix build
+# needs this or gzlib.c/gzread.c/gzwrite.c fail on lseek/read/write/close.
+if(NOT WIN32)
+    target_compile_definitions(supermodel_zlib PRIVATE HAVE_UNISTD_H)
+endif()
+
 if(USE_SDL2)
     set(SDL_SHARED OFF CACHE BOOL "" FORCE)
     set(SDL_STATIC ON CACHE BOOL "" FORCE)
