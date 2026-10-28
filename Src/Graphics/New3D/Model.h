@@ -4,6 +4,7 @@
 #include <vector>
 #include <memory>
 #include <cstring>
+#include <cstdint>
 #include "Types.h"
 #include "Mat4.h"
 
