@@ -90,7 +90,7 @@ No installer required. Grab the archive for your platform from the [latest relea
 | :--- | :--- | :--- |
 | **Windows 10/11 (64-bit)** | `Model3-Vulkan.v…for.Windows.zip` | Double-click `Model3-Vulkan.exe` |
 | **Linux (x86-64)** | `Model3-Vulkan.v…for.Linux.tar.gz` | `./Model3-Vulkan` |
-| **macOS 11+ (Universal)** | `Model3-Vulkan.v…for.macOS.tar.gz` | `./Model3-Vulkan` |
+| **macOS 13.3+ (Universal)** | `Model3-Vulkan.v…for.macOS.tar.gz` | `./Model3-Vulkan` |
 
 ### Windows Setup
 

@@ -1546,6 +1546,18 @@ static std::string ToLowerAscii(std::string text)
     return text;
 }
 
+#if !defined(_WIN32)
+/*
+ * Non-Windows counterpart of the foreground-raising helper below. There is no
+ * foreground lock to defeat here, so bringing the window back is enough.
+ */
+static void RaiseSettingsWindow(OSD::Platform::Window* window)
+{
+    if (window != nullptr)
+        OSD::Platform::ShowWindow(window);
+}
+#endif
+
 #ifdef _WIN32
 static std::wstring Utf8ToWide(const std::string& text)
 {
@@ -3359,7 +3371,10 @@ static void OpenManageSaves(const std::string& setName)
  */
 static std::string IsoTimestamp(const std::filesystem::file_time_type& fileTime)
 {
-    const auto systemTime = std::chrono::clock_cast<std::chrono::system_clock>(fileTime);
+    // std::chrono::clock_cast is a C++20 library feature that libc++ does not
+    // provide yet; the clock difference is the portable equivalent.
+    const auto systemTime = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+        fileTime - std::filesystem::file_time_type::clock::now() + std::chrono::system_clock::now());
     const std::time_t stamp = std::chrono::system_clock::to_time_t(systemTime);
 
     std::tm utc = {};
