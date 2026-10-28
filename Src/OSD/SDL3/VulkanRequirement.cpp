@@ -47,7 +47,13 @@
 #include <fstream>
 #include <optional>
 #include <print>
+#if __has_include(<stacktrace>)
 #include <stacktrace>
+#define SUPERMODEL_HAS_STACKTRACE 1
+#else
+// libc++ on macOS does not provide <stacktrace> yet.
+#define SUPERMODEL_HAS_STACKTRACE 0
+#endif
 #include <string>
 #include <utility>
 #include <vector>
@@ -378,7 +384,11 @@ void ReportVulkanRequirementFailure(const VulkanRequirementError& error)
 
     // Only on this fatal path: a stack trace is useful in a bug report and too
     // expensive to capture during normal startup.
+#if SUPERMODEL_HAS_STACKTRACE
     const std::string trace = std::to_string(std::stacktrace::current(0, 16));
+#else
+    const std::string trace = "(stack traces are not available in this standard library)";
+#endif
     StartupPrint("  startup stack trace:\n{}", trace);
     AppendToStartupLog(std::format(
         "[Fatal] Vulkan 1.3 requirement not met: {}\n{}\n", error.detail, trace));

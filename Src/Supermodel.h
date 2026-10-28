@@ -60,9 +60,9 @@
 
 // 32-bit rotate left
 #ifdef _MSC_VER // MS VisualC++ - use VS intrinsic function _rotl
-	#define rotl(val, shift) val = _rotl(val, shift)
+	#define ROTL32(val, shift) val = _rotl(val, shift)
 #elif defined(__GNUC__)	// GCC should optimise following to asm
-	#define rotl(val, shift) val = (val>>shift)|(val<<(32-shift))
+	#define ROTL32(val, shift) val = (val>>shift)|(val<<(32-shift))
 #endif
 
 /* 
