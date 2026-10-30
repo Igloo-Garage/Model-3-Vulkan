@@ -16,7 +16,7 @@ param(
 )
 
 $root = Split-Path -Parent $PSScriptRoot
-$bin = Join-Path $root "dist\Supermodel-VK"
+$bin = Join-Path $root "dist\Model-3-Vulkan"
 if (-not (Test-Path (Join-Path $bin "Model3-Vulkan.exe"))) {
     $bin = Join-Path $root "build-cmake\bin"
 }

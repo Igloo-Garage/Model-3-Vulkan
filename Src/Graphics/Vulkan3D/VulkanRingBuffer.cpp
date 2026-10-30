@@ -1,10 +1,13 @@
 /**
- ** Supermodel-VK
+ ** Model 3-Vulkan
  ** A Vulkan-focused fork of Supermodel, the Sega Model 3 arcade emulator.
- ** Copyright 2026 The Supermodel-VK authors
+ ** Copyright (C) 2026 REXABYTE SOFTWARE INC. (Igloo-Garage / Rex)
  **
- ** This file is part of Supermodel-VK, and is derived from Supermodel,
+ ** This file is part of Model 3-Vulkan, and is derived from Supermodel,
  ** Copyright 2003-2026 The Supermodel Team.
+ **
+ ** Additional Terms under GNU GPLv3 Section 7 apply to this file
+ ** (see LICENSE-ADDITIONAL-TERMS.md).
  **
  ** Supermodel is free software: you can redistribute it and/or modify it under
  ** the terms of the GNU General Public License as published by the Free

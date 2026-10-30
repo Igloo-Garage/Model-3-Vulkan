@@ -70,10 +70,10 @@ class CInputSource;
 #define NUM_MOUSE_PARTS ((int)MouseButtonX2 + 1)
 #define NUM_MOUSE_AXES 3
 #define NUM_MOUSE_BUTTONS 5
-#define NUM_JOY_PARTS ((int)JoyButton31 + 1)
 #define NUM_JOY_AXES 8
 #define NUM_JOY_POVS 4
-#define NUM_JOY_BUTTONS 32
+#define NUM_JOY_BUTTONS 128
+#define NUM_JOY_PARTS ((int)JoyButton0 + NUM_JOY_BUTTONS)
 
 // Axis numbers
 #define AXIS_X 0
@@ -207,7 +207,8 @@ enum EJoyPart
   JoyButton28,
   JoyButton29,
   JoyButton30,
-  JoyButton31
+  JoyButton31,
+  JoyButtonLast = JoyButton0 + NUM_JOY_BUTTONS - 1
 };
 
 struct MousePartsStruct
@@ -401,7 +402,14 @@ private:
    */
   CInputSource *GetJoySource(int joyNum, EJoyPart joyPart);
 
-  void CheckAllSources(unsigned readFlags, bool fullAxisOnly, std::vector<CInputSource*> &sources, std::string &mapping, std::vector<CInputSource*> &badSources);
+  /*
+   * capturing distinguishes the two passes ReadMapping() makes. With capturing == false the call is
+   * only collecting the sources that were already active when the user pressed the button, so every
+   * active axis has to be recorded and none of the full-axis filtering below may run. With
+   * capturing == true the source list is the real recording: only one full axis may be added, and an
+   * already-captured full axis stops any further axis from joining until it has been released.
+   */
+  void CheckAllSources(unsigned readFlags, bool fullAxisOnly, std::vector<CInputSource*> &sources, std::string &mapping, std::vector<CInputSource*> &badSources, bool capturing = true);
 
   /*
    * Finds any currently activated key sources for the given keyboard number (or all keyboards if ANY_KEYBOARD supplied)
@@ -415,14 +423,14 @@ private:
    * and adds them to the sources vector, aswell as constructing the corresponding mapping(s) in the given string.
    * If fullAxisOnly is true, then only sources that represent a full axis range (eg MouseXAxis) are considered.
    */
-  void CheckMouseSources(int mseNum, bool fullAxisOnly, std::vector<CInputSource*> &sources, std::string &mapping, std::vector<CInputSource*> &badSources);
+  void CheckMouseSources(int mseNum, bool fullAxisOnly, std::vector<CInputSource*> &sources, std::string &mapping, std::vector<CInputSource*> &badSources, bool capturing = true);
 
   /*
    * Finds any currently activated joystick sources for the given joystick number (or all joysticks if ANY_JOYSTICK supplied)
    * and adds them to the sources vector, aswell as constructing the corresponding mapping(s) in the given string.
    * If fullAxisOnly is true, then only sources that represent a full axis range (eg MouseXAxis) are considered.
    */
-  void CheckJoySources(int joyNum, bool fullAxisOnly, std::vector<CInputSource*> &sources, std::string &mapping, std::vector<CInputSource*> &badSources);
+  void CheckJoySources(int joyNum, bool fullAxisOnly, std::vector<CInputSource*> &sources, std::string &mapping, std::vector<CInputSource*> &badSources, bool capturing = true);
 
   static bool ParseInt(const std::string& str, int &num);
 
@@ -646,7 +654,7 @@ protected:
   static EJoyPart GetJoyPOV(int povNum, int povDir);
 
   /*
-   * Returns the EJoyPart that represents the joystick button with the given number (0-31), or JoyUnknown otherwise.
+   * Returns the EJoyPart that represents the joystick button with the given number (0-(NUM_JOY_BUTTONS-1)), or JoyUnknown otherwise.
    */
   static EJoyPart GetJoyButton(int butNum);
 

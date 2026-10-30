@@ -13,7 +13,7 @@
 #     powershell -NoProfile -ExecutionPolicy Bypass -File Scripts\UpdateSplashSignature.ps1
 #
 # The master image stays at the project root (with the space in its name) so
-# there is one copy to edit; see the resource lines in MSVC/SupermodelResources.rc.
+# there is one copy to edit; see the resource lines in MSVC/Model3VulkanResources.rc.
 $root = Split-Path -Parent $PSScriptRoot
 $artwork = Join-Path $root 'Igloo-Garage Presents.webp'
 $header = Join-Path $root 'Src/OSD/Windows/SplashResource.h'
@@ -44,15 +44,15 @@ finally
 }
 
 $text = [System.IO.File]::ReadAllText($header)
-$pattern = '(?m)^#define\s+SUPERMODEL_SPLASH_SHA256\s+"[^"]*"'
+$pattern = '(?m)^#define\s+MODEL3VULKAN_SPLASH_SHA256\s+"[^"]*"'
 if ($text -notmatch $pattern)
 {
-    Write-Output "[splash] SUPERMODEL_SPLASH_SHA256 was not found in SplashResource.h."
+    Write-Output "[splash] MODEL3VULKAN_SPLASH_SHA256 was not found in SplashResource.h."
     exit 1
 }
 
 $updated = [System.Text.RegularExpressions.Regex]::Replace(
-    $text, $pattern, ('#define SUPERMODEL_SPLASH_SHA256 "' + $hash + '"'))
+    $text, $pattern, ('#define MODEL3VULKAN_SPLASH_SHA256 "' + $hash + '"'))
 
 if ($updated -ne $text)
 {

@@ -1,10 +1,13 @@
 /**
- ** Supermodel-VK
+ ** Model 3-Vulkan
  ** A Vulkan-focused fork of Supermodel, the Sega Model 3 arcade emulator.
- ** Copyright 2026 The Supermodel-VK authors
+ ** Copyright (C) 2026 REXABYTE SOFTWARE INC. (Igloo-Garage / Rex)
  **
- ** This file is part of Supermodel-VK, and is derived from Supermodel,
+ ** This file is part of Model 3-Vulkan, and is derived from Supermodel,
  ** Copyright 2003-2026 The Supermodel Team.
+ **
+ ** Additional Terms under GNU GPLv3 Section 7 apply to this file
+ ** (see LICENSE-ADDITIONAL-TERMS.md).
  **
  ** Supermodel is free software: you can redistribute it and/or modify it under
  ** the terms of the GNU General Public License as published by the Free
@@ -27,6 +30,7 @@
 #include "OSD/Logger.h"
 #include "OSD/Platform/Platform.h"
 #include "Util/NewConfig.h"
+#include "Version.h"
 
 #include "../Pkgs/imgui/imgui.h"
 
@@ -2202,6 +2206,18 @@ void StatsOsdBuildWindow(const Util::Config::Node& config)
 						ratio);
 			}
 		}
+
+		/*
+		 * Attribution required by LICENSE-ADDITIONAL-TERMS.md (GPL v3 Section 7(b)).
+		 *
+		 * Drawn whenever the readout is on, with no separate toggle: a fork that removes
+		 * it has removed a notice, not changed a preference.  Split over two lines so the
+		 * auto-sized panel does not become as wide as the repository URL.
+		 */
+		ImGui::Separator();
+		const ImVec4 credit(0.74f, 0.75f, 0.79f, 0.62f);
+		StatsText(credit, palette.shadow, "%s", "Model 3-Vulkan by Igloo-Garage (Rex)");
+		StatsText(credit, palette.shadow, "%s", "github.com/Igloo-Garage/Model-3-Vulkan");
 	}
 	ImGui::End();
 

@@ -1752,6 +1752,8 @@ bool CDirectInputSystem::IsJoyPOVInDir(int joyNum, int povNum, int povDir) const
 bool CDirectInputSystem::IsJoyButPressed(int joyNum, int butNum) const
 {
 	// Get joystick state for given joystick and return current button value for given button number
+	if (butNum < 0 || butNum >= 128)
+		return false;
 	return !!m_diJoyStates[joyNum].rgbButtons[butNum];
 }
 

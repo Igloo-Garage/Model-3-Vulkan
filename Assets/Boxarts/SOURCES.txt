@@ -1,5 +1,5 @@
 Boxarts downloaded from libretro/libretro-thumbnails,
-MAME/Named_Boxarts. Files are named after Supermodel-VK ROM sets.
+MAME/Named_Boxarts. Files are named after Model 3-Vulkan ROM sets.
 All files are WebP (converted from the original PNG/JPEG).
 
 bassdx.png = Sega Bass Fishing.png

@@ -6,6 +6,14 @@ Model 3-Vulkan is distributed under the **GNU General Public License v3.0**; see
 Each component remains under its own license; the original notices are kept in the corresponding
 source tree.
 
+Additional terms under GPL v3 Section 7 (author attribution and origin marking) apply to the
+original Igloo-Garage modules; see [`LICENSE-ADDITIONAL-TERMS.md`](../LICENSE-ADDITIONAL-TERMS.md).
+The project names ("Model 3-Vulkan™", "Igloo-Garage™"), icon, startup artwork and
+cabinet bezel are trademarks and brand assets of **REXABYTE SOFTWARE INC.**
+(British Columbia, Canada), covered by [`TRADEMARK.md`](../TRADEMARK.md) and not
+licensed by the GPL.  The ™ symbol denotes an unregistered / common-law mark;
+see that file for the full policy.
+
 ## Emulation core
 
 - **Supermodel** — Sega Model 3 emulator by Bart Trzynadlowski, Nik Henson, Ville Linde,

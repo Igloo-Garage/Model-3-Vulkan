@@ -695,7 +695,7 @@ CInputSource *CInputSystem::GetJoySource(int joyNum, EJoyPart joyPart)
     return m_emptySource;
 }
 
-void CInputSystem::CheckAllSources(unsigned readFlags, bool fullAxisOnly, vector<CInputSource*> &sources, string &mapping, vector<CInputSource*> &badSources)
+void CInputSystem::CheckAllSources(unsigned readFlags, bool fullAxisOnly, vector<CInputSource*> &sources, string &mapping, vector<CInputSource*> &badSources, bool capturing)
 {
   // See if should read keyboards
   if (readFlags & READ_KEYBOARD)
@@ -715,11 +715,11 @@ void CInputSystem::CheckAllSources(unsigned readFlags, bool fullAxisOnly, vector
   {
     // Check all mouse sources for input, merging devices if required
     if ((readFlags & READ_MERGE_MOUSE) || m_numMice == ANY_MOUSE)
-      CheckMouseSources(ANY_MOUSE, fullAxisOnly, sources, mapping, badSources);
+      CheckMouseSources(ANY_MOUSE, fullAxisOnly, sources, mapping, badSources, capturing);
     else
     {
       for (int mseNum = 0; mseNum < m_numMice; mseNum++)
-        CheckMouseSources(mseNum, fullAxisOnly, sources, mapping, badSources);
+        CheckMouseSources(mseNum, fullAxisOnly, sources, mapping, badSources, capturing);
     }
   }
 
@@ -728,11 +728,11 @@ void CInputSystem::CheckAllSources(unsigned readFlags, bool fullAxisOnly, vector
   {
     // Check all joystick sources, merging devices if required
     if ((readFlags & READ_MERGE_JOYSTICK) || m_numJoys == ANY_JOYSTICK)
-      CheckJoySources(ANY_JOYSTICK, fullAxisOnly, sources, mapping, badSources);
+      CheckJoySources(ANY_JOYSTICK, fullAxisOnly, sources, mapping, badSources, capturing);
     else
     {
       for (int joyNum = 0; joyNum < m_numJoys; joyNum++)
-        CheckJoySources(joyNum, fullAxisOnly, sources, mapping, badSources);
+        CheckJoySources(joyNum, fullAxisOnly, sources, mapping, badSources, capturing);
     }
   }
 }
@@ -779,8 +779,78 @@ void CInputSystem::CheckKeySources(int kbdNum, bool fullAxisOnly, vector<CInputS
   }
 }
 
-void CInputSystem::CheckMouseSources(int mseNum, bool fullAxisOnly, vector<CInputSource*> &sources, string &mapping, vector<CInputSource*> &badSources)
+void CInputSystem::CheckMouseSources(int mseNum, bool fullAxisOnly, vector<CInputSource*> &sources, string &mapping, vector<CInputSource*> &badSources, bool capturing)
 {
+  /*
+   * Full-axis capture keeps only the axis the user actually swept.
+   *
+   * Mouse X and Y are absolute positions, so whenever the pointer is away from the middle of the
+   * display both of them satisfy IsActive() - and a hand moving the mouse sideways always carries
+   * some vertical drift. Recording both produced "MOUSE_XAXIS+MOUSE_YAXIS", which
+   * CMultiInputSource::GetCombinedType() rejects as an invalid combination, so the capture never
+   * completed and the axis looked impossible to bind in the interface.
+   *
+   * The dominant axis is the one furthest from the centre of the display, measured as a fraction
+   * of that axis' own extent so the longer axis does not win by geometry alone. Only that axis may
+   * be added below; the same mouse can never contribute both halves of a full-axis pair in one
+   * capture pass.
+   */
+  int dominantAxisPart = -1;
+  if (capturing && fullAxisOnly)
+  {
+    /*
+     * A full axis recorded in an earlier pass is still waiting for the user to let go. Appending a
+     * second one - the other mouse axis, or the inverted twin of the same one - would make
+     * GetCombinedType() reject the whole capture, so nothing more may be added until it is released.
+     */
+    for (vector<CInputSource*>::iterator it = sources.begin(); it != sources.end(); ++it)
+    {
+      if ((*it)->type == SourceFullAxis)
+        return;
+    }
+
+    double bestDisplacement = -1.0;
+    for (int mseIndex = 0; mseIndex < NUM_MOUSE_PARTS; mseIndex++)
+    {
+      EMousePart msePart = (EMousePart)mseIndex;
+      int axisNum;
+      int axisDir;
+      if (!GetAxisDetails(msePart, axisNum, axisDir) || !IsFullAxis(msePart) || axisDir != AXIS_FULL)
+        continue;
+      EMousePart invPart = GetMouseAxis(axisNum, AXIS_INVERTED);
+      CInputSource *source = GetMouseSource(mseNum, msePart);
+      CInputSource *invSource = (invPart != MouseUnknown) ? GetMouseSource(mseNum, invPart) : NULL;
+      if ((source == NULL || !source->IsActive()) && (invSource == NULL || !invSource->IsActive()))
+        continue;
+      // An axis that is already shielded, or already captured, must not take the dominant slot away
+      // from the axis the user is moving now.
+      if ((source != NULL && (find(badSources.begin(), badSources.end(), source) != badSources.end() ||
+                              find(sources.begin(), sources.end(), source) != sources.end())) ||
+          (invSource != NULL && (find(badSources.begin(), badSources.end(), invSource) != badSources.end() ||
+                                 find(sources.begin(), sources.end(), invSource) != sources.end())))
+        continue;
+
+      double displacement;
+      if (axisNum == AXIS_Z)
+      {
+        // Wheel: there is no position to compare, the accumulated delta is the only magnitude.
+        displacement = std::fabs((double)GetMouseAxisValue(mseNum, axisNum)) / 100.0;
+      }
+      else
+      {
+        const double extent = (double)(axisNum == AXIS_X ? m_dispW : m_dispH);
+        const double centre = (double)(axisNum == AXIS_X ? m_dispX : m_dispY) + extent * 0.5;
+        const double value = (double)GetMouseAxisValueFloat(mseNum, axisNum);
+        displacement = extent > 0.0 ? std::fabs(value - centre) / extent : std::fabs(value);
+      }
+      if (displacement > bestDisplacement)
+      {
+        bestDisplacement = displacement;
+        dominantAxisPart = (int)msePart;
+      }
+    }
+  }
+
   // Loop through all mouse parts
   for (int mseIndex = 0; mseIndex < NUM_MOUSE_PARTS; mseIndex++)
   {
@@ -792,6 +862,49 @@ void CInputSystem::CheckMouseSources(int mseNum, bool fullAxisOnly, vector<CInpu
     // Filter axes according to fullAxisOnly
     if (isAxis && (IsFullAxis(msePart) != fullAxisOnly))
       continue;
+    if (fullAxisOnly && isAxis)
+    {
+      /*
+       * ScaleAxisValue(0, 0, 3) returns >= 2 for AXIS_FULL only on the positive half of the axis,
+       * and for AXIS_INVERTED only on the negative half. Treating them as one physical axis means a
+       * sweep in either direction is detected, a resting negative value shields the positive part as
+       * well, and a capture always binds the non-inverted part (MOUSE_XAXIS rather than
+       * MOUSE_XAXIS_INV).
+       */
+      if (axisDir != AXIS_FULL)
+        continue;
+      if (capturing && (int)msePart != dominantAxisPart)
+        continue;
+      EMousePart invPart = GetMouseAxis(axisNum, AXIS_INVERTED);
+      CInputSource *fullSrc = GetMouseSource(mseNum, msePart);
+      CInputSource *invSrc = (invPart != MouseUnknown) ? GetMouseSource(mseNum, invPart) : NULL;
+      const bool active = (fullSrc != NULL && fullSrc->IsActive()) || (invSrc != NULL && invSrc->IsActive());
+      const bool alreadySeen =
+        (fullSrc != NULL && (find(sources.begin(), sources.end(), fullSrc) != sources.end() ||
+                             find(badSources.begin(), badSources.end(), fullSrc) != badSources.end())) ||
+        (invSrc != NULL  && (find(sources.begin(), sources.end(), invSrc) != sources.end() ||
+                             find(badSources.begin(), badSources.end(), invSrc) != badSources.end()));
+      if (!active || alreadySeen || fullSrc == NULL)
+        continue;
+      if (!capturing)
+      {
+        sources.push_back(fullSrc);
+        if (invSrc != NULL && invSrc != fullSrc)
+          sources.push_back(invSrc);
+        continue;
+      }
+      const char *partName = LookupName(msePart);
+      if (sources.empty())
+        mapping.assign("MOUSE");
+      else
+        mapping.append("+MOUSE");
+      if (mseNum >= 0)
+        mapping.append(IntToString(mseNum + 1));
+      mapping.append("_");
+      mapping.append(partName);
+      sources.push_back(fullSrc);
+      continue;
+    }
     // Get mouse source for mouse number and part and test to see if it is active (but was not previously) and that it is not a "bad" source
     CInputSource *source = GetMouseSource(mseNum, msePart);
     if (source != NULL && source->IsActive() && find(sources.begin(), sources.end(), source) == sources.end() &&
@@ -812,8 +925,70 @@ void CInputSystem::CheckMouseSources(int mseNum, bool fullAxisOnly, vector<CInpu
   }
 }
 
-void CInputSystem::CheckJoySources(int joyNum, bool fullAxisOnly, vector<CInputSource*> &sources, string &mapping, vector<CInputSource*> &badSources)
+void CInputSystem::CheckJoySources(int joyNum, bool fullAxisOnly, vector<CInputSource*> &sources, string &mapping, vector<CInputSource*> &badSources, bool capturing)
 {
+  /*
+   * Mirrors CheckMouseSources(): one full axis per capture, positive direction only, and no further
+   * axis while one is still being held.
+   *
+   * A full-range pedal that rests at -32768 satisfies IsActive() on every axis it owns, so without
+   * the badSources shield a single capture would pick up every resting pedal plus the axis the user
+   * actually moved. Between several active full axes the one that has moved furthest from its own
+   * centre - normalised by its own range so a short-throw shifter does not lose to a steering wheel
+   * - is the one the user means.
+   */
+  int dominantAxisPart = -1;
+  if (capturing && fullAxisOnly)
+  {
+    for (vector<CInputSource*>::iterator it = sources.begin(); it != sources.end(); ++it)
+    {
+      if ((*it)->type == SourceFullAxis)
+        return;
+    }
+
+    // A merged (ANY_JOYSTICK) source has no single raw value, so the deviation is measured per device.
+    const int firstDev = (joyNum == ANY_JOYSTICK) ? 0 : joyNum;
+    const int lastDev = (joyNum == ANY_JOYSTICK) ? (m_numJoys > 0 ? m_numJoys : 0) : joyNum + 1;
+
+    double bestDeviation = -1.0;
+    for (int joyIndex = 0; joyIndex < NUM_JOY_PARTS; joyIndex++)
+    {
+      EJoyPart joyPart = (EJoyPart)joyIndex;
+      int axisNum;
+      int axisDir;
+      if (!GetAxisDetails(joyPart, axisNum, axisDir) || !IsFullAxis(joyPart) || axisDir != AXIS_FULL)
+        continue;
+      EJoyPart invPart = GetJoyAxis(axisNum, AXIS_INVERTED);
+      CInputSource *source = GetJoySource(joyNum, joyPart);
+      CInputSource *invSource = (invPart != JoyUnknown) ? GetJoySource(joyNum, invPart) : NULL;
+      if ((source == NULL || !source->IsActive()) && (invSource == NULL || !invSource->IsActive()))
+        continue;
+      if ((source != NULL && (find(badSources.begin(), badSources.end(), source) != badSources.end() ||
+                              find(sources.begin(), sources.end(), source) != sources.end())) ||
+          (invSource != NULL && (find(badSources.begin(), badSources.end(), invSource) != badSources.end() ||
+                                 find(sources.begin(), sources.end(), invSource) != sources.end())))
+        continue;
+
+      double deviation = 0.0;
+      for (int dev = firstDev; dev < lastDev; dev++)
+      {
+        const JoySettings *settings = GetJoySettings(dev, true);
+        const int range = settings->axisMaxVals[axisNum] - settings->axisMinVals[axisNum];
+        if (range == 0)
+          continue;
+        const double d = std::fabs((double)(GetJoyAxisValue(dev, axisNum) - settings->axisOffVals[axisNum])) /
+          (double)(range < 0 ? -range : range);
+        if (d > deviation)
+          deviation = d;
+      }
+      if (deviation > bestDeviation)
+      {
+        bestDeviation = deviation;
+        dominantAxisPart = (int)joyPart;
+      }
+    }
+  }
+
   // Loop through all joystick parts
   for (int joyIndex = 0; joyIndex < NUM_JOY_PARTS; joyIndex++)
   {
@@ -821,6 +996,44 @@ void CInputSystem::CheckJoySources(int joyNum, bool fullAxisOnly, vector<CInputS
     // Filter axes according to fullAxisOnly
     if (IsAxis(joyPart) && (IsFullAxis(joyPart) != fullAxisOnly))
       continue;
+    if (fullAxisOnly && IsAxis(joyPart))
+    {
+      int axisNum;
+      int axisDir;
+      if (!GetAxisDetails(joyPart, axisNum, axisDir) || axisDir != AXIS_FULL)
+        continue;
+      if (capturing && (int)joyPart != dominantAxisPart)
+        continue;
+      EJoyPart invPart = GetJoyAxis(axisNum, AXIS_INVERTED);
+      CInputSource *fullSrc = GetJoySource(joyNum, joyPart);
+      CInputSource *invSrc = (invPart != JoyUnknown) ? GetJoySource(joyNum, invPart) : NULL;
+      const bool active = (fullSrc != NULL && fullSrc->IsActive()) || (invSrc != NULL && invSrc->IsActive());
+      const bool alreadySeen =
+        (fullSrc != NULL && (find(sources.begin(), sources.end(), fullSrc) != sources.end() ||
+                             find(badSources.begin(), badSources.end(), fullSrc) != badSources.end())) ||
+        (invSrc != NULL  && (find(sources.begin(), sources.end(), invSrc) != sources.end() ||
+                             find(badSources.begin(), badSources.end(), invSrc) != badSources.end()));
+      if (!active || alreadySeen || fullSrc == NULL)
+        continue;
+      if (!capturing)
+      {
+        sources.push_back(fullSrc);
+        if (invSrc != NULL && invSrc != fullSrc)
+          sources.push_back(invSrc);
+        continue;
+      }
+      const char *partName = LookupName(joyPart);
+      if (sources.empty())
+        mapping.assign("JOY");
+      else
+        mapping.append("+JOY");
+      if (joyNum >= 0)
+        mapping.append(IntToString(joyNum + 1));
+      mapping.append("_");
+      mapping.append(partName);
+      sources.push_back(fullSrc);
+      continue;
+    }
     // Get joystick source for joystick number and part and test to see if it is active (but was not previously) and that it is not a "bad" source
     CInputSource *source = GetJoySource(joyNum, joyPart);
     if (source != NULL && source->IsActive() && find(sources.begin(), sources.end(), source) == sources.end() &&
@@ -908,6 +1121,25 @@ const char *CInputSystem::LookupName(EMousePart msePart)
 
 EJoyPart CInputSystem::LookupJoyPart(const string& str)
 {
+  if (StartsWithIgnoreCase(str, "BUTTON") && str.size() > 6)
+  {
+    bool allDigits = true;
+    for (size_t k = 6; k < str.size(); ++k)
+    {
+      if (!isdigit(static_cast<unsigned char>(str[k])))
+      {
+        allDigits = false;
+        break;
+      }
+    }
+    if (allDigits)
+    {
+      int butNum = 0;
+      if (ParseInt(str.substr(6), butNum) && butNum >= 1 && butNum <= NUM_JOY_BUTTONS)
+        return (EJoyPart)(JoyButton0 + (butNum - 1));
+    }
+  }
+
   for (int i = 0; s_joyParts[i].id != NULL; i++)
   {
     if (EqualsIgnoreCase(str, s_joyParts[i].id))
@@ -918,6 +1150,21 @@ EJoyPart CInputSystem::LookupJoyPart(const string& str)
 
 const char *CInputSystem::LookupName(EJoyPart joyPart)
 {
+  if (IsButton(joyPart))
+  {
+    static char s_buttonNames[NUM_JOY_BUTTONS][16];
+    static bool s_initialized = false;
+    if (!s_initialized)
+    {
+      for (int i = 0; i < NUM_JOY_BUTTONS; i++)
+        snprintf(s_buttonNames[i], sizeof(s_buttonNames[i]), "BUTTON%d", i + 1);
+      s_initialized = true;
+    }
+    int bIndex = GetButtonNumber(joyPart);
+    if (bIndex >= 0 && bIndex < NUM_JOY_BUTTONS)
+      return s_buttonNames[bIndex];
+  }
+
   for (int i = 0; s_joyParts[i].id != NULL; i++)
   {
     if (joyPart == s_joyParts[i].joyPart)
@@ -1463,7 +1710,7 @@ bool CInputSystem::GetPOVDetails(EJoyPart joyPart, int &povNum, int &povDir)
 
 bool CInputSystem::IsButton(EJoyPart joyPart)
 {
-  return joyPart >= JoyButton0 && joyPart <= JoyButton31;
+  return joyPart >= JoyButton0 && joyPart <= JoyButtonLast;
 }
 
 int CInputSystem::GetButtonNumber(EJoyPart joyPart)
@@ -1866,7 +2113,10 @@ bool CInputSystem::ReadMapping(char* buffer, unsigned bufSize, bool fullAxisOnly
     if (!Poll())
         goto Cancelled;
 
-    CheckAllSources(readFlags, fullAxisOnly, badSources, badMapping, sources);
+    // Collecting only: everything already active must be shielded, so no dominant-axis filter runs
+    // here (capturing == false). Otherwise a resting pedal or a pointer parked in a corner would be
+    // missed and the very first loop iteration would record it as the user's input.
+    CheckAllSources(readFlags, fullAxisOnly, badSources, badMapping, sources, false);
 
     // Loop until have received meaningful inputs
     for (;;)
@@ -1889,7 +2139,7 @@ bool CInputSystem::ReadMapping(char* buffer, unsigned bufSize, bool fullAxisOnly
         }
 
         // Check all active sources
-        CheckAllSources(readFlags, fullAxisOnly, sources, mapping, badSources);
+        CheckAllSources(readFlags, fullAxisOnly, sources, mapping, badSources, true);
 
         // When some inputs have been activated, keep looping until they have all been released again.
         if (!sources.empty())

@@ -1,4 +1,4 @@
-// Supermodel resources.
+// Model 3-Vulkan resources.
 //
 // Two things live here: the application icon and the start-up artwork. The manifest is embedded
 // by the linker (/MANIFEST with AdditionalManifestFiles), not from this file, so that it stays a
@@ -18,11 +18,11 @@
 // The picture itself is the master at the project root - edit that one copy, then rebuild;
 // Scripts/UpdateSplashSignature.ps1 refreshes the hash and build.bat runs it for you.
 
-#define IDI_SUPERMODEL 101
+#define IDI_MODEL3VULKAN 101
 
 #include "..\\Src\\OSD\\Windows\\SplashResource.h"
 
-IDI_SUPERMODEL ICON "..\\output.ico"
+IDI_MODEL3VULKAN ICON "..\\output.ico"
 
 // Quoted because the master's name contains a space; the resource compiler takes the whole
 // string as the path.

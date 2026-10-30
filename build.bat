@@ -4,7 +4,7 @@ rem  build.bat - build Model 3-Vulkan + Supermodel-LegacyOG and assemble a folde
 rem
 rem  Produces:
 rem
-rem      dist\Supermodel-VK\
+rem      dist\Model-3-Vulkan\
 rem          Supermodel-LegacyOG.exe <- SDL2 build: OpenGL renderer only, maximum
 rem                                     peripheral compatibility (DirectInput / Raw Input /
 rem                                     XInput, full force feedback)
@@ -59,7 +59,16 @@ setlocal EnableExtensions EnableDelayedExpansion
 
 set "ROOT=%~dp0"
 if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
-set "DIST=%ROOT%\dist\Supermodel-VK"
+set "DIST=%ROOT%\dist\Model-3-Vulkan"
+
+rem The distribution folder was renamed from dist\Supermodel-VK. If the old folder is still
+rem there and the new one does not exist, stop instead of assembling a second, empty
+rem distribution - that would leave the user's saves, NVRAM and settings behind.
+if exist "%ROOT%\dist\Supermodel-VK" if not exist "%DIST%" (
+    echo [ERROR] dist\Supermodel-VK still exists.
+    echo         Close the emulator and the editor, then rename it to dist\Model-3-Vulkan.
+    exit /b 1
+)
 
 rem Name of the shipped executable. The Visual Studio project and the CMake target
 rem already carry this name; the copy below is what lands in dist\.
@@ -161,7 +170,7 @@ rem ---- Close a running copy so the linker can replace the exe ----------------
 rem Both names are checked: the Visual Studio build produces Supermodel-LegacyOG.exe while the
 rem assembled distribution is the same name, so the developer's copy and the one they handed out
 rem are different processes and either can be the one holding the file open.
-for %%N in (Supermodel-LegacyOG.exe Supermodel-VK.exe Model3-Vulkan.exe Supermodel-VK-SDL3.exe) do (
+for %%N in (Supermodel-LegacyOG.exe Model3-Vulkan.exe) do (
     tasklist /fi "imagename eq %%N" 2>nul | findstr /i /c:"%%N" >nul
     if not errorlevel 1 (
         echo Closing a running %%N so the build can overwrite it...
@@ -320,7 +329,7 @@ rem The Vulkan build keeps its own settings file (<exe stem>.ini, now Model3-Vul
 rem user file just like Supermodel.ini, and without this a rebuild would silently reset every
 rem Vulkan-only option by reseeding it from the global file.  The previous fork name is kept too,
 rem so an installation that has not run the renamed executable yet can still be migrated.
-for %%F in (Model3-Vulkan.ini Supermodel-VK-SDL3.ini) do (
+for %%F in (Model3-Vulkan.ini) do (
     if exist "%DIST%\Data\Config\%%F" (
         mkdir "%KEEPDIR%\Config" 2>nul
         copy /y "%DIST%\Data\Config\%%F" "%KEEPDIR%\Config\%%F" >nul
@@ -359,7 +368,7 @@ if defined HAVEKEEP (
         if exist "%KEEPDIR%\Assets\%%D" xcopy /e /i /q /y "%KEEPDIR%\Assets\%%D" "%DIST%\Data\Assets\%%D\" >nul
     )
     if exist "%KEEPDIR%\Config\Supermodel.ini" copy /y "%KEEPDIR%\Config\Supermodel.ini" "%DIST%\Data\Config\Supermodel.ini" >nul
-    for %%F in (Model3-Vulkan.ini Supermodel-VK-SDL3.ini) do (
+    for %%F in (Model3-Vulkan.ini) do (
         if exist "%KEEPDIR%\Config\%%F" copy /y "%KEEPDIR%\Config\%%F" "%DIST%\Data\Config\%%F" >nul
     )
     for /d %%R in ("%KEEPDIR%\rom*") do (
@@ -453,8 +462,8 @@ if defined BEZEL (
     echo Bezel    : not found ^(no backdrop will be drawn^)
 )
 
-rem Documentation travels with the build, but inside Data\ so the top level stays
-rem a single file.
+rem Documentation and legal notices travel with the build inside Data\ so the top level
+rem stays clean for the player. README.txt at the top level points into Data\ for them.
 if exist "%ROOT%\Docs\LICENSE.txt" copy /y "%ROOT%\Docs\LICENSE.txt" "%DIST%\Data\" >nul
 if exist "%ROOT%\Docs\README from The Supermodel Team.txt" copy /y "%ROOT%\Docs\README from The Supermodel Team.txt" "%DIST%\Data\" >nul
 
@@ -497,11 +506,20 @@ if exist "%PACKAGE_README%" (
     echo Readme   : not found ^(Docs\README-PACKAGE.txt^)
 )
 
-rem The package README points at NOTICE.md for third-party attributions; keeping it beside
-rem README.txt is what makes that pointer resolve without the source tree.
-if exist "%ROOT%\NOTICE.md" (
-    copy /y "%ROOT%\NOTICE.md" "%DIST%\NOTICE.md" >nul
-    for %%N in ("%ROOT%\NOTICE.md") do echo Notice   : NOTICE.md  ^(%%~zN bytes^)
+rem Legal and third-party notices live in Data\ alongside LICENSE.txt (see README.txt).
+rem NOTICE.md is sourced from Docs\ because it is the third-party/upstream credit list, not one of
+rem this project's own licence documents - those stay at the top level.
+if exist "%ROOT%\Docs\NOTICE.md" (
+    copy /y "%ROOT%\Docs\NOTICE.md" "%DIST%\Data\NOTICE.md" >nul
+    for %%N in ("%ROOT%\Docs\NOTICE.md") do echo Notice   : Data\NOTICE.md  ^(%%~zN bytes^)
+)
+if exist "%ROOT%\LICENSE-ADDITIONAL-TERMS.md" (
+    copy /y "%ROOT%\LICENSE-ADDITIONAL-TERMS.md" "%DIST%\Data\LICENSE-ADDITIONAL-TERMS.md" >nul
+    for %%N in ("%ROOT%\LICENSE-ADDITIONAL-TERMS.md") do echo Terms    : Data\LICENSE-ADDITIONAL-TERMS.md  ^(%%~zN bytes^)
+)
+if exist "%ROOT%\TRADEMARK.md" (
+    copy /y "%ROOT%\TRADEMARK.md" "%DIST%\Data\TRADEMARK.md" >nul
+    for %%N in ("%ROOT%\TRADEMARK.md") do echo Mark     : Data\TRADEMARK.md  ^(%%~zN bytes^)
 )
 
 rem ---- User manual -------------------------------------------------------------
@@ -551,7 +569,7 @@ rem not what that folder is for: MSVC\x64\Release\ now holds what msbuild produc
 rem The convenience was also only ever needed while debugging, and the assembled folder is the thing
 rem meant to be run.
 rem
-rem To run the build output directly, launch it with dist\Supermodel-VK as the working directory, or
+rem To run the build output directly, launch it with dist\Model-3-Vulkan as the working directory, or
 rem point the debugger's working directory there. %BIN% is still used below, because it is where the
 rem exe that gets assembled into dist\ comes from.
 
@@ -575,7 +593,7 @@ mkdir "%STAGE%" 2>nul
 
 rem One line rather than caret continuations: robocopy inside a parenthesised block with line
 rem continuations is a reliable way to produce a command cmd interprets differently than intended.
-robocopy "%DIST%" "%STAGE%" /E /XD "%DIST%\Data\Saves" "%DIST%\Data\Saves_Legacy" "%DIST%\Data\Screenshots" "%DIST%\Data\NVRAM" "%DIST%\Data\Cache" "%DIST%\Data\Analysis" "%DIST%\Data\Assets\HDTextures" "%DIST%\Data\Assets\DumpTextures" /XF "*.log" "Supermodel.ini" "Model3-Vulkan.ini" "Supermodel-VK-SDL3.ini" "*.zip" /NFL /NDL /NJH /NJS /NP >nul
+robocopy "%DIST%" "%STAGE%" /E /XD "%DIST%\Data\Saves" "%DIST%\Data\Saves_Legacy" "%DIST%\Data\Screenshots" "%DIST%\Data\NVRAM" "%DIST%\Data\Cache" "%DIST%\Data\Analysis" "%DIST%\Data\Assets\HDTextures" "%DIST%\Data\Assets\DumpTextures" /XF "*.log" "Supermodel.ini" "Model3-Vulkan.ini" "*.zip" /NFL /NDL /NJH /NJS /NP >nul
 if errorlevel 8 (
     echo [ERROR] robocopy could not stage the release copy.
     exit /b 1

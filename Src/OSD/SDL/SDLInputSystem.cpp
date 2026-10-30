@@ -514,12 +514,9 @@ bool CSDLInputSystem::OpenJoystickAt(int joyNum)
   if (!OSD::Platform::GetGamepadInfo(joyNum, &info) || info.id == OSD::Platform::kInvalidGamepad)
     return false;
 
-  if (m_useGameController && !info.isGamepad)
-  {
-    InfoLog("Joystick %d is not a recognised game controller; skipping it. Per-device bindings "
-            "need an input system that reports raw buttons.\n", joyNum + 1);
-    return false;
-  }
+  // Every device is opened, whether SDL classifies it as a game controller or not: a standalone
+  // shifter or handbrake is a raw joystick, and skipping it made those devices impossible to bind in
+  // the default "sdlgamepad" mode. Standard layout below is then chosen per device.
 
   // Already open? A hot-plug event can arrive for a device enumerated at start-up, and opening it
   // twice would add a second entry for the same pad.
@@ -539,12 +536,17 @@ bool CSDLInputSystem::OpenJoystickAt(int joyNum)
   strncpy(joyDetails.name, info.name, MAX_NAME_LENGTH);
   joyDetails.name[MAX_NAME_LENGTH] = '\0';
 
-  if (m_useGameController)
+  // A controller is read through SDL's standard layout; anything else through its own raw axes,
+  // hats and buttons. InfoLog below still reports the raw counts so the two cases stay diagnosable.
+  const bool useStandard = m_useGameController && info.isGamepad;
+  if (useStandard)
   {
     // Same figure the SDL2 game-controller path reports: the standard layout, not the raw device.
+    // 0..16 are the standard buttons; anything above that is the device's own numbering, which some
+    // pads expose in addition to the mapping.
     joyDetails.numAxes = 6;
     joyDetails.numPOVs = 4;
-    joyDetails.numButtons = 16;
+    joyDetails.numButtons = info.numButtons > 17 ? info.numButtons : 17;
   }
   else
   {
@@ -568,6 +570,7 @@ bool CSDLInputSystem::OpenJoystickAt(int joyNum)
   m_joyDetails.push_back(joyDetails);
   m_instanceIds.push_back(info.id);
   m_gamepadIds.push_back(info.id);
+  m_isGamepad.push_back(info.isGamepad);
   m_padVibration.push_back(0.0f);
 
   // One line per device, because "the pad does nothing" has two very different causes: SDL never saw
@@ -649,12 +652,15 @@ static void LogPadChanges(int pad, bool standardLayout,
   if (!s_logPadInput)
     return;
 
-  const uint32_t rawChanged = before.buttons ^ after.buttons;
-  for (unsigned b = 0; b < OSD::Platform::kMaxGamepadButtons; b++)
+  const auto rawChanged = before.buttons ^ after.buttons;
+  if (rawChanged.any())
   {
-    if (rawChanged & (1u << b))
-      InfoLog("Input: pad %d raw button %u %s.", pad + 1, b,
-        (after.buttons & (1u << b)) ? "down" : "up");
+    for (unsigned b = 0; b < OSD::Platform::kMaxGamepadButtons; b++)
+    {
+      if (rawChanged.test(b))
+        InfoLog("Input: pad %d raw button %u %s.", pad + 1, b,
+          after.buttons.test(b) ? "down" : "up");
+    }
   }
 
   if (standardLayout)
@@ -704,7 +710,8 @@ void CSDLInputSystem::RefreshGamepadStates()
     OSD::Platform::GamepadState next;
     if (!OSD::Platform::GetGamepadState(m_gamepadIds[i], &next))
       next = OSD::Platform::GamepadState();
-    LogPadChanges((int)i, m_useGameController, m_gamepadStates[i], next);
+    LogPadChanges((int)i, m_useGameController && i < m_isGamepad.size() && m_isGamepad[i],
+      m_gamepadStates[i], next);
     m_gamepadStates[i] = next;
   }
 }
@@ -763,6 +770,8 @@ void CSDLInputSystem::CloseJoystickEntry(int index)
 
   OSD::Platform::CloseGamepad(m_gamepadIds[index]);
   m_gamepadIds.erase(m_gamepadIds.begin() + index);
+  if (index < (int)m_isGamepad.size())
+    m_isGamepad.erase(m_isGamepad.begin() + index);
   if (index < (int)m_padVibration.size())
     m_padVibration.erase(m_padVibration.begin() + index);
   if (index < (int)m_gamepadStates.size())
@@ -1037,8 +1046,10 @@ int CSDLInputSystem::GetJoyAxisValue(int joyNum, int axisNum) const
   if (joyNum >= (int)m_gamepadStates.size())
     return 0;
   const OSD::Platform::GamepadState& state = m_gamepadStates[joyNum];
+  const bool useStandard =
+    m_useGameController && joyNum >= 0 && joyNum < (int)m_isGamepad.size() && m_isGamepad[joyNum];
 
-  if (m_useGameController)
+  if (useStandard)
   {
     switch (axisNum) {
       case AXIS_X:  return (int)(state.standardAxes[(unsigned)OSD::Platform::PadAxis::LeftX] * 32767.0f);
@@ -1084,8 +1095,10 @@ bool CSDLInputSystem::IsJoyPOVInDir(int joyNum, int povNum, int povDir) const
   if (joyNum >= (int)m_gamepadStates.size())
     return false;
   const OSD::Platform::GamepadState& state = m_gamepadStates[joyNum];
+  const bool useStandard =
+    m_useGameController && joyNum >= 0 && joyNum < (int)m_isGamepad.size() && m_isGamepad[joyNum];
 
-  if (m_useGameController)
+  if (useStandard)
   {
     using OSD::Platform::PadButton;
     switch (povDir)
@@ -1151,8 +1164,10 @@ bool CSDLInputSystem::IsJoyButPressed(int joyNum, int butNum) const
   if (joyNum >= (int)m_gamepadStates.size())
     return false;
   const OSD::Platform::GamepadState& state = m_gamepadStates[joyNum];
+  const bool useStandard =
+    m_useGameController && joyNum >= 0 && joyNum < (int)m_isGamepad.size() && m_isGamepad[joyNum];
 
-  if (m_useGameController)
+  if (useStandard && butNum >= 0 && butNum <= 16)
   {
     /*
      * Same button order the SDL2 path exposes, so an existing JOY1_BUTTONn binding keeps meaning
@@ -1187,7 +1202,7 @@ bool CSDLInputSystem::IsJoyButPressed(int joyNum, int butNum) const
 
   if (butNum < 0 || butNum >= (int)OSD::Platform::kMaxGamepadButtons)
     return false;
-  return !!(state.buttons & (1u << butNum));
+  return state.buttons.test(butNum);
 #else
   // Get current joystick button state for given joystick and button number from SDL
   if (m_useGameController)

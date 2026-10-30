@@ -18,9 +18,9 @@ if (Test-Path $header)
     foreach ($line in (Get-Content $header))
     {
         # Anchored to the start of the line, and to the name being the thing defined: other lines in
-        # the header mention SUPERMODEL_FORK_VERSION (SUPERMODEL_TITLE_FULL is assembled from it), and
+        # the header mention MODEL3VULKAN_VERSION (MODEL3VULKAN_TITLE_FULL is assembled from it), and
         # an unanchored match could read the wrong one.
-        if ($line -match '^\s*#define\s+SUPERMODEL_FORK_VERSION\s+"([^"]+)"') { $ver = $Matches[1] }
+        if ($line -match '^\s*#define\s+MODEL3VULKAN_VERSION\s+"([^"]+)"') { $ver = $Matches[1] }
     }
 }
 

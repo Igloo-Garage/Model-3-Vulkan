@@ -29,7 +29,15 @@ import pathlib, sys
 spv, header, name = sys.argv[1:]
 data = pathlib.Path(spv).read_bytes()
 words = [int.from_bytes(data[i:i+4], "little") for i in range(0, len(data), 4)]
-lines = ["#pragma once", "#include <cstddef>", "#include <cstdint>", f"static const uint32_t {name}_spv[] = {{"]
+lines = [
+    "/*",
+    " * Model 3-Vulkan - generated SPIR-V header. Do not edit; regenerate with Scripts/CompileVulkanShaders.sh.",
+    " * Copyright (C) 2026 REXABYTE SOFTWARE INC. (Igloo-Garage / Rex)",
+    " * Additional Terms under GNU GPLv3 Section 7 apply to this file (see LICENSE-ADDITIONAL-TERMS.md).",
+    " */",
+    "#pragma once", "#include <cstddef>", "#include <cstdint>",
+    f"static const uint32_t {name}_spv[] = {{",
+]
 for i in range(0, len(words), 8):
     lines.append("".join(f"0x{w:08x}," for w in words[i:i+8]))
 lines.append("};")

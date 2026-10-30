@@ -83,6 +83,17 @@ private:
 	std::vector<OSD::Platform::GamepadId> m_gamepadIds;
 
 	/*
+	 * Whether each entry is a device SDL recognises as a game controller, index-aligned with
+	 * m_gamepadIds.
+	 *
+	 * "sdlgamepad" used to skip anything that was not a game controller, which left a standalone
+	 * shifter or handbrake unusable in the default mode. Both kinds are now opened together, so
+	 * every lookup has to know which one it is talking to: a controller is read through the standard
+	 * layout, a raw device through its own axes, hats and buttons.
+	 */
+	std::vector<bool> m_isGamepad;
+
+	/*
 	 * One state snapshot per open device, refreshed once per frame by Poll().
 	 *
 	 * Platform::GetGamepadState() reads the device: every axis, every button, every hat. Calling it

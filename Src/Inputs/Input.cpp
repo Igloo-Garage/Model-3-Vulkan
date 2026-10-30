@@ -167,8 +167,19 @@ void CInput::ResetToDefaultMapping()
 
 void CInput::LoadFromConfig(const Util::Config::Node &config)
 {
-	// See if input is configurable
-	if (IsConfigurable())
+	/*
+	 * UI actions are read as well, which is what makes "InputUIExit", "InputUISaveState" and the
+	 * rest configurable from the INI file. A cabinet or a front end such as RetroBat writes those
+	 * keys itself and has no way to open this emulator's Controls page, so refusing to read them
+	 * left its hotkeys silently ignored.
+	 *
+	 * IsConfigurable() deliberately still excludes UI inputs from the Controls page and from
+	 * StoreToConfig(), so the table stays free of them and a preset apply never overwrites what
+	 * the user wrote in the file. Only virtual inputs - ones computed from other inputs, with no
+	 * mapping of their own - are skipped here. When a key is absent the hard-coded default in
+	 * Inputs.cpp remains in force.
+	 */
+	if (!IsVirtual())
 	{
 		// If so, check INI file for mapping string
 		std::string key("Input");

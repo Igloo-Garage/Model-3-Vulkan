@@ -51,8 +51,8 @@ ESourceType CMultiInputSource::GetCombinedType(vector<CInputSource*> &sources)
 		allSwitches = false;
 		if ((*it)->type == SourceFullAxis)
 		{
-			if (hasHalfAxis)
-				return SourceInvalid;  // A half-axis and full-axis combined makes the whole lot invalid
+			if (hasHalfAxis || hasFullAxis)
+				return SourceInvalid;  // Two full axes (or a full and a half axis) cannot be ANDed together
 			hasFullAxis = true;
 		}
 		else if ((*it)->type == SourceHalfAxis)

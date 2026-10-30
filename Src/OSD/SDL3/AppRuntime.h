@@ -1,10 +1,13 @@
 /**
- ** Supermodel-VK
+ ** Model 3-Vulkan
  ** A Vulkan-focused fork of Supermodel, the Sega Model 3 arcade emulator.
- ** Copyright 2026 The Supermodel-VK authors
+ ** Copyright (C) 2026 REXABYTE SOFTWARE INC. (Igloo-Garage / Rex)
  **
- ** This file is part of Supermodel-VK, and is derived from Supermodel,
+ ** This file is part of Model 3-Vulkan, and is derived from Supermodel,
  ** Copyright 2003-2026 The Supermodel Team.
+ **
+ ** Additional Terms under GNU GPLv3 Section 7 apply to this file
+ ** (see LICENSE-ADDITIONAL-TERMS.md).
  **
  ** Supermodel is free software: you can redistribute it and/or modify it under
  ** the terms of the GNU General Public License as published by the Free
@@ -28,8 +31,8 @@
  * Model 3-Vulkan and Supermodel-LegacyOG are separate processes with separate
  * settings.  The Vulkan build therefore binds its configuration file to its own
  * executable name (Model3-Vulkan.exe -> Model3-Vulkan.ini) instead of sharing the
- * historical Supermodel.ini.  On first run it seeds that file from the previous
- * fork settings file (Supermodel-VK-SDL3.ini) or, failing that, Supermodel.ini.
+ * historical Supermodel.ini.  On first run it seeds that file from the shared
+ * Supermodel.ini written by the OpenGL build.
  * The directory still comes from FileSystemPath, so the Data/Config and XDG layouts keep their
  * existing rules.
  *
