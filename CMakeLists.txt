@@ -891,27 +891,28 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/HostCore/Model3VulkanHostCore.csproj")
         endif()
 
         #
-        # Native AOT hands clang the runner's SDK minimum unless told otherwise, so a publish on
-        # macos-latest produced a dylib marked "built for macOS 14.0". macOS 13 then refuses it at
-        # dlopen() time ("Symbol not found: _swift_getTypeByMangledNameInContext2 ... built for
-        # macOS 14.0 which is newer than running OS") and .zst saves are silently unavailable.
-        # clang honours MACOSX_DEPLOYMENT_TARGET, so pin it to the same target as the executable.
+        # Native AOT defaults AppleMinOSVersion to 14.0 on osx (see
+        # Microsoft.NETCore.Native.Unix.targets), so a publish on macos-latest produced a dylib
+        # marked "built for macOS 14.0". macOS 13 then refuses it at dlopen() time ("Symbol not
+        # found: _swift_getTypeByMangledNameInContext2 ... built for macOS 14.0 which is newer than
+        # running OS") and .zst saves are silently unavailable. Pin it to the executable's target.
         #
         if(APPLE)
             if(CMAKE_OSX_DEPLOYMENT_TARGET)
-                set(hostcore_env ${CMAKE_COMMAND} -E env
-                    "MACOSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET}")
+                set(hostcore_minos "${CMAKE_OSX_DEPLOYMENT_TARGET}")
             else()
-                set(hostcore_env ${CMAKE_COMMAND} -E env "MACOSX_DEPLOYMENT_TARGET=13.3")
+                set(hostcore_minos "13.3")
             endif()
+            set(hostcore_args "-p:AppleMinOSVersion=${hostcore_minos}")
         else()
-            set(hostcore_env "")
+            set(hostcore_args "")
         endif()
 
         add_custom_target(hostcore
-            COMMAND ${hostcore_env} ${DOTNET_EXECUTABLE} publish
+            COMMAND ${DOTNET_EXECUTABLE} publish
                 "${CMAKE_SOURCE_DIR}/HostCore/Model3VulkanHostCore.csproj"
                 -c Release -r ${hostcore_rid}
+                ${hostcore_args}
                 -o "${CMAKE_SOURCE_DIR}/HostCore/publish"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${CMAKE_SOURCE_DIR}/HostCore/publish/${hostcore_published}"
