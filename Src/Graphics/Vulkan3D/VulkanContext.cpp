@@ -338,19 +338,31 @@ bool CVulkanContext::CreateInstance()
 		return false;
 	}
 	/*
-	 * VK_KHR_portability_enumeration is contributed by a Vulkan loader sitting in front of MoltenVK:
-	 * the loader synthesises it from the ICD's "is_portability_driver" flag. The MoltenVK dylib
-	 * that ships in Frameworks/ does not list the extension itself, and volk opens that dylib
-	 * directly, so requesting it unconditionally made vkCreateInstance fail with
-	 * VK_ERROR_EXTENSION_NOT_PRESENT (-7) on macOS. Add the extension - and the matching instance
-	 * flag, which is only legal together with it - when the implementation really advertises it;
-	 * that keeps the developer case (a system loader) working as well.
+	 * SDL's Cocoa backend always lists VK_KHR_portability_enumeration. That extension belongs to the
+	 * Vulkan loader - MoltenVK does not export it - and volk opens Frameworks/libMoltenVK.dylib
+	 * directly here, so passing SDL's list through unchanged made vkCreateInstance fail with
+	 * VK_ERROR_EXTENSION_NOT_PRESENT (-7) in the renderer, even after the preflight was fixed.
+	 * Keep the name only when the implementation advertises it (then the matching flag is legal and
+	 * needed for a loader to list the portability driver), and drop it otherwise.
 	 */
 	bool portabilityEnumeration = false;
 #if defined(__APPLE__)
+	const auto isPortabilityName = [](const char* name)
+	{
+		return std::strcmp(name, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0;
+	};
 	portabilityEnumeration = LayerProvidesInstanceExtension(nullptr, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
 	if (portabilityEnumeration)
-		extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+	{
+		if (std::none_of(extensions.begin(), extensions.end(), isPortabilityName))
+			extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+	}
+	else
+	{
+		extensions.erase(
+			std::remove_if(extensions.begin(), extensions.end(), isPortabilityName),
+			extensions.end());
+	}
 #endif
 	// Everything below this point is optional and must be removed as a block if the validation layer
 	// cannot be created.
