@@ -1,10 +1,13 @@
 /**
- ** Supermodel-VK
+ ** Model 3-Vulkan
  ** A Vulkan-focused fork of Supermodel, the Sega Model 3 arcade emulator.
- ** Copyright 2026 The Supermodel-VK authors
+ ** Copyright (C) 2026 REXABYTE SOFTWARE INC. (Igloo-Garage / Rex)
  **
- ** This file is part of Supermodel-VK, and is derived from Supermodel,
+ ** This file is part of Model 3-Vulkan, and is derived from Supermodel,
  ** Copyright 2003-2026 The Supermodel Team.
+ **
+ ** Additional Terms under GNU GPLv3 Section 7 apply to this file
+ ** (see LICENSE-ADDITIONAL-TERMS.md).
  **
  ** Supermodel is free software: you can redistribute it and/or modify it under
  ** the terms of the GNU General Public License as published by the Free
@@ -298,7 +301,7 @@ bool ArtworkMatchesBuild(const std::vector<std::uint8_t>& artwork)
         return false;
 
     const std::string actual = Sha256Hex(artwork);
-    std::string expected(SUPERMODEL_SPLASH_SHA256);
+    std::string expected(MODEL3VULKAN_SPLASH_SHA256);
     std::transform(expected.begin(), expected.end(), expected.begin(),
         [](char c) { return (char)std::tolower((unsigned char)c); });
 
@@ -452,9 +455,12 @@ bool DecodeArtwork(std::vector<std::uint8_t>& fileBytes, int boxWidth, int boxHe
  * restored afterwards rather than trusted.
  */
 void DrawCaption(std::uint8_t* canvas, HDC memory, int width, int height,
-    const std::wstring& caption, bool official, int metricHeight)
+    const std::wstring& firstLine, const std::wstring& secondLine, bool official, int metricHeight)
 {
-    const int fontSize = (std::max)(14, metricHeight / 38);
+    // Smaller than the old single-line caption (metricHeight / 38): the second line is a
+    // repository URL and a licence tag, and at the old size it would run into the edge of a
+    // 1080p splash.  Two lines at this size fit the same square without clipping either one.
+    const int fontSize = (std::max)(13, metricHeight / 48);
     const int edge = (std::max)(16, metricHeight / 28);
 
     HFONT font = CreateFontW(-fontSize, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
@@ -465,10 +471,23 @@ void DrawCaption(std::uint8_t* canvas, HDC memory, int width, int height,
 
     const HGDIOBJ previousFont = SelectObject(memory, font);
     SetBkMode(memory, TRANSPARENT);
-    SetTextColor(memory, official ? RGB(208, 210, 218) : RGB(255, 110, 110));
 
-    RECT area = { edge, height - edge - fontSize * 2, width - edge, height - edge };
-    DrawTextW(memory, caption.c_str(), -1, &area,
+    /*
+     * Two lines, because one could not carry both the credit and the licence.
+     * The lower line is the repository and licence notice and is deliberately
+     * dimmer; the upper line is the author credit, or the red warning a
+     * rebranded binary shows when its artwork no longer matches the hash this
+     * build recorded.  Both are protected by LICENSE-ADDITIONAL-TERMS.md
+     * (GPL v3 Section 7(b)), so neither is optional.
+     */
+    RECT second = { edge, height - edge - fontSize * 2, width - edge, height - edge };
+    SetTextColor(memory, RGB(164, 166, 178));
+    DrawTextW(memory, secondLine.c_str(), -1, &second,
+        DT_CENTER | DT_BOTTOM | DT_SINGLELINE | DT_NOPREFIX);
+
+    RECT first = { edge, height - edge - fontSize * 4, width - edge, height - edge - fontSize * 2 };
+    SetTextColor(memory, official ? RGB(208, 210, 218) : RGB(255, 110, 110));
+    DrawTextW(memory, firstLine.c_str(), -1, &first,
         DT_CENTER | DT_BOTTOM | DT_SINGLELINE | DT_NOPREFIX);
 
     SelectObject(memory, previousFont);
@@ -492,7 +511,7 @@ std::wstring Widen(const std::string& text)
 
 /* ---------------- The window ---------------------------------------------- */
 
-const wchar_t kSplashClass[] = L"SupermodelVKStartupSplash";
+const wchar_t kSplashClass[] = L"Model3VulkanStartupSplash";
 
 HWND g_splashWindow = nullptr;
 
@@ -665,11 +684,16 @@ bool ShowStartupSplash(OSD::Platform::Window* window, bool coverMonitor)
 
         // No version here on purpose: the splash is fixed artwork and the version changes every
         // release, while the build is already identified in the title bar, the console banner and
-        // the About line. This line carries the author credit and the hash tripwire, not the number.
-        const std::string caption = std::string(SUPERMODEL_TITLE) +
-            (official ? "  -  Developed by Rex" : "  -  UNOFFICIAL BUILD");
+        // the About line. These lines carry the author credit, the repository and the hash
+        // tripwire, not the number. A rebranded binary keeps the original author on screen and is
+        // marked as an unofficial modified build.
+        const std::string credit = std::string(MODEL3VULKAN_TITLE) +
+            (official ? "  -  Developed by Rex (Igloo-Garage)"
+                      : "  -  UNOFFICIAL MODIFIED BUILD (Original by Igloo-Garage)");
+        const std::string legal = std::string(MODEL3VULKAN_REPO_URL) + "  |  " +
+            MODEL3VULKAN_LEGAL_SHORT;
         DrawCaption(static_cast<std::uint8_t*>(bits), memory, width, height,
-            Widen(caption), official, side);
+            Widen(credit), Widen(legal), official, side);
 
         if (!RegisterSplashClass())
         {

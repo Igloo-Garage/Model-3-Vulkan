@@ -10,7 +10,7 @@ This script produces the three things that do work:
 Usage, from the project root:
 
     python Scripts/make_aspect_comparison.py native.png widescreen.png
-    python Scripts/make_aspect_comparison.py native.png widescreen.png --out Docs/Images
+    python Scripts/make_aspect_comparison.py native.png widescreen.png --out Docs/images
 
 Both images keep their own aspect ratio and are scaled to the same width, so the height
 difference in the stack is the aspect-ratio difference.

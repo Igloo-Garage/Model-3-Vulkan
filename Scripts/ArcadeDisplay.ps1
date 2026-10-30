@@ -132,7 +132,7 @@ $StatePath = Join-Path $PSScriptRoot 'arcade-display-state.json'
 # ---------------------------------------------------------------------------
 $Text = if ($Lang -eq 'zh') {
     @{
-        Title    = 'Supermodel-VK - 街机刷新率显示助手'
+        Title    = 'Model 3-Vulkan - 街机刷新率显示助手'
         Intro    = @(
             '本工具用于把显示器切到 Model 3 原生的 57.524Hz，并在退出后恢复桌面。',
             '下面列出所有可用模式，标绿的是能承载 57.524Hz 的（57 或 58Hz）。',
@@ -151,7 +151,7 @@ $Text = if ($Lang -eq 'zh') {
     }
 } else {
     @{
-        Title    = 'Supermodel-VK - arcade display helper'
+        Title    = 'Model 3-Vulkan - arcade display helper'
         Intro    = @(
             'Switches the display to the Model 3 native 57.524 Hz and restores the desktop afterwards.',
             'Below is every available mode; the ones marked green can carry 57.524 Hz (57 or 58 Hz).',
@@ -491,8 +491,8 @@ function Find-Supermodel
     # a script that only exists in the repository makes that an instruction nobody can follow.
     #
     # Distribution layout nests it one level down, beside the program:
-    #     Supermodel-VK\Model3-Vulkan.exe
-    #     Supermodel-VK\Scripts\ArcadeDisplay.ps1
+    #     Model-3-Vulkan\Model3-Vulkan.exe
+    #     Model-3-Vulkan\Scripts\ArcadeDisplay.ps1
     # A checkout puts the executable under MSVC\ instead, which is the fallback below.
     $parent = Resolve-Path (Join-Path $PSScriptRoot '..')
 
@@ -500,7 +500,7 @@ function Find-Supermodel
     # most often used with. LegacyOG and the pre-rename names stay in the list, so a distribution
     # assembled before the two-executable layout (or one that has been trimmed to a single exe) still
     # resolves.
-    foreach ($name in @('Model3-Vulkan.exe', 'Supermodel-VK-SDL3.exe', 'Supermodel-LegacyOG.exe', 'Supermodel-VK.exe', 'Supermodel.exe'))
+    foreach ($name in @('Model3-Vulkan.exe', 'Supermodel-LegacyOG.exe', 'Supermodel.exe'))
     {
         $candidate = Join-Path $parent $name
         if (Test-Path $candidate) { return (Resolve-Path $candidate).Path }

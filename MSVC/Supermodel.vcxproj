@@ -536,7 +536,7 @@ xcopy /D /Y "$(ProjectDir)..\Assets\*" "$(TargetDir)Assets"</Command>
   <ItemGroup>
     <!-- Embeds the application icon. The manifest is embedded by the linker instead (see the
          /MANIFEST settings), so it is deliberately not part of this file. -->
-    <ResourceCompile Include="SupermodelResources.rc" />
+    <ResourceCompile Include="Model3VulkanResources.rc" />
   </ItemGroup>
   <ItemGroup>
     <None Include="..\Src\Graphics\Legacy3D\Shaders\Fragment.glsl" />

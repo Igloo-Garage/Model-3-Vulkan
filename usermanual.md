@@ -1,6 +1,6 @@
 # Model 3-Vulkan User Manual (Vulkan + SDL3)
 
-> Applies to **v0.9.8.3b**. Every version the program shows - window title bar, console banner, save
+> Applies to **v0.9.8.6**. Every version the program shows - window title bar, console banner, save
 > metadata - comes from `SUPERMODEL_FORK_VERSION` in `Src/Version.h`.
 > This manual is about *how to use the emulator and how to set it up*. Measured rendering data lives in
 > `sdl3_reports/`, the change history in `devdocs/CHANGELOG.md`, and troubleshooting patterns in
@@ -44,7 +44,7 @@ a save made in the OpenGL build does not appear as a card in the Vulkan build's 
 but "Import legacy .st" converts it.
 
 The two builds also name themselves apart in the title bar, so a screenshot says which one is running:
-`Model 3-Vulkan v0.9.8.3b - <game>` for the Vulkan build and `Supermodel-OpenGL v0.9.8.3b - <game>` for
+`Model 3-Vulkan v0.9.8.6 - <game>` for the Vulkan build and `Supermodel-OpenGL v0.9.8.6 - <game>` for
 the OpenGL one.
 
 > The SDL3 build needs **Vulkan 1.3 core** (`dynamicRendering` and `synchronization2` are core 1.3
@@ -189,6 +189,13 @@ Gamepads are the exception: they are in daily use here (an Xbox-layout pad and a
   many of them state the cost and a recommended value.
 - Game list with region/version, box art and an English synopsis. A missing box art is cached as missing;
   adding the file later needs a restart.
+- **Auto-launch on startup**: right-click a row in the list and choose **Auto-Launch on Startup**. The row
+  is marked with a `★` in front of its name, and that game starts by itself the next time the program
+  opens. **Clear Auto-Launch** on the same row undoes it. It fires once per run, so pressing `Esc` in the
+  game leaves you in the list instead of starting it again - replaying it is then a double-click away.
+  Starting the program with a ROM set on the command line runs that one session and never opens the
+  list, so a shortcut that passes an argument is unaffected. The choice is stored as `AutoLaunchGame`
+  in the ini.
 - **Manage saves** shows `.zst` saves as thumbnail cards with Load / Rename / Delete. **Import legacy .st**
   scans both `Data/Saves` and `Data/Saves_Legacy`, takes the newer file per slot, and never overwrites a
   newer `.zst`.
@@ -265,20 +272,20 @@ once; the same picture choices are also available individually below on the page
 
 | Tier | Resolution | MSAA | Transparency sorting | Texture filtering |
 | --- | --- | --- | --- | --- |
-| **Ultra low / fastest (496×384, integrated)** | 496×384 + integer scaling | Off (1×) | Original (two layers) | Hardware (radial) |
+| **Ultra low / fastest (496x384, integrated)** | 496×384 (1x native 3D) | Off (1×) | Original (two layers) | Hardware (radial) |
+| **Integrated balanced (992x768, 2x native)** | 992×768 (2x native 3D) | Off (1×) | Original (two layers) | Hardware (radial) |
 | **Integrated / low-end (1080p, 1x)** | 1920×1080 | Off (1×) | Original (two layers, bit-exact) | Sharp (screen-space derivatives) |
 | **Entry discrete (1080p, 2x)** | 1920×1080 | 2x | Original (two layers) | Sharp |
 | **Mid-range discrete (2K, 2x)** | 2560×1440 | 2x | Per-pixel sorted (OIT) | Sharp + 4x anisotropic |
 | **High-end discrete (4K, 4x)** | 3840×2160 | 4x | Per-pixel sorted (OIT) | Sharp + 4x anisotropic |
 
-- The **Ultra low** tier is a whole-system preset, not only the four columns: it also selects **Original
-  57.524 Hz**, turns motion interpolation, FXAA, CRT and glow off, and disables **Exact quad
-  interpolation** (the fast hardware-triangle path). It is aimed at Intel HD 530 / UHD 620 class
-  integrated GPUs; non-planar quads can show a diagonal seam.
-- On a 1080p panel the integer multiple is **2x**, so the visible area - and the 3D render size - is
-  **992×768**, not 496×384 stretched. **Integer scaling is what keeps the low resolution alive:** with
-  it off, fullscreen renders at the panel resolution fitted to 4:3 (about **1395×1080** on 1080p),
-  roughly twice the pixels, which is why the frame rate drops there and the tier reads **Custom**.
+- The **Ultra low** and **Integrated balanced** tiers are whole-system presets, not only the four columns: they also select **Original
+  57.524 Hz**, turn motion interpolation, FXAA, CRT and glow off, and disable **Exact quad
+  interpolation** (the fast hardware-triangle path), rendering the 3D scene at native 496×384 or 992×768 and upscaling it.
+  They are aimed at Intel HD 530 / UHD 620 class integrated GPUs; non-planar quads can show a diagonal seam.
+- **Low-resolution rendering (or Integer scaling) is what keeps the low GPU cost alive:** with both
+  off, fullscreen renders at the panel resolution fitted to 4:3 (about **1395×1080** on 1080p),
+  much heavier on pixels, which is why the frame rate drops there and the tier reads **Custom**.
 - The four GPU tiers set only the four columns. **Exact quad interpolation** stays on by default and
   lives under **Core → Advanced**.
 - Resolution is the **window / render size**, clamped to the current display, and takes effect **next
@@ -445,6 +452,32 @@ Changes made in the in-game panel are written to the ini only when you press **A
 restores them. The panel's Save/Load also cancel a pending Manage Saves load and take its cover down
 immediately.
 
+### 5.1 Rebinding hotkeys from the INI file
+
+Every key in the table above is an `InputUI...` entry in `Model3-Vulkan.ini`, so a front end
+(RetroBat and friends) or a cabinet build can set its own hotkeys without opening the settings
+window. Add the line to the `[Global]` section:
+
+```ini
+InputUIExit          = "JOY1_BUTTON7+JOY1_BUTTON8"
+InputUISaveState     = "JOY1_BUTTON9"
+InputUIToggleOverlay = "KEY_TAB"
+```
+
+- The key is `InputUI` plus the action's internal id: `UIExit`, `UIPause`, `UIReset`,
+  `UIFullScreen`, `UISaveState`, `UIChangeSlot`, `UILoadState`, `UIMusicVolUp`, `UIMusicVolDown`,
+  `UISoundVolUp`, `UISoundVolDown`, `UIClearNVRAM`, `UISelectCrosshairs`, `UIToggleFrameLimit`,
+  `UIDumpInputState`, `UIDumpTimings`, `UIScreenShot`, `UIToggleOverlay`, `UIToggleStatsOsd`,
+  `UIToggleVrr`, `UIToggleHDTextures`, `UIReloadHDTextures`. The complete list is in
+  `Src/Inputs/Inputs.cpp`.
+- The value uses the same syntax as any other binding: `KEY_...`, `JOY1_...`, `MOUSE_...`. `+` means
+  "all of them at once", which is how a two-button chord is written, and `,` means "either of them".
+- A key you leave out keeps the built-in default from the table above, so only the few you care
+  about need to be present. `NONE` disables one.
+- These entries are deliberately **not** listed on the Controls page and are never rewritten by it,
+  so a file written by a front end survives editing the interface - and **Apply recommended
+  bindings** does not overwrite them either.
+
 ---
 
 ## 6. Save states: F5 / F6 / F7 and Manage Saves
@@ -485,9 +518,9 @@ immediately.
 - To keep logs apart: `-log-output=Data/xxx.log`.
 - Any game can have its own `[setname]` section in the ini to override global settings (volumes, keys…).
 - The folder is relocatable: settings and saves move with it. The first run creates
-  `Data/Config/Model3-Vulkan.ini`, migrating the previous `Supermodel-VK-SDL3.ini` (or
-  `Supermodel.ini`, if that is all that exists) so existing settings are kept. After that the ini
-  records everything the interface changes.
+  `Data/Config/Model3-Vulkan.ini`, migrating the shared `Supermodel.ini` if that is all that
+  exists, so existing settings are kept. After that the ini records everything the interface
+  changes.
 
 ### 7.1 The ArcadeDisplay helper in `Scripts/`
 

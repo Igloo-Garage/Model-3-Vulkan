@@ -1,4 +1,15 @@
 /*
+ * Model 3-Vulkan - scene_composite.glsl
+ * Copyright (C) 2026 REXABYTE SOFTWARE INC. (Igloo-Garage / Rex)
+ *
+ * Additional Terms under GNU GPLv3 Section 7 apply to this file
+ * (see LICENSE-ADDITIONAL-TERMS.md).
+ *
+ * This shader is part of Model 3-Vulkan, a fork of Supermodel
+ * (Copyright 2003-2026 The Supermodel Team), and is distributed under the
+ * GNU General Public License v3 or later.  There is NO WARRANTY.
+ */
+/*
  * Shared body of the scene composite subpass, included by scene_composite.frag (single-sampled)
  * and scene_composite_ms.frag (multisampled).
  *

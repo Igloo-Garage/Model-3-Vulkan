@@ -193,10 +193,10 @@ extern "C" {
     __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 }
 
-// Matches IDI_SUPERMODEL in both resource scripts (MSVC/SupermodelResources.rc and
-// Src/OSD/Windows/SupermodelResources.rc). They all have to agree or the window icon silently goes
+// Matches IDI_MODEL3VULKAN in both resource scripts (MSVC/Model3VulkanResources.rc and
+// Src/OSD/Windows/Model3VulkanResources.rc). They all have to agree or the window icon silently goes
 // missing while the one in Explorer still looks right.
-#define IDI_SUPERMODEL 101
+#define IDI_MODEL3VULKAN 101
 #endif
 
 
@@ -218,9 +218,9 @@ void SetWindowIcon(OSD::Platform::Window* window)
     // The locals are not called "small" and "large": rpcndr.h defines those as macros meaning
     // "char" and "long long", so a variable with either name expands into a syntax error.
     HINSTANCE instance = GetModuleHandle(nullptr);
-    HICON iconBig = (HICON)LoadImage(instance, MAKEINTRESOURCE(IDI_SUPERMODEL), IMAGE_ICON,
+    HICON iconBig = (HICON)LoadImage(instance, MAKEINTRESOURCE(IDI_MODEL3VULKAN), IMAGE_ICON,
         GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR);
-    HICON iconSmall = (HICON)LoadImage(instance, MAKEINTRESOURCE(IDI_SUPERMODEL), IMAGE_ICON,
+    HICON iconSmall = (HICON)LoadImage(instance, MAKEINTRESOURCE(IDI_MODEL3VULKAN), IMAGE_ICON,
         GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR);
 
     // Without the HWND there is nothing to set the icon on; the executable icon still applies.
@@ -2495,7 +2495,7 @@ static void PrintGLInfo(bool createScreen, bool infoLog, bool printExtensions)
   unsigned xOffset, yOffset, xRes=496, yRes=384, totalXRes, totalYRes;
   if (createScreen)
   {
-    if (Result::OKAY != CreateGLScreen(s_runtime_config["New3DEngine"].ValueAs<bool>(), SUPERMODEL_TITLE_FULL " - Querying OpenGL Information...", false, &xOffset, &yOffset, &xRes, &yRes, &totalXRes, &totalYRes, false, false))
+    if (Result::OKAY != CreateGLScreen(s_runtime_config["New3DEngine"].ValueAs<bool>(), MODEL3VULKAN_TITLE_FULL " - Querying OpenGL Information...", false, &xOffset, &yOffset, &xRes, &yRes, &totalXRes, &totalYRes, false, false))
     {
       ErrorLog("Unable to query OpenGL.\n");
       return;
@@ -3065,7 +3065,7 @@ static void PackagePendingSave(const std::vector<std::uint8_t>& thumbnail)
   std::snprintf(meta.GameName, sizeof(meta.GameName), "%s", s_pendingSave.game.c_str());
   std::snprintf(meta.Title, sizeof(meta.Title), "%s",
     std::filesystem::path(s_pendingSave.target).filename().string().c_str());
-  std::snprintf(meta.Version, sizeof(meta.Version), "%s", SUPERMODEL_FORK_VERSION);
+  std::snprintf(meta.Version, sizeof(meta.Version), "%s", MODEL3VULKAN_VERSION);
 
   if (auto saved = (*bridge)->SaveVkState(s_pendingSave.target, meta, s_pendingSave.raw, thumbnail); saved)
   {
@@ -4160,7 +4160,7 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
   // The region belongs in the title: a zip can hold a different revision than its name suggests, and
   // the title bar is the only place the running revision is visible.
   const std::string gameTitle = game.version.empty() ? game.title : game.title + " (" + game.version + ")";
-  snprintf(baseTitleStr, sizeof(baseTitleStr), SUPERMODEL_TITLE_FULL " - %s", gameTitle.c_str());
+  snprintf(baseTitleStr, sizeof(baseTitleStr), MODEL3VULKAN_TITLE_FULL " - %s", gameTitle.c_str());
   OSD::Platform::SetWindowTitle(s_platformWindow, baseTitleStr);
   OSD::Platform::SetWindowSize(s_platformWindow, totalXRes, totalYRes);
 
@@ -6175,7 +6175,7 @@ static Result ConfigureInputs(CInputs *Inputs, Util::Config::Node *fileConfig, U
   // If the user wants to configure the inputs, do that now
   if (configure)
   {
-    std::string title(SUPERMODEL_TITLE_FULL " - ");
+    std::string title(MODEL3VULKAN_TITLE_FULL " - ");
     if (game.name.empty())
       title.append("Configuring Default Inputs...");
     else
@@ -6279,6 +6279,11 @@ Util::Config::Node DefaultConfig()
   // Windows keeps the historical Downloads folder. An existing Supermodel.ini keeps whatever
   // path it already had, so this only decides where a new installation starts looking.
   config.Set<std::string>("ROMPath", FileSystemPath::GetDefaultRomPath(), "ROM", "", "");
+  // ROM set started automatically on the first frame after start-up, chosen from the game list's
+  // right-click menu ("Auto-Launch on Startup"). Empty means the list is shown. Deliberately in
+  // the shared section rather than the Vulkan-only one: the settings window reads it
+  // unconditionally and a missing node there is fatal.
+  config.Set<std::string>("AutoLaunchGame", "", "Core", "", "");
   // Control preset: "standard" (one layout shared by Xbox/PS pads), "keyboard" or "custom".
   // ControllerFamily records which pad family the user picked ("auto" for detection).
   // "8bitdo" is in the allow-list because DetectController() can return it - without the entry the
@@ -7484,11 +7489,16 @@ static void Title(void)
   // Deliberately one line: this is the banner users see in the console window. The version stays in
   // the string because this line is the quickest way to identify a build from a pasted console log;
   // the former project name is kept in parentheses so the rename is unambiguous.
-  puts("Model 3-Vulkan v" SUPERMODEL_FORK_VERSION "(formerly Supermodel-VK) - Igloo-Garage");
+  puts("Model 3-Vulkan v" MODEL3VULKAN_VERSION " - Igloo-Garage");
+  puts(MODEL3VULKAN_REPO_URL "  |  " MODEL3VULKAN_LEGAL_SHORT);
+  puts(MODEL3VULKAN_TRADEMARK_NOTICE);
 #else
-  puts(SUPERMODEL_TITLE_FULL " - a Sega Model 3 arcade emulator.");
-  puts("Based on Supermodel " SUPERMODEL_BASE_RELEASE " (core version " SUPERMODEL_VERSION ").");
+  puts(MODEL3VULKAN_TITLE_FULL " - a Sega Model 3 arcade emulator.");
+  puts("Based on Supermodel " MODEL3VULKAN_UPSTREAM_RELEASE " (core version " SUPERMODEL_VERSION ").");
   puts("Copyright 2003-2026 by The Supermodel Team");
+  puts(MODEL3VULKAN_COPYRIGHT);
+  puts(MODEL3VULKAN_REPO_URL "  |  " MODEL3VULKAN_LEGAL_SHORT);
+  puts(MODEL3VULKAN_TRADEMARK_NOTICE);
 #endif
 }
 
@@ -8478,18 +8488,18 @@ static int RunGameSession(const ParsedCommandLine& cmd_line, std::shared_ptr<CLo
   // One renderer family, no run-time choice.  Any Vulkan3DEngine value left in
   // a hand-edited file is ignored.
   Result screen = CreateGLScreen(s_runtime_config["New3DEngine"].ValueAs<bool>(),
-    SUPERMODEL_TITLE_FULL, false, &xOffset, &yOffset, &xRes, &yRes,
+    MODEL3VULKAN_TITLE_FULL, false, &xOffset, &yOffset, &xRes, &yRes,
     &totalXRes, &totalYRes, false, false);
 #elif defined(SUPERMODEL_PURE_VULKAN)
   const bool vulkanRequested = true;
   // The renderer is forced to Vulkan above; there is no GL path to select.
   (void)vulkanRequested;
-  Result screen = CreateVulkanScreen(SUPERMODEL_TITLE_FULL, false, &xOffset, &yOffset, &xRes, &yRes, &totalXRes, &totalYRes, false, false);
+  Result screen = CreateVulkanScreen(MODEL3VULKAN_TITLE_FULL, false, &xOffset, &yOffset, &xRes, &yRes, &totalXRes, &totalYRes, false, false);
 #else
   const bool vulkanRequested = s_runtime_config["Vulkan3DEngine"].ValueAsDefault<bool>(false);
   Result screen = vulkanRequested
-    ? CreateVulkanScreen(SUPERMODEL_TITLE_FULL, false, &xOffset, &yOffset, &xRes, &yRes, &totalXRes, &totalYRes, false, false)
-    : CreateGLScreen(s_runtime_config["New3DEngine"].ValueAs<bool>(), SUPERMODEL_TITLE_FULL, false, &xOffset, &yOffset, &xRes, &yRes, &totalXRes, &totalYRes, false, false);
+    ? CreateVulkanScreen(MODEL3VULKAN_TITLE_FULL, false, &xOffset, &yOffset, &xRes, &yRes, &totalXRes, &totalYRes, false, false)
+    : CreateGLScreen(s_runtime_config["New3DEngine"].ValueAs<bool>(), MODEL3VULKAN_TITLE_FULL, false, &xOffset, &yOffset, &xRes, &yRes, &totalXRes, &totalYRes, false, false);
 #endif
 
 #if defined(SUPERMODEL_PLATFORM_SDL3)
@@ -8560,7 +8570,7 @@ static int RunGameSession(const ParsedCommandLine& cmd_line, std::shared_ptr<CLo
     InfoLog("Vulkan: retrying with the OpenGL renderer (%s).",
       s_runtime_config["New3DEngine"].ValueAs<bool>() ? "New 3D" : "Legacy 3D");
 
-    screen = CreateGLScreen(s_runtime_config["New3DEngine"].ValueAs<bool>(), SUPERMODEL_TITLE_FULL, false, &xOffset, &yOffset, &xRes, &yRes, &totalXRes, &totalYRes, false, false);
+    screen = CreateGLScreen(s_runtime_config["New3DEngine"].ValueAs<bool>(), MODEL3VULKAN_TITLE_FULL, false, &xOffset, &yOffset, &xRes, &yRes, &totalXRes, &totalYRes, false, false);
   }
 #endif
 
@@ -8802,13 +8812,10 @@ static bool InitializeSDL3Startup()
   s_configFilePath = paths->configFile.string();
 
   /*
-   * First run of this executable on an existing installation: seed its own settings file from an
-   * older configuration so the ROM path, control mappings and display preferences carry over.
-   * The previous fork settings file is preferred over the shared Supermodel.ini because it is the
-   * one that holds the Vulkan-only options this build understands; Supermodel.ini is the fallback
-   * for an installation that never ran the SDL3 build.  The OpenGL-only keys in a shared copy are
-   * ignored by this build (Vulkan is forced at session start), but losing every setting on upgrade
-   * would look exactly like a factory reset.
+   * First run of this executable on an existing installation: seed its own settings file from the
+   * shared Supermodel.ini so the ROM path, control mappings and display preferences carry over.
+   * The OpenGL-only keys in that copy are ignored by this build (Vulkan is forced at session
+   * start), but losing every setting on upgrade would look exactly like a factory reset.
    */
   {
     std::error_code existsError;
@@ -8816,7 +8823,7 @@ static bool InitializeSDL3Startup()
     if (!haveOwnSettings)
     {
       const std::filesystem::path configDirectory = paths->configFile.parent_path();
-      const char* const previousNames[] = { "Supermodel-VK-SDL3.ini", "Supermodel.ini" };
+      const char* const previousNames[] = { "Supermodel.ini" };
       for (const char* name : previousNames)
       {
         const std::filesystem::path source = configDirectory / name;

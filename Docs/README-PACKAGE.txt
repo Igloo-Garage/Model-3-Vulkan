@@ -1,12 +1,19 @@
 ========================================================================
-Model 3-Vulkan (v0.9.8.3b)
+Model 3-Vulkan (v0.9.8.6)
 Modernized Standalone Sega Model 3 Arcade Emulator
-Igloo-Garage (formerly Supermodel-VK)
+Igloo-Garage
+REXABYTE SOFTWARE INC., British Columbia, Canada
 ========================================================================
 
 Project Repository:  https://github.com/Igloo-Garage/Model-3-Vulkan
 Latest Release:      https://github.com/Igloo-Garage/Model-3-Vulkan/releases/latest
 Documentation:       usermanual.md (EN) / usermanual_chs.md (中文)
+
+Model 3-Vulkan(TM) and Igloo-Garage(TM) are trademarks and brand assets of
+REXABYTE SOFTWARE INC.  GPLv3 Section 7(e) grants no trademark rights.  See
+`Data\LICENSE-ADDITIONAL-TERMS.md` and `Data\TRADEMARK.md`; a modified
+redistribution must use a different name and icon and must state that it is
+modified.
 
 Model 3-Vulkan is a standalone modernization of the Sega Model 3 arcade
 platform, introducing a native Vulkan 1.3 rendering backend, dedicated
@@ -119,7 +126,8 @@ CREDITS & LICENSING
 ------------------------------------------------------------------------
 
 Model 3-Vulkan is licensed under the GNU General Public License v3.0 (GPLv3).
-See `Data\LICENSE.txt` and `NOTICE.md` for full component attributions.
+See `Data\LICENSE.txt`, `Data\LICENSE-ADDITIONAL-TERMS.md`, `Data\TRADEMARK.md`
+and `Data\NOTICE.md` for full licensing and component attributions.
 
 This project stands upon the reverse-engineering foundations laid by
 The Supermodel Team (Bart Trzynadlowski, Nik Henson, Ville Linde, Stefano

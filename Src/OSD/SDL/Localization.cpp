@@ -1,10 +1,13 @@
 /**
- ** Supermodel-VK
+ ** Model 3-Vulkan
  ** A Vulkan-focused fork of Supermodel, the Sega Model 3 arcade emulator.
- ** Copyright 2026 The Supermodel-VK authors
+ ** Copyright (C) 2026 REXABYTE SOFTWARE INC. (Igloo-Garage / Rex)
  **
- ** This file is part of Supermodel-VK, and is derived from Supermodel,
+ ** This file is part of Model 3-Vulkan, and is derived from Supermodel,
  ** Copyright 2003-2026 The Supermodel Team.
+ **
+ ** Additional Terms under GNU GPLv3 Section 7 apply to this file
+ ** (see LICENSE-ADDITIONAL-TERMS.md).
  **
  ** Supermodel is free software: you can redistribute it and/or modify it under
  ** the terms of the GNU General Public License as published by the Free
@@ -424,13 +427,14 @@ namespace
 		{ "硬件预设",                        "Hardware presets" },
 		{ "档位##QualityTier",                "Tier##QualityTier" },
 		{ "超低配极速（496×384，核显）",      "Ultra low / fastest (496x384, integrated)" },
+		{ "核显平衡（992×768，2x 原生）",      "Integrated balanced (992x768, 2x native)" },
 		{ "核显 / 低配（1080p，1x）",          "Integrated / low-end (1080p, 1x)" },
 		{ "入门独显（1080p，2x）",             "Entry discrete (1080p, 2x)" },
 		{ "中端独显（2K，2x）",                "Mid-range discrete (2K, 2x)" },
 		{ "高端独显（4K，4x）",                "High-end discrete (4K, 4x)" },
 		{ "自定义（按下面几项单独调）",        "Custom (set the options below individually)" },
-		{ "一次配好分辨率、MSAA、半透明排序、贴图过滤等相关选项，下一局生效。\n超低配极速：496×384 原生 3D + 等比放大，关插值/后处理。\n核显 / 低配：1080p、1x、原版半透明与硬件贴图，最稳。\n入门独显：1080p + 2x MSAA。\n中端独显：2K + 2x MSAA + 逐像素排序 + 锐利贴图。\n高端独显：4K + 4x MSAA，同上最高画质。\n自定义：不套预设，只改下面各项。",
-		                                     "Sets resolution, MSAA, transparency sorting, texture filtering and related options at once; next session.\nUltra low: native 496x384 3D + aspect-preserving upscale; no interpolation or post-processing.\nIntegrated / low-end: 1080p, 1x, original transparency and hardware filtering - the safest choice.\nEntry discrete: 1080p + 2x MSAA.\nMid-range: 2K + 2x MSAA + per-pixel sorting + sharp filtering.\nHigh-end: 4K + 4x MSAA, the same best-quality settings.\nCustom: apply nothing; set the options below individually." },
+		{ "一次配好分辨率、MSAA、半透明排序、贴图过滤等相关选项，下一局生效。\n超低配极速：496×384 原生 3D + 等比放大，关插值/后处理。\n核显平衡：992×768 2x 原生 3D + 等比放大，画质与帧率平衡。\n核显 / 低配：1080p、1x、原版半透明与硬件贴图，最稳。\n入门独显：1080p + 2x MSAA。\n中端独显：2K + 2x MSAA + 逐像素排序 + 锐利贴图。\n高端独显：4K + 4x MSAA，同上最高画质。\n自定义：不套预设，只改下面各项。",
+		                                     "Sets resolution, MSAA, transparency sorting, texture filtering and related options at once; next session.\nUltra low: native 496x384 3D + aspect-preserving upscale; no interpolation or post-processing.\nIntegrated balanced: native 992x768 2x 3D + aspect-preserving upscale; balanced quality and speed.\nIntegrated / low-end: 1080p, 1x, original transparency and hardware filtering - the safest choice.\nEntry discrete: 1080p + 2x MSAA.\nMid-range: 2K + 2x MSAA + per-pixel sorting + sharp filtering.\nHigh-end: 4K + 4x MSAA, the same best-quality settings.\nCustom: apply nothing; set the options below individually." },
 		{ "超低配的低开销靠「低分辨率渲染」（或「整数倍缩放」）；两者都关掉时全屏会按面板分辨率渲染，帧率会明显下降。",
 		                                     "The ultra-low tier's low cost comes from Low-resolution rendering (or Integer scaling); with both off, fullscreen renders at the panel resolution and the frame rate drops noticeably." },
 		{ "硬件 MSAA##MSAA",                 "Hardware MSAA##MSAA" },
@@ -616,6 +620,8 @@ namespace
 		{ "  （未收录）",                    "  (unsupported)" },
 		{ "没能从这个包里认出 Model 3 游戏（可能缺文件）。\n同系列的其他版本可能已经在列表里了。",
 		                                     "No Model 3 game could be identified in this archive - files may be missing.\nAnother version of the same game may already be listed." },
+		{ "设为启动时自动运行",              "Auto-Launch on Startup" },
+		{ "取消启动时自动运行",              "Clear Auto-Launch" },
 
 		// ---- Controls tab -----------------------------------------------------------------------
 		{ "力反馈 / 灵敏度",                 "FFB" },
@@ -765,6 +771,19 @@ namespace
 		  "关闭后改用不透明底色，适合核显或驱动不支持的情形。\n"
 		  "原始界面本来就不透明，此开关对它无效。",
 		                                     "Draws panel backgrounds from a blurred copy of the picture (dual Kawase blur) with a 1px glass rim.\nTurn it off for an opaque fill, which is the first thing to try on a weak GPU.\nThe original theme is opaque by design, so the switch does nothing there." },
+
+		// ---- About / licence (LICENSE-ADDITIONAL-TERMS.md) --------------------------------------
+		{ "关于与许可",                      "About & licence" },
+		{ "查看作者署名、开源许可与商标声明", "Author credit, open-source licence and trademark notice" },
+		{ "关于与开源许可##AboutLegalModal", "About & licence##AboutLegalModal" },
+		{ "本程序按 GNU GPL v3（或更高版本）发布，不提供任何担保。完整许可证见 Data/LICENSE.txt。",
+		                                     "Released under GNU GPL v3 or later with no warranty. The full licence is in Data/LICENSE.txt." },
+		{ "模拟核心基于 Supermodel，版权所有 2003-2026 The Supermodel Team。",
+		                                     "Emulation core based on Supermodel, copyright 2003-2026 The Supermodel Team." },
+		{ "原创模块的附加署名、修改版标注与商标条款见 Data/LICENSE-ADDITIONAL-TERMS.md 与 Data/TRADEMARK.md。",
+		                                     "Additional attribution, modified-version and trademark terms for the original modules are in Data/LICENSE-ADDITIONAL-TERMS.md and Data/TRADEMARK.md." },
+		{ "Model 3-Vulkan(TM) 与 Igloo-Garage(TM) 是 REXABYTE SOFTWARE INC. 的商标与品牌资产；GPLv3 第 7(e) 条不授予商标权。",
+		                                     "Model 3-Vulkan(TM) and Igloo-Garage(TM) are trademarks and brand assets of REXABYTE SOFTWARE INC.; GPLv3 Section 7(e) grants no trademark rights." },
 
 	};
 

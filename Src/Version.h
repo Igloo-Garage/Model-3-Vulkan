@@ -30,13 +30,13 @@
  *                        checked when they are loaded. Changing it invalidates every save state a
  *                        user already has, so it stays pinned to the upstream value.
  *
- *   SUPERMODEL_TITLE     what the interface calls itself. This build is the Vulkan-focused fork, so
+ *   MODEL3VULKAN_TITLE     what the interface calls itself. This build is the Vulkan-focused fork, so
  *                        the title names the renderer and credits the upstream release it is based
  *                        on rather than passing itself off as a plain upstream build.
  *
- * Naming: the product/executable is "Model 3-Vulkan" / Model3-Vulkan.exe.  "Supermodel-VK"
- * remains the repository and console-banner name, so do not rename the licence headers or the
- * upstream references to match the executable.
+ * Naming: the product, repository and Vulkan executable are "Model 3-Vulkan" / Model3-Vulkan.exe;
+ * the legacy OpenGL executable remains Supermodel-LegacyOG.exe.  Upstream Supermodel copyright and
+ * attribution notices are preserved in the source headers.
  */
 
 #ifndef INCLUDED_VERSION_H
@@ -48,10 +48,10 @@
 #endif
 
 // Upstream release this fork tracks. Kept as a separate string because the name of this build,
-// SUPERMODEL_TITLE, no longer mentions it: the credit appears in the console banner and the about
+// MODEL3VULKAN_TITLE, no longer mentions it: the credit appears in the console banner and the about
 // line so the origin of the emulation core is still recorded.
-#ifndef SUPERMODEL_BASE_RELEASE
-#define SUPERMODEL_BASE_RELEASE	"0.3a-2026.09.28"
+#ifndef MODEL3VULKAN_UPSTREAM_RELEASE
+#define MODEL3VULKAN_UPSTREAM_RELEASE	"0.3a-2026.09.28"
 #endif
 
 // Window title and settings header. Kept short: it has to fit a title bar and sit next to a
@@ -60,11 +60,11 @@
 // The two executables are named apart on purpose: they are not two renderer choices of one program
 // but two builds whose renderer is fixed at compile time.  The Vulkan build is the product called
 // "Model 3-Vulkan"; the OpenGL build keeps its own historical name.
-#ifndef SUPERMODEL_TITLE
+#ifndef MODEL3VULKAN_TITLE
 #if defined(SUPERMODEL_OPENGL_ONLY)
-#define SUPERMODEL_TITLE	"Supermodel-OpenGL"
+#define MODEL3VULKAN_TITLE	"Supermodel-OpenGL"
 #else
-#define SUPERMODEL_TITLE	"Model 3-Vulkan"
+#define MODEL3VULKAN_TITLE	"Model 3-Vulkan"
 #endif
 #endif
 
@@ -76,8 +76,8 @@
  * identifies the fork instead and is bumped for every release. It is also the release tag, so
  * reusing a version updates (and overwrites) the previous release rather than creating a new one.
  */
-#ifndef SUPERMODEL_FORK_VERSION
-#define SUPERMODEL_FORK_VERSION	"0.9.8.3b"
+#ifndef MODEL3VULKAN_VERSION
+#define MODEL3VULKAN_VERSION	"0.9.8.6"
 #endif
 
 /*
@@ -88,6 +88,39 @@
  * which build is running. build.bat reads these same lines out of this file to label the release, so
  * this is the single place the version is written down.
  */
-#define SUPERMODEL_TITLE_FULL	SUPERMODEL_TITLE " v" SUPERMODEL_FORK_VERSION
+#define MODEL3VULKAN_TITLE_FULL	MODEL3VULKAN_TITLE " v" MODEL3VULKAN_VERSION
+
+/*
+ * Author, repository and legal identity.
+ *
+ * These strings are what the startup notice, the About panel, the in-game panel
+ * footer and the statistics overlay display. They live here rather than being
+ * spelled out at each use so the four cannot disagree, and so a fork that strips
+ * one of them is visibly removing the attribution rather than merely adjusting a
+ * label. See LICENSE-ADDITIONAL-TERMS.md (GPL v3 Section 7(b)).
+ */
+#ifndef MODEL3VULKAN_AUTHOR
+#define MODEL3VULKAN_AUTHOR		"Igloo-Garage (Rex)"
+#endif
+
+#ifndef MODEL3VULKAN_COMPANY
+#define MODEL3VULKAN_COMPANY		"REXABYTE SOFTWARE INC."
+#endif
+
+#ifndef MODEL3VULKAN_REPO_URL
+#define MODEL3VULKAN_REPO_URL		"https://github.com/Igloo-Garage/Model-3-Vulkan"
+#endif
+
+#ifndef MODEL3VULKAN_COPYRIGHT
+#define MODEL3VULKAN_COPYRIGHT	"Copyright (C) 2026 REXABYTE SOFTWARE INC. (Igloo-Garage / Rex)"
+#endif
+
+#ifndef MODEL3VULKAN_TRADEMARK_NOTICE
+#define MODEL3VULKAN_TRADEMARK_NOTICE	"Model 3-Vulkan(TM) and Igloo-Garage(TM) are trademarks of REXABYTE SOFTWARE INC."
+#endif
+
+#ifndef MODEL3VULKAN_LEGAL_SHORT
+#define MODEL3VULKAN_LEGAL_SHORT	"GPLv3 (No Warranty)"
+#endif
 
 #endif	// INCLUDED_VERSION_H

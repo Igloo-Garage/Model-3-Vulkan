@@ -2,7 +2,7 @@
 #
 # syntaxcheck-linux.sh
 #
-# Compiles Supermodel's sources with the host g++ for Linux, using -fsyntax-only. This is not a
+# Compiles Model 3-Vulkan's sources with the host g++ for Linux, using -fsyntax-only. This is not a
 # build: nothing is linked and no binary is produced. The point is to see the errors that only a
 # non-MSVC compiler emits - the ones the CI finds one file per fifteen-minute run.
 #
@@ -23,19 +23,27 @@ set -u
 # failed to compile would be reported as passing. Every failure below would have been silent.
 set -o pipefail
 
-# Windows path to the tree under test, passed through WSL. Drive letters become /mnt/<letter>.
-WIN_ROOT="${1:-E:/Dev/Sega Model 3 Arcade Emulator/Supermodel-VK/UploadToGithub_20261017}"
+# Tree under test. Pass a Windows path (E:/...) or a WSL path (/mnt/e/...).
+# With no argument, use the repository this script lives in.
+ROOT="${1:-$(cd "$(dirname "$0")/.." && pwd)}"
 
-# E:/foo -> /mnt/e/foo
-WSL_ROOT="/mnt/$(printf '%s' "$WIN_ROOT" | cut -c1 | tr 'A-Z' 'a-z')/$(printf '%s' "$WIN_ROOT" | cut -c4-)"
+case "$ROOT" in
+    [A-Za-z]:*)
+        # E:/foo -> /mnt/e/foo
+        WSL_ROOT="/mnt/$(printf '%s' "$ROOT" | cut -c1 | tr 'A-Z' 'a-z')/$(printf '%s' "$ROOT" | cut -c4-)"
+        ;;
+    *)
+        WSL_ROOT="$ROOT"
+        ;;
+esac
 
 if [ ! -d "$WSL_ROOT/Src" ]; then
     echo "Not a source tree: $WSL_ROOT" >&2
     exit 2
 fi
 
-HEADERS=/tmp/supermodel-headers
-DEBS=/tmp/supermodel-debs
+HEADERS=/tmp/model3vulkan-headers
+DEBS=/tmp/model3vulkan-debs
 
 # The package set matters. libglu1-mesa-dev ships <GL/glu.h>, which on its own #includes <GL/gl.h>
 # and stops there: gl.h lives in libgl-dev (a virtual package that resolves to libglvnd-dev), so

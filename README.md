@@ -3,7 +3,7 @@
   <h1>Model 3-Vulkan</h1>
 
   <p><strong>A modern, standalone Sega Model 3 arcade emulator powered by pure Vulkan 1.3 & SDL3.</strong></p>
-  <p><em>(Formerly Supermodel-VK, an independent evolution tracking upstream <a href="https://github.com/trzy/Supermodel">Supermodel</a>)</em></p>
+  <p><em>An independent evolution tracking upstream <a href="https://github.com/trzy/Supermodel">Supermodel</a></em></p>
 
   <p>
     <a href="https://github.com/Igloo-Garage/Model-3-Vulkan/releases">
@@ -30,6 +30,16 @@
 Re-architected from the ground up, the project transitions away from legacy OpenGL constraints in favor of a modern **pure Vulkan 1.3 rendering pipeline**, a cycle-accurate **Real3D graphics simulation**, a **native HD Texture Pack engine**, and an intuitive **frosted-glass eye-care UI**.
 
 ---
+
+## 🩹 What's New in v0.9.8.6
+
+A peripheral and interface release:
+
+* **Hotkeys configurable from the INI file**: every in-game hotkey is now an `InputUI...` entry (`InputUIExit`, `InputUISaveState`, `InputUIToggleOverlay`, ...). A front end such as RetroBat, or a cabinet build, can write chords like `JOY1_BUTTON7+JOY1_BUTTON8` without opening the settings window. The Controls page still neither lists nor rewrites those keys, so applying a control preset never clobbers them, and a key left out keeps the built-in default.
+* **Binding a mouse axis works again**: moving the mouse sideways used to record `MOUSE_XAXIS+MOUSE_YAXIS`, which the input system rejects as an invalid full-axis combination - so binding a light-gun or analogue-gun axis silently failed. Only the axis with the larger displacement is captured now.
+* **The control-preset combo no longer snaps back**: choosing "Keyboard only" was overwritten on the next frame by the value still in the INI.
+* **Auto-Launch on Startup**: right-click a row in the game list to start that set automatically the next time the program opens. The row is marked with `★`, "Clear Auto-Launch" undoes it, and it fires once per run, so `Esc` returns to the list instead of restarting the game.
+* **Shifters and button boxes work in the default input mode**: SDL3 devices that do not identify as game controllers used to be skipped, so a MOZA H-shifter or a handbrake could not be bound at all. They are opened alongside the controllers now, `BUTTON17` and up are readable on any device, and standard pads keep exactly the button numbering they had.
 
 ## 🩹 What's New in v0.9.8.3b
 
@@ -284,11 +294,11 @@ The version string is defined in exactly one location: `Src/Version.h`:
 
 ```c
 #define SUPERMODEL_VERSION      "0.3a-WIP"     /* Upstream core; recorded in save states */
-#define SUPERMODEL_BASE_RELEASE "0.3a-2026.09.28"
-#define SUPERMODEL_FORK_VERSION "0.9.8.3b"
+#define MODEL3VULKAN_UPSTREAM_RELEASE "0.3a-2026.09.28"
+#define MODEL3VULKAN_VERSION "0.9.8.6"
 ```
 
-`SUPERMODEL_TITLE_FULL` is assembled from the title and the fork version, and `build.bat` reads these definitions via `Scripts/VersionString.ps1`. `SUPERMODEL_VERSION` is deliberately preserved: it is recorded in save states and NVRAM, preventing existing saves from being invalidated.
+`MODEL3VULKAN_TITLE_FULL` is assembled from the title and the fork version, and `build.bat` reads these definitions via `Scripts/VersionString.ps1`. `SUPERMODEL_VERSION` is deliberately preserved: it is recorded in save states and NVRAM, preventing existing saves from being invalidated.
 
 ---
 
@@ -329,4 +339,16 @@ The version string is defined in exactly one location: `Src/Version.h`:
 
 Model 3-Vulkan is licensed under the **GNU General Public License v3.0 (GPLv3)**. See [Docs/LICENSE.txt](Docs/LICENSE.txt) for details.
 
-This project builds upon the reverse-engineering foundations laid by **Bart Trzynadlowski**, **Nik Henson**, **Ian (dukey)**, **Ville Linde**, **Stefano Teso**, and the original **Supermodel** team. Third-party components and attribution details are documented in [`NOTICE.md`](NOTICE.md).
+The original Igloo-Garage modules (Vulkan renderer, shaders, settings UI, in-game panel, statistics overlay and HD texture pipeline) carry additional terms under GPL v3 Section 7: author attribution must be preserved and modified builds must be marked. See [LICENSE-ADDITIONAL-TERMS.md](LICENSE-ADDITIONAL-TERMS.md). The project name, icon, startup artwork and cabinet bezel are covered by [TRADEMARK.md](TRADEMARK.md); the GPL grants no trademark rights.
+
+### Trademark & Branding Notice
+
+**"Model 3-Vulkan™"**, **"Igloo-Garage™"**, and all associated project logos, application icons, and custom UI themes are trademarks and proprietary brand assets of **REXABYTE SOFTWARE INC.** (British Columbia, Canada).
+
+In accordance with **Section 7(e) of the GNU General Public License v3.0 (GPLv3)**, this license does **NOT** grant you any rights to use the author's trade names, trademarks, service marks, or product logos:
+- Any public fork, modified version, or third-party binary redistribution **MUST** remove the "Model 3-Vulkan" name and original logos, and must be rebranded under a clearly distinct name so as not to misrepresent the origin of the software or imply official endorsement.
+- Unauthorized commercial use of these names or visual assets on app stores (including Google Play, Apple App Store, etc.) constitutes trademark infringement and unfair competition.
+
+Note: ™ denotes an unregistered / common-law trademark or brand asset; see [TRADEMARK.md](TRADEMARK.md) for the full policy, the company details, and the enforcement process.
+
+This project builds upon the reverse-engineering foundations laid by **Bart Trzynadlowski**, **Nik Henson**, **Ian (dukey)**, **Ville Linde**, **Stefano Teso**, and the original **Supermodel** team. Third-party components and attribution details are documented in [`Docs/NOTICE.md`](Docs/NOTICE.md).

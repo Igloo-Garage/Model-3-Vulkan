@@ -23,7 +23,7 @@ param(
 )
 
 if (-not $ExeDir) {
-    $ExeDir = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "dist\Supermodel-VK"
+    $ExeDir = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "dist\Model-3-Vulkan"
 }
 if (-not $RomDir) { $RomDir = "E:\EMU\model-3-romset-2020" }
 
@@ -47,7 +47,8 @@ foreach ($raw in ($Sets -split ",")) {
 
     # A stale log would be read as though it described this run.
     Remove-Item $log -Force -ErrorAction SilentlyContinue
-    Get-Process -Name "Supermodel-VK" -ErrorAction SilentlyContinue | Stop-Process -Force
+    Get-Process -Name "Model3-Vulkan" -ErrorAction SilentlyContinue | Stop-Process -Force
+    Get-Process -Name "Supermodel-LegacyOG" -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep -Milliseconds 800
 
     $proc = Start-Process -FilePath $exe -ArgumentList "`"$zip`"" -WorkingDirectory $ExeDir -PassThru

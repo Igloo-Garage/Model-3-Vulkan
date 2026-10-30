@@ -92,6 +92,11 @@ if errorlevel 1 exit /b 1
 powershell -NoLogo -Command ^
   "$bytes = [System.IO.File]::ReadAllBytes('%SPV%');" ^
   "$sb = New-Object System.Text.StringBuilder;" ^
+  "[void]$sb.AppendLine('/*');" ^
+  "[void]$sb.AppendLine(' * Model 3-Vulkan - generated SPIR-V header. Do not edit; regenerate with Scripts/CompileVulkanShaders.cmd.');" ^
+  "[void]$sb.AppendLine(' * Copyright (C) 2026 REXABYTE SOFTWARE INC. (Igloo-Garage / Rex)');" ^
+  "[void]$sb.AppendLine(' * Additional Terms under GNU GPLv3 Section 7 apply to this file (see LICENSE-ADDITIONAL-TERMS.md).');" ^
+  "[void]$sb.AppendLine(' */');" ^
   "[void]$sb.AppendLine('#pragma once');" ^
   "[void]$sb.AppendLine('#include <cstddef>');" ^
   "[void]$sb.AppendLine('#include <cstdint>');" ^

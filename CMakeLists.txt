@@ -463,19 +463,19 @@ if(MSVC)
 endif()
 
 if(WIN32)
-    # The MSVC project embeds SupermodelManifest.xml through the .rc file and
+    # The MSVC project embeds Model3VulkanManifest.xml through the .rc file and
     # disables the compiler-generated manifest.  CMake's Ninja/VS link rules
     # always embed a manifest of their own, so build a CMake-specific .rc with
     # only the icon and feed the manifest through /MANIFESTINPUT.  That gives
     # the same executable without a duplicate MANIFEST resource.
-    set(SUPERMODEL_CMAKE_RC "${CMAKE_BINARY_DIR}/SupermodelResources.cmake.rc")
-    file(WRITE "${SUPERMODEL_CMAKE_RC}"
+    set(MODEL3VULKAN_CMAKE_RC "${CMAKE_BINARY_DIR}/Model3VulkanResources.cmake.rc")
+    file(WRITE "${MODEL3VULKAN_CMAKE_RC}"
         "#include \"winuser.h\"\n"
         "#include \"${CMAKE_SOURCE_DIR}/Src/OSD/Windows/SplashResource.h\"\n"
-        "#define IDI_SUPERMODEL 101\n"
-        "IDI_SUPERMODEL ICON \"${CMAKE_SOURCE_DIR}/output.ico\"\n"
+        "#define IDI_MODEL3VULKAN 101\n"
+        "IDI_MODEL3VULKAN ICON \"${CMAKE_SOURCE_DIR}/output.ico\"\n"
         "IDR_SPLASH RCDATA \"${CMAKE_SOURCE_DIR}/Igloo-Garage Presents.webp\"\n")
-    set_source_files_properties("${SUPERMODEL_CMAKE_RC}" PROPERTIES GENERATED TRUE)
+    set_source_files_properties("${MODEL3VULKAN_CMAKE_RC}" PROPERTIES GENERATED TRUE)
 endif()
 
 # -----------------------------------------------------------------------------
@@ -765,9 +765,9 @@ function(supermodel_add_platform_target backend)
             Src/OSD/Windows/FileSystemPath.cpp
             Src/OSD/Windows/SplashScreen.cpp
             Src/OSD/Windows/WinOutputs.cpp
-            ${SUPERMODEL_CMAKE_RC})
+            ${MODEL3VULKAN_CMAKE_RC})
         target_link_options(${target_name} PRIVATE
-            "/MANIFESTINPUT:${CMAKE_SOURCE_DIR}/Src/OSD/Windows/SupermodelManifest.xml")
+            "/MANIFESTINPUT:${CMAKE_SOURCE_DIR}/Src/OSD/Windows/Model3VulkanManifest.xml")
         if(backend STREQUAL "SDL2")
             target_sources(${target_name} PRIVATE
                 Src/OSD/Windows/DirectInputSystem.cpp)

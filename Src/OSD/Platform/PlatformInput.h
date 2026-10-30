@@ -1,9 +1,9 @@
 /**
- ** Supermodel-VK
+ ** Model 3-Vulkan
  ** A Vulkan-focused fork of Supermodel, the Sega Model 3 arcade emulator.
- ** Copyright 2026 The Supermodel-VK authors
+ ** Copyright (C) 2026 REXABYTE SOFTWARE INC. (Igloo-Garage / Rex)
  **
- ** This file is part of Supermodel-VK, and is derived from Supermodel,
+ ** This file is part of Model 3-Vulkan, and is derived from Supermodel,
  ** Copyright 2003-2026 The Supermodel Team.
  **
  ** Supermodel is free software: you can redistribute it and/or modify it under
@@ -51,6 +51,7 @@
 
 #include "Platform.h"
 
+#include <bitset>
 #include <cstdint>
 
 namespace OSD
@@ -294,7 +295,7 @@ void SetTextInputActive(Window* window, bool active);
  * which one it received.
  */
 constexpr unsigned kMaxGamepadAxes = 8;
-constexpr unsigned kMaxGamepadButtons = 32;
+constexpr unsigned kMaxGamepadButtons = 128;
 constexpr unsigned kMaxGamepadHats = 4;
 
 enum class PadAxis : uint8_t
@@ -379,7 +380,7 @@ struct GamepadState
     // Raw device state.  Axis values are normalised to [-1, 1]; triggers are
     // [0, 1] where the backend can identify them.
     float axes[kMaxGamepadAxes] = {};
-    uint32_t buttons = 0;
+    std::bitset<kMaxGamepadButtons> buttons;
     int16_t hats[kMaxGamepadHats] = {};   // -1 centred, else SDL POV angle (0, 90, 180, 270)
 
     // Standard layout, valid when GamepadInfo::isGamepad is true.

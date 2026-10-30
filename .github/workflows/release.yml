@@ -24,7 +24,7 @@ jobs:
         id: version
         run: |
           # The fork's own version, not the upstream core version that `make version` prints.
-          FORK_VERSION=$(grep -E '^#define[[:space:]]+SUPERMODEL_FORK_VERSION' Src/Version.h | awk -F'"' '{print $2}')
+          FORK_VERSION=$(grep -E '^#define[[:space:]]+MODEL3VULKAN_VERSION' Src/Version.h | awk -F'"' '{print $2}')
           echo "version=v${FORK_VERSION}" >> $GITHUB_OUTPUT
 
           

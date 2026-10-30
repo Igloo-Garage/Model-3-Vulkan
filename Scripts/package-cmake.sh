@@ -22,9 +22,9 @@ case "$platform" in
 esac
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-version="$(grep -E '^#define[[:space:]]+SUPERMODEL_FORK_VERSION' "$root/Src/Version.h" | awk -F'"' '{print $2}')"
+version="$(grep -E '^#define[[:space:]]+MODEL3VULKAN_VERSION' "$root/Src/Version.h" | awk -F'"' '{print $2}')"
 if [ -z "$version" ]; then
-    echo "Could not read SUPERMODEL_FORK_VERSION from Src/Version.h" >&2
+    echo "Could not read MODEL3VULKAN_VERSION from Src/Version.h" >&2
     exit 1
 fi
 
@@ -47,9 +47,10 @@ cp -R "$root/Assets/." "$stage/Data/Assets/"
 cp "$root/Model3VulkanBezel.png" "$stage/Data/Assets/"
 cp "$root/Docs/LICENSE.txt" "$stage/Data/"
 cp "$root/Docs/README from The Supermodel Team.txt" "$stage/Data/"
+cp "$root/Docs/NOTICE.md" "$root/LICENSE-ADDITIONAL-TERMS.md" "$root/TRADEMARK.md" "$stage/Data/"
 
 cp "$root/Docs/README-PACKAGE.txt" "$stage/README.txt"
-cp "$root/NOTICE.md" "$root/usermanual.md" "$root/usermanual_chs.md" "$root/supported-games.txt" "$stage"/
+cp "$root/usermanual.md" "$root/usermanual_chs.md" "$root/supported-games.txt" "$stage"/
 
 if [ -f "$root/Scripts/install-linux-deps.sh" ] && [ "$platform" = "Linux" ]; then
     cp "$root/Scripts/install-linux-deps.sh" "$stage/Scripts/"

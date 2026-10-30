@@ -113,7 +113,7 @@ BOXARTS = {
 def fetch(url: str, destination: Path) -> None:
     request = urllib.request.Request(
         url,
-        headers={"User-Agent": "Supermodel-VK boxart fetch"},
+        headers={"User-Agent": "Model 3-Vulkan boxart fetch"},
     )
     with urllib.request.urlopen(request, timeout=60) as response:
         destination.write_bytes(response.read())
@@ -155,7 +155,7 @@ def main() -> int:
     with (out_dir / "SOURCES.txt").open("w", encoding="utf-8") as sources:
         sources.write(
             "Boxarts downloaded from libretro/libretro-thumbnails,\n"
-            "MAME/Named_Boxarts. Files are named after Supermodel-VK ROM sets.\n\n"
+            "MAME/Named_Boxarts. Files are named after Model 3-Vulkan ROM sets.\n\n"
         )
         for set_name, saved_name, libretro_name in downloaded:
             sources.write(f"{saved_name} = {libretro_name}\n")

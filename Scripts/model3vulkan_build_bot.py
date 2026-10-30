@@ -20,7 +20,7 @@
 #
 
 #
-# supermodel_build_bot.py
+# model3vulkan_build_bot.py
 #
 # Git snapshot build script. Checks latest Git commit against Supermodel3.com
 # download page and builds and uploads a snapshot if needed. Intended to be run
@@ -40,7 +40,7 @@
 # To perform a test run:
 #   - Download https://supermodel3.com/Download.html to the directory from
 #     which the script will be run.
-#   - Run: python supermodel_build_bot.py --working-dir=c:\tmp\build --test-run
+#   - Run: python model3vulkan_build_bot.py --working-dir=c:\tmp\build --test-run
 #
 
 import argparse

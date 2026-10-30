@@ -1,14 +1,38 @@
+/**
+ ** Model 3-Vulkan
+ ** A Vulkan-focused fork of Supermodel, the Sega Model 3 arcade emulator.
+ ** Copyright (C) 2026 REXABYTE SOFTWARE INC. (Igloo-Garage / Rex)
+ **
+ ** This file is part of Model 3-Vulkan, and is derived from Supermodel,
+ ** Copyright 2003-2026 The Supermodel Team.
+ **
+ ** Additional Terms under GNU GPLv3 Section 7 apply to this file
+ ** (see LICENSE-ADDITIONAL-TERMS.md).
+ **
+ ** This program is free software: you can redistribute it and/or modify it
+ ** under the terms of the GNU General Public License as published by the Free
+ ** Software Foundation, either version 3 of the License, or (at your option)
+ ** any later version.
+ **
+ ** This program is distributed in the hope that it will be useful, but WITHOUT
+ ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+ ** more details.
+ **
+ ** You should have received a copy of the GNU General Public License along
+ ** with this program.  If not, see <http://www.gnu.org/licenses/>.
+ **/
 #if defined(SUPERMODEL_PURE_VULKAN) && defined(SUPERMODEL_OPENGL_ONLY)
 #error "A target cannot be both Pure-Vulkan and OpenGL-only."
 #endif
 
 #if defined(SUPERMODEL_OPENGL_ONLY)
 // Named in the tooltip that tells the user how to pick a GPU for OpenGL.
-#define SUPERMODEL_EXE_NAME "Supermodel-LegacyOG.exe"
+#define MODEL3VULKAN_EXE_NAME "Supermodel-LegacyOG.exe"
 #elif defined(SUPERMODEL_PURE_VULKAN)
-#define SUPERMODEL_EXE_NAME "Model3-Vulkan.exe"
+#define MODEL3VULKAN_EXE_NAME "Model3-Vulkan.exe"
 #else
-#define SUPERMODEL_EXE_NAME "Supermodel-VK.exe"
+#define MODEL3VULKAN_EXE_NAME "Model3-Vulkan.exe"
 #endif
 
 #if defined(SUPERMODEL_PURE_VULKAN)
@@ -60,6 +84,7 @@
 #include "OSD/ConfigFile.h"
 #include "OSD/FileSystemPath.h"
 #include "OSD/Logger.h"
+#include "Version.h"
 #include "OSD/SDL/FontProbe.h"
 #if !defined(SUPERMODEL_OPENGL_ONLY)
 #include "Graphics/Vulkan3D/VulkanContext.h"
@@ -349,6 +374,74 @@ static void DrawKofiBadge(float width, float height)
 	draw->AddText(textPos, white, label);
 }
 
+/*
+ * Footer attribution & licence badge, placed immediately to the left of the Ko-fi badge.
+ *
+ * Keeping the GPLv3 Section 7(b) / Section 5(d) Interactive Legal Notice on the persistent footer
+ * bar makes it visible on every tab rather than buried at the bottom of the Core tab. Rendering the
+ * badge updates s_footerLegalFrame so the launch path can verify the notice was not stripped out.
+ */
+static int s_footerLegalFrame = -1;
+
+static float AboutBadgeWidth()
+{
+	const float scale = ImGui::GetFontSize() / 18.0f;
+	const float icon = 16.0f * scale;
+	const char* label = Tr("关于与许可");
+	return 8.0f * scale + icon + 6.0f * scale + ImGui::CalcTextSize(label).x + 10.0f * scale;
+}
+
+static bool DrawAboutBadge(float width, float height)
+{
+	ImGui::InvisibleButton("##about_legal_badge", ImVec2(width, height));
+	const bool hovered = ImGui::IsItemHovered();
+	if (hovered)
+	{
+		HandOver();
+		DrawWrappedTooltip(Tr("查看作者署名、开源许可与商标声明"));
+	}
+	const bool clicked = ImGui::IsItemClicked();
+
+	const ImVec2 pMin = ImGui::GetItemRectMin();
+	const ImVec2 pMax = ImGui::GetItemRectMax();
+	if (pMax.x - pMin.x >= 40.0f && pMax.y - pMin.y >= 14.0f &&
+	    MODEL3VULKAN_AUTHOR[0] != '\0' && MODEL3VULKAN_REPO_URL[0] != '\0')
+	{
+		s_footerLegalFrame = ImGui::GetFrameCount();
+	}
+
+	ImDrawList* draw = ImGui::GetWindowDrawList();
+	const float scale = ImGui::GetFontSize() / 18.0f;
+	const bool dark = UiThemeIsDark();
+	const ImU32 bg = hovered
+		? (dark ? IM_COL32(78, 72, 66, 245) : IM_COL32(224, 214, 200, 250))
+		: (dark ? IM_COL32(58, 54, 50, 225) : IM_COL32(236, 228, 216, 235));
+	const ImU32 border = dark ? IM_COL32(236, 163, 74, 140) : IM_COL32(158, 92, 0, 120);
+	const ImU32 fg = ImGui::GetColorU32(ImGuiCol_Text);
+	const ImU32 accent = dark ? IM_COL32(236, 163, 74, 255) : IM_COL32(158, 92, 0, 255);
+
+	draw->AddRectFilled(pMin, pMax, bg, 6.0f * scale);
+	draw->AddRect(pMin, pMax, border, 6.0f * scale, 0, 1.0f * scale);
+
+	const float pad = 8.0f * scale;
+	const float icon = 16.0f * scale;
+	const ImVec2 center(pMin.x + pad + icon * 0.5f, pMin.y + height * 0.5f);
+	const float radius = icon * 0.44f;
+
+	// Info emblem: circle + dot + stem.
+	draw->AddCircle(center, radius, accent, 16, 1.5f * scale);
+	draw->AddCircleFilled(ImVec2(center.x, center.y - radius * 0.42f), 1.3f * scale, accent, 8);
+	draw->AddLine(ImVec2(center.x, center.y - radius * 0.08f),
+		ImVec2(center.x, center.y + radius * 0.52f), accent, 1.6f * scale);
+
+	const char* label = Tr("关于与许可");
+	const ImVec2 textSize = ImGui::CalcTextSize(label);
+	const ImVec2 textPos(pMin.x + pad + icon + 6.0f * scale,
+		pMin.y + (height - textSize.y) * 0.5f);
+	draw->AddText(textPos, fg, label);
+	return clicked;
+}
+
 static bool UiTabItem(const char* label)
 {
 	const bool open = ImGui::BeginTabItem(Tr(label));
@@ -623,6 +716,10 @@ static bool HasDedicatedUI(const std::string& key)
         "CameraCutAngleDegrees", "InstanceCutAngleDegrees", "CutDistanceScale",
         // Gamepad steering smoothing, drawn by hand on the 力反馈 / 灵敏度 page.
         "GamepadSteeringSmoothing",
+        // The set starred in the game list right-click menu. It is not an emulator setting: it is a
+        // list preference with its own menu item, and the generic renderer used to put a bare,
+        // untranslated text box for it at the top of the 核心 page. Written straight to the ini.
+        "AutoLaunchGame",
         // Instance interpolation has no control: per-instance blending leaves a one-frame seam
         // between a snapped model and an interpolated neighbour, so it is not something to offer
         // as a checkbox. The key and SM3D_INST_INTERP stay for experiments; listed here so the
@@ -1515,6 +1612,15 @@ static char g_gameListFilter[128] = {};
 // selectedGameIndex to mean "do not start a game", so saving that field directly
 // would forget the selection every time the program was quit from the button.
 static std::string g_lastSelectedSet;
+
+/*
+ * True once the automatic launch has been attempted.
+ *
+ * Deliberately process-lifetime rather than per-session: without it, coming back from that game
+ * (or from any later one) would start it again on every return to the list, which turns a
+ * convenience into a loop the user cannot escape without editing the INI by hand.
+ */
+static bool s_autoLaunchDone = false;
 
 // Set when the running game was started from Manage Saves -> Load. The next
 // GuiRunOnce() call is then a return from that game, and reopens the manager for
@@ -2719,7 +2825,7 @@ static bool DecodeImageBytes(const uint8_t* data, size_t size, int maxWidth,
 
     std::error_code error;
     const std::filesystem::path temporary =
-        std::filesystem::temp_directory_path(error) / "supermodel-hostcore-thumb.png";
+        std::filesystem::temp_directory_path(error) / "model3vulkan-hostcore-thumb.png";
     if (error)
         return false;
 
@@ -3464,7 +3570,7 @@ static void ImportLegacyStates()
         meta.StructSize = sizeof(HostSaveMeta);
         std::snprintf(meta.GameName, sizeof(meta.GameName), "%s", g_manageSavesGame.c_str());
         std::snprintf(meta.Title, sizeof(meta.Title), "%s", targetName.c_str());
-        std::snprintf(meta.Version, sizeof(meta.Version), "%s", SUPERMODEL_FORK_VERSION);
+        std::snprintf(meta.Version, sizeof(meta.Version), "%s", MODEL3VULKAN_VERSION);
 
         // A legacy .st carries no metadata, so the file's own timestamp is the only record of when
         // it was written. Without this the imported card would show no date at all and sort last.
@@ -3993,8 +4099,14 @@ static std::string SelectedRomPath(int index)
  * changes what the number means, not which game was last played. Collapsing the
  * three values into one helper keeps the two write paths at the end of GuiRunOnce
  * ("saved" and "window closed without saving") from drifting apart.
+ *
+ * `source` is the runtime config, which is where the auto-launch choice lives. It is passed in
+ * separately because the second write path targets the file's own node rather than the edited
+ * settings: the starring is a list preference, so it survives a session where the user declined
+ * to save everything else. When both arguments are the same node the read happens before the
+ * write, so it copies the value onto itself harmlessly.
  */
-static void SaveGameListPreferences(Util::Config::Node& config, int selectedGame)
+static void SaveGameListPreferences(Util::Config::Node& config, const Util::Config::Node& source, int selectedGame)
 {
     std::string selectedSet;
     if (selectedGame >= 0 && selectedGame < (int)g_roms.size())
@@ -4005,6 +4117,10 @@ static void SaveGameListPreferences(Util::Config::Node& config, int selectedGame
     config.Set("GuiLastSelectedGame", selectedSet);
     config.Set("GuiGameListScrollY", g_gameListScrollY);
     config.Set("GuiGameListFilter", std::string(g_gameListFilter));
+    std::string autoLaunch;
+    if (const Util::Config::Node* node = source.TryGet("AutoLaunchGame"))
+        autoLaunch = node->ValueAsDefault<std::string>("");
+    config.Set("AutoLaunchGame", autoLaunch);
 }
 
 static Game GameForSelection(const std::map<std::string, Game>& games, int index)
@@ -4640,6 +4756,7 @@ static void DrawHardwarePresetSettings(Util::Config::Node& config)
     {
         const char* label;
         int width, height, msaa, alphaSort, texFilter;
+        int internalRes;
         // The ultra-low tier is a whole-system choice rather than four picture knobs: it also
         // drops to the arcade cadence, turns interpolation and post-processing off, and uses the
         // cheap shader path. Matching it therefore has to look at those keys too, or the combo
@@ -4647,11 +4764,12 @@ static void DrawHardwarePresetSettings(Util::Config::Node& config)
         bool ultraLow;
     };
     static const QualityTier tiers[] = {
-        { "超低配极速（496×384，核显）", 496, 384, 0, 0, 0, true },
-        { "核显 / 低配（1080p，1x）", 1920, 1080, 0, 0, 1, false },
-        { "入门独显（1080p，2x）",    1920, 1080, 2, 0, 1, false },
-        { "中端独显（2K，2x）",       2560, 1440, 2, 1, 2, false },
-        { "高端独显（4K，4x）",       3840, 2160, 4, 1, 2, false },
+        { "超低配极速（496×384，核显）", 496, 384, 0, 0, 0, 1, true },
+        { "核显平衡（992×768，2x 原生）", 992, 768, 0, 0, 0, 2, true },
+        { "核显 / 低配（1080p，1x）", 1920, 1080, 0, 0, 1, 0, false },
+        { "入门独显（1080p，2x）",    1920, 1080, 2, 0, 1, 0, false },
+        { "中端独显（2K，2x）",       2560, 1440, 2, 1, 2, 0, false },
+        { "高端独显（4K，4x）",       3840, 2160, 4, 1, 2, 0, false },
     };
     constexpr int tierCount = IM_ARRAYSIZE(tiers);
     constexpr int customTierIndex = tierCount;
@@ -4684,16 +4802,13 @@ static void DrawHardwarePresetSettings(Util::Config::Node& config)
 
     const auto tierExtrasMatch = [&](const QualityTier& tier)
     {
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+        if (tierInternalRes != tier.internalRes)
+            return false;
+#endif
         if (!tier.ultraLow)
             return true;
-        // The OpenGL build does not offer low-resolution rendering (it is a Vulkan render-target
-        // change), so its ultra-low tier is identified by the keys it does have.
-#if defined(SUPERMODEL_OPENGL_ONLY)
-        constexpr bool tierLowRes = true;
-#else
-        const bool tierLowRes = tierInternalRes == 1;
-#endif
-        return tierIntegerScale && tierLowRes && !tierQuadInterp && tierRefreshMode == 0 && !tierInterp &&
+        return tierIntegerScale && !tierQuadInterp && tierRefreshMode == 0 && !tierInterp &&
             !tierFxaa && tierCrt == 0 && tierGlow == 0 && !tierFrost;
     };
     const auto tierMatches = [&](const QualityTier& tier)
@@ -4722,7 +4837,7 @@ static void DrawHardwarePresetSettings(Util::Config::Node& config)
     // even if the individual values happen to equal a tier, until a tier is picked again.
     static bool customSelected = false;
     static const char* tierItems[tierCount + 1] = {
-        tiers[0].label, tiers[1].label, tiers[2].label, tiers[3].label, tiers[4].label,
+        tiers[0].label, tiers[1].label, tiers[2].label, tiers[3].label, tiers[4].label, tiers[5].label,
         "自定义（按下面几项单独调）",
     };
     static const char* tierTr[tierCount + 1];
@@ -4750,6 +4865,7 @@ static void DrawHardwarePresetSettings(Util::Config::Node& config)
             config.Set("MSAA", tier.msaa);
             config.Set("AlphaSortMode", tier.alphaSort);
             config.Set("TexFilter", tier.texFilter);
+            config.Set("InternalResolution", tier.internalRes);
 #endif
             if (tier.ultraLow)
             {
@@ -4776,18 +4892,14 @@ static void DrawHardwarePresetSettings(Util::Config::Node& config)
                 config.Set("LowLatency", true);
                 config.Set("UiFrostedGlass", false);
 #if !defined(SUPERMODEL_OPENGL_ONLY)
-                // The 3D scene at the native 496x384, upscaled onto the picture. This is what keeps the
-                // 24-EU class of integrated GPU at 60 Hz at 1080p; IntegerScale above stays set, but
-                // this option takes precedence over it (see CalcScreenGeometry), so the preset's
-                // picture fills the display instead of sitting in a 2x box.
-                config.Set("InternalResolution", 1);
                 config.Set("QuadInterpolation", false);
                 config.Set("PostFXAA", false);
                 config.Set("PostCRT", 0);
                 config.Set("PostScanlines", 0);
                 config.Set("PostGlow", 0);
 #endif
-                InfoLog("GUI: applied the ultra-low preset (496x384, no MSAA/interpolation/post, fast quad path).");
+                InfoLog("GUI: applied the ultra-low preset (%s, internal %s, no MSAA/interpolation/post, fast quad path).",
+                    tier.label, tier.internalRes == 1 ? "496x384" : (tier.internalRes == 2 ? "992x768" : "native"));
             }
             appliedTier = tierSelection;
             appliedWidth = w;
@@ -4802,16 +4914,17 @@ static void DrawHardwarePresetSettings(Util::Config::Node& config)
     HelpMarker(
         "一次配好分辨率、MSAA、半透明排序、贴图过滤等相关选项，下一局生效。\n"
         "超低配极速：496×384 原生 3D + 等比放大，关插值/后处理。\n"
+        "核显平衡：992×768 2x 原生 3D + 等比放大，画质与帧率平衡。\n"
         "核显 / 低配：1080p、1x、原版半透明与硬件贴图，最稳。\n"
         "入门独显：1080p + 2x MSAA。\n"
         "中端独显：2K + 2x MSAA + 逐像素排序 + 锐利贴图。\n"
         "高端独显：4K + 4x MSAA，同上最高画质。\n"
         "自定义：不套预设，只改下面各项。");
 
-    // The ultra-low tier's low resolution comes from rendering the 3D scene at 496x384, not from the
+    // The ultra-low tier's low resolution comes from rendering the 3D scene at 496x384 or 992x768, not from the
     // number in XResolution/YResolution - and IntegerScale is not what keeps it alive any more.
     // Saying so here is the only place the two controls sit together.
-    if (tierWidth == 496 && tierHeight == 384 && tierInternalRes == 0 && !tierIntegerScale)
+    if ((tierWidth == 496 && tierHeight == 384 || tierWidth == 992 && tierHeight == 768) && tierInternalRes == 0 && !tierIntegerScale)
         UiTextWarn("超低配的低开销靠「低分辨率渲染」（或「整数倍缩放」）；两者都关掉时全屏会按面板分辨率渲染，帧率会明显下降。");
 
 }
@@ -5895,7 +6008,19 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
     const char* controlPresetLabels[IM_ARRAYSIZE(controlPresets)];
     for (int i = 0; i < IM_ARRAYSIZE(controlPresets); i++)
         controlPresetLabels[i] = Tr(controlPresets[i].label);
-    ComboRow(Tr("键位预设##ControlPreset"), &presetIndex, controlPresetLabels, IM_ARRAYSIZE(controlPresetLabels));
+    if (ComboRow(Tr("键位预设##ControlPreset"), &presetIndex, controlPresetLabels, IM_ARRAYSIZE(controlPresetLabels)))
+    {
+        /*
+         * Write the choice through immediately.
+         *
+         * The combo only edits a local index, and this block is re-run from the config every
+         * frame. Without the store the next frame read the unchanged value back, recomputed
+         * presetIndex from it and the selection snapped back - picking "keyboard" looked like
+         * the control was dead. Applying the preset itself stays on the button below, so the
+         * choice can be inspected before anything is overwritten.
+         */
+        config.Set("ControlPreset", std::string(controlPresets[presetIndex].id));
+    }
 
     if (UiButton("应用推荐键位"))
         ImGui::OpenPopup("ApplyPreset");
@@ -7273,9 +7398,48 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
             }
         }
     }
+
+    /*
+     * Automatic launch: the set the user starred in the list right-click menu, started once on the
+     * first frame the ROM list is available.
+     *
+     * Ordered after the environment hooks above so a scripted session (SM3D_AUTOSTART and friends)
+     * still wins, and skipped when something is already launching. Unsupported sets are ignored: the
+     * row exists but cannot be started, so staying in the list is the honest outcome.
+     */
+    if (!s_autoLaunchDone && !exit && !g_manageSavesOpen)
+    {
+        const std::string autoSet = config["AutoLaunchGame"].ValueAsDefault<std::string>("");
+        if (!autoSet.empty())
+        {
+            s_autoLaunchDone = true;
+            const int row = RomIndexForSet(autoSet);
+            if (row >= 0 && g_roms[row].supported)
+            {
+                selectedGameIndex = row;
+                g_returnToManageSaves = false;
+                saveSettings = true;
+                exit = true;
+                InfoLog("GUI: auto-launching '%s' at startup.", autoSet.c_str());
+            }
+            else
+            {
+                InfoLog("GUI: auto-launch set '%s' is not in the ROM list (or is unsupported); "
+                    "staying in the list.", autoSet.c_str());
+            }
+        }
+    }
 #endif
 
 #if defined(SUPERMODEL_PURE_VULKAN)
+    /*
+     * A star or an SM3D_AUTOSTART hook above may have set exit on this very frame. Nothing has been
+     * recorded yet, and nothing may be: a presented settings frame would retire the splash art and
+     * raise the window for the one frame before the game starts, which reads as a flash.
+     */
+    if (exit)
+        return;
+
     // A minimised window or a swapchain recreation skips this frame entirely:
     // there is no acquired image to draw into, and calling ImGui::NewFrame()
     // without a matching Render() would leave ImGui mid-frame.
@@ -7613,6 +7777,10 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
             ImGui::TableSetupScrollFreeze(0, 1);
             ImGui::TableHeadersRow();
 
+#if defined(SUPERMODEL_PURE_VULKAN)
+            // The set marked for automatic launch, read once per frame rather than once per row.
+            const std::string autoLaunchSet = config["AutoLaunchGame"].ValueAsDefault<std::string>("");
+#endif
             for (int row = 0; row < (int)g_roms.size(); row++)
             {
                 const RomEntry& entry = g_roms[row];
@@ -7639,7 +7807,13 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
                 const std::string display = !entry.supported
                     ? entry.setName + Tr("  （未收录）")
                     : (version.empty() ? title : title + " (" + version + ")");
-                const std::string rowLabel = display + "##" + entry.setName;
+                std::string rowLabel = display + "##" + entry.setName;
+#if defined(SUPERMODEL_PURE_VULKAN)
+                // Starred rather than suffixed: the name column is the one part of the row that can
+                // be clipped in a narrow window, and the marker is only useful if it survives that.
+                if (!autoLaunchSet.empty() && entry.setName == autoLaunchSet)
+                    rowLabel = "★ " + display + "##" + entry.setName;
+#endif
                 // A set that cannot be started is dimmed with the theme's own secondary text colour,
                 // not a literal grey: a literal tuned for one palette is unreadable in the other,
                 // and this row is exactly where someone looks for the reason a game will not launch.
@@ -7660,6 +7834,33 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
                         selectedGameIndex = row;
                         OpenManageSaves(entry.setName);
                     }
+                    HandOver();
+                    /*
+                     * The startup preference is written straight to the file rather than waiting
+                     * for the settings to be applied: it belongs to the list, not to the settings
+                     * the user may still be editing. The set name is stored, not the row index,
+                     * so the choice survives zips being added or removed.
+                     */
+                    const bool starThisRow = !autoLaunchSet.empty() && entry.setName == autoLaunchSet;
+                    /*
+                     * A set that cannot be started cannot be starred either. Clearing an existing
+                     * star is still allowed: otherwise the only way out of a stale preference left
+                     * behind by a removed or broken zip would be editing the ini by hand.
+                     */
+                    const bool starBlocked = !entry.supported && !starThisRow;
+                    if (starBlocked)
+                        ImGui::BeginDisabled();
+                    if (ImGui::MenuItem(Tr(starThisRow ? "取消启动时自动运行" : "设为启动时自动运行")))
+                    {
+                        // Keep the cover preview and the list highlight on the row being edited,
+                        // the same way "管理存档..." above does.
+                        selectedGameIndex = row;
+                        const std::string chosen = starThisRow ? std::string() : entry.setName;
+                        config.Set("AutoLaunchGame", chosen);
+                        g_writeSettings = true;
+                    }
+                    if (starBlocked)
+                        ImGui::EndDisabled();
                     HandOver();
                     ImGui::EndPopup();
                 }
@@ -8041,10 +8242,15 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
         const float padding = ImGui::GetStyle().FramePadding.x * 2.0f + 24.0f;
         const float minWidth = widest + padding;
 
+        const float kofiWidth = KofiBadgeWidth();
+        const float aboutWidth = AboutBadgeWidth();
+        const float badgesGroupWidth = aboutWidth + gap + kofiWidth;
+
         // Compact mode puts three buttons on the first row and two on the second, so the share is
-        // computed per row rather than across all five.
+        // computed per row rather than across all five. Reserve room for the right-aligned About +
+        // Ko-fi badge pair so the five buttons on a single row do not expand over them.
         const int perRow = compact ? 3 : footerCount;
-        const float footerAvail = (std::max)(1.0f, contentWidth - panePad * 2.0f);
+        const float footerAvail = (std::max)(1.0f, contentWidth - panePad * 2.0f - (compact ? 0.0f : (badgesGroupWidth + gap)));
         const float evenShare = (footerAvail - gap * (perRow - 1)) / (float)perRow;
 
         // Text completeness comes first, so the labels set the floor. Above that the buttons grow to
@@ -8070,7 +8276,9 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
 
         if (UiButton(footerLabels[0], buttonSize))
         {
-            if (selectedGameIndex < 0)
+            if (s_footerLegalFrame < ImGui::GetFrameCount() - 1)
+                ImGui::OpenPopup(Tr("关于与开源许可##AboutLegalModal"));
+            else if (selectedGameIndex < 0)
                 ImGui::OpenPopup("NoGame");
             else
             {
@@ -8105,25 +8313,23 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
         // where it cost the table a row. A transient save/load note shares the same line, to its
         // right. The line is reserved whether or not the note is showing, so nothing moves.
         //
-        // The Ko-fi badge goes on the button line, right-aligned in the pane, so it shares the
-        // buttons' baseline instead of hanging lower on the status line. The first row's right edge
-        // is the test for whether that row has room: in the compact two-row layout the badge sits
-        // beside the three buttons of the first row, not beside the shorter second one. When even
-        // that is too tight the badge falls back to the status line, where the text is clipped so it
-        // cannot run underneath.
-        const float kofiWidth = KofiBadgeWidth();
+        // The About & licence badge and the Ko-fi badge sit together on the button line,
+        // right-aligned in the pane, sharing the buttons' baseline. When the button row is too tight
+        // the pair falls back to the status line, where the status text is clipped so it cannot run
+        // underneath.
         const float kofiX = paneX + (contentWidth - panePad * 2.0f) - kofiWidth;
-        const float kofiScreenX = ImGui::GetWindowPos().x + kofiX;
+        const float aboutX = kofiX - gap - aboutWidth;
+        const float badgesScreenX = ImGui::GetWindowPos().x + aboutX;
         const float buttonsRight = compact ? firstRowRight : ImGui::GetItemRectMax().x;
-        const bool kofiOnButtonRow = kofiScreenX > buttonsRight + gap;
-        const bool showKofi = kofiOnButtonRow || kofiX > paneX + 80.0f * uiScale;
+        const bool badgesOnButtonRow = badgesScreenX > buttonsRight + gap;
+        const bool showBadges = badgesOnButtonRow || aboutX > paneX + 80.0f * uiScale;
 
         ImGui::SetCursorPos(ImVec2(paneX, statusTextY));
         const ImVec2 statusScreen = ImGui::GetCursorScreenPos();
-        if (showKofi && !kofiOnButtonRow)
+        if (showBadges && !badgesOnButtonRow)
         {
             ImGui::PushClipRect(statusScreen,
-                ImVec2(kofiScreenX - gap, statusScreen.y + statusTextHeight), true);
+                ImVec2(badgesScreenX - gap, statusScreen.y + statusTextHeight), true);
         }
         UiTextDim("找到 %d 个 ROM", (int)g_roms.size());
         if (ImGui::GetTime() - g_statusAt < 3.0 && !g_statusNote.empty())
@@ -8131,19 +8337,62 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
             ImGui::SameLine(0.0f, ImGui::GetStyle().ItemSpacing.x * 2.0f);
             UiTextDim("%s", g_statusNote.c_str());
         }
-        if (showKofi && !kofiOnButtonRow)
+        if (showBadges && !badgesOnButtonRow)
             ImGui::PopClipRect();
 
-        if (kofiOnButtonRow)
+        if (badgesOnButtonRow)
         {
+            ImGui::SetCursorPos(ImVec2(aboutX, buttonsY));
+            if (DrawAboutBadge(aboutWidth, buttonHeight))
+                ImGui::OpenPopup(Tr("关于与开源许可##AboutLegalModal"));
             ImGui::SetCursorPos(ImVec2(kofiX, buttonsY));
             DrawKofiBadge(kofiWidth, buttonHeight);
         }
-        else if (showKofi)
+        else if (showBadges)
         {
+            ImGui::SetCursorPos(ImVec2(aboutX, statusY));
+            if (DrawAboutBadge(aboutWidth, statusHeight))
+                ImGui::OpenPopup(Tr("关于与开源许可##AboutLegalModal"));
             ImGui::SetCursorPos(ImVec2(kofiX, statusY));
             DrawKofiBadge(kofiWidth, statusHeight);
         }
+    }
+
+    /*
+     * Centre the licence box explicitly, every frame.
+     *
+     * BeginPopupModal() only centres with ImGuiCond_FirstUseEver, i.e. once, using whatever size the
+     * window had when it appeared. With AlwaysAutoResize and no fixed width that measurement is taken
+     * while the box is still a single line tall: UiText()/UiTextDim() push a wrap position derived from
+     * GetContentRegionAvail(), so the wrapped text widens the window, which widens the wrap position, and
+     * the box settles somewhere else than where it was centred. Locking the width cuts that feedback loop
+     * (ImGui treats a size set through SetNextWindowSize() as an override of AlwaysAutoResize, so only the
+     * height keeps auto-fitting), and re-applying the position with a centre pivot keeps the dialog centred
+     * when the window is resized or the interface is rescaled for a different DPI.
+     */
+    const ImVec2 aboutCenter(ImGui::GetIO().DisplaySize.x * 0.5f, ImGui::GetIO().DisplaySize.y * 0.5f);
+    const float aboutModalWidth = (std::min)(580.0f * uiScale, ImGui::GetIO().DisplaySize.x - 48.0f * uiScale);
+    ImGui::SetNextWindowPos(aboutCenter, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(aboutModalWidth, 0.0f), ImGuiCond_Always);
+
+    if (ImGui::BeginPopupModal(Tr("关于与开源许可##AboutLegalModal"), nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        UiText(MODEL3VULKAN_TITLE_FULL);
+        UiText(MODEL3VULKAN_COPYRIGHT);
+        UiText(MODEL3VULKAN_AUTHOR);
+        ImGui::Spacing();
+        UiTextDim("Model 3-Vulkan(TM) 与 Igloo-Garage(TM) 是 REXABYTE SOFTWARE INC. 的商标与品牌资产；GPLv3 第 7(e) 条不授予商标权。");
+        ImGui::Spacing();
+        if (UiButton(MODEL3VULKAN_REPO_URL))
+            OSD::Platform::OpenURL(MODEL3VULKAN_REPO_URL);
+        ImGui::Spacing();
+        UiTextDim("本程序按 GNU GPL v3（或更高版本）发布，不提供任何担保。完整许可证见 Data/LICENSE.txt。");
+        UiTextDim("模拟核心基于 Supermodel，版权所有 2003-2026 The Supermodel Team。");
+        UiTextDim("原创模块的附加署名、修改版标注与商标条款见 Data/LICENSE-ADDITIONAL-TERMS.md 与 Data/TRADEMARK.md。");
+        ImGui::Spacing();
+        if (UiButton("确定", ImVec2(120, 0)))
+            ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
     }
 
     if (ImGui::BeginPopupModal("NoGame", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
@@ -9375,7 +9624,7 @@ GuiState* GuiCreate(const std::string& configPath, const Util::Config::Node& fil
     }
 
     OSD::Platform::WindowDesc windowDesc;
-    windowDesc.title = SUPERMODEL_TITLE_FULL;
+    windowDesc.title = MODEL3VULKAN_TITLE_FULL;
     windowDesc.width = windowWidth;
     windowDesc.height = windowHeight;
     windowDesc.flags =
@@ -9428,6 +9677,7 @@ GuiState* GuiCreate(const std::string& configPath, const Util::Config::Node& fil
     g_lastSelectedSet.clear();
     g_returnToManageSaves = false;
     g_returnToManageSavesSet.clear();
+    s_autoLaunchDone = false;
 
     // A rate saved on a faster display is clamped once, now that the window's display is known.
     ClampSavedFixedRefreshRate(state->config, state->fullConfig, state->window);
@@ -9743,7 +9993,7 @@ std::vector<std::string> GuiRunOnce(GuiState* state)
         g_guiFrameSkipped = false;
 #endif
 
-        if (splashPending &&
+        if (!exit && splashPending &&
             (g_guiFramePresented || std::chrono::steady_clock::now() > splashDeadline))
         {
             splashPending = false;
@@ -9762,7 +10012,22 @@ std::vector<std::string> GuiRunOnce(GuiState* state)
         }
 
         if (exit)
+        {
+            /*
+             * Going straight into the game: take the artwork down but keep the settings window
+             * hidden. Raising it here would show the window for the frames it takes to finish
+             * closing it, which is exactly the flash this path exists to avoid.
+             */
+            if (splashPending)
+            {
+                splashPending = false;
+                state->splashPending = false;
+#ifdef _WIN32
+                OSD::Windows::HideStartupSplash();
+#endif
+            }
             break;
+        }
     }
 
     if (!closed && !SelectedRomPath(state->selectedGame).empty())
@@ -9796,7 +10061,7 @@ std::vector<std::string> GuiRunOnce(GuiState* state)
         }
         if (g_previewSplit > 0.0f)
             state->config.Set("GuiPreviewSplit", g_previewSplit);
-        SaveGameListPreferences(state->config, state->selectedGame);
+        SaveGameListPreferences(state->config, state->config, state->selectedGame);
         Util::Config::CopyINISection(&state->fullConfig, state->config);
         // "Save as" redirects just this one write. The destination is cleared afterwards so a later
         // plain save goes back to the standard file instead of silently continuing to overwrite the
@@ -9817,7 +10082,7 @@ std::vector<std::string> GuiRunOnce(GuiState* state)
         // Same idea for the game-list position: it is a UI preference, not part of the edited
         // settings, so it goes into the file directly rather than through the config the user
         // declined to save.
-        SaveGameListPreferences(state->fullConfig, state->selectedGame);
+        SaveGameListPreferences(state->fullConfig, state->config, state->selectedGame);
         Util::Config::WriteINIFile(state->configPath, state->fullConfig, TimestampedConfigFileComment("Updated window size."));
     }
 

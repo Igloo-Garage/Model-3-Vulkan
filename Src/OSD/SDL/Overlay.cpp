@@ -1,10 +1,13 @@
 /**
- ** Supermodel-VK
+ ** Model 3-Vulkan
  ** A Vulkan-focused fork of Supermodel, the Sega Model 3 arcade emulator.
- ** Copyright 2026 The Supermodel-VK authors
+ ** Copyright (C) 2026 REXABYTE SOFTWARE INC. (Igloo-Garage / Rex)
  **
- ** This file is part of Supermodel-VK, and is derived from Supermodel,
+ ** This file is part of Model 3-Vulkan, and is derived from Supermodel,
  ** Copyright 2003-2026 The Supermodel Team.
+ **
+ ** Additional Terms under GNU GPLv3 Section 7 apply to this file
+ ** (see LICENSE-ADDITIONAL-TERMS.md).
  **
  ** Supermodel is free software: you can redistribute it and/or modify it under
  ** the terms of the GNU General Public License as published by the Free
@@ -31,6 +34,7 @@
 #include "OSD/Logger.h"
 #include "Util/Format.h"
 #include "Util/NewConfig.h"
+#include "Version.h"
 
 #include "../Pkgs/imgui/imgui.h"
 #if !defined(SUPERMODEL_PURE_VULKAN)
@@ -1477,7 +1481,10 @@ bool OverlayNewFrame(Util::Config::Node& config)
 		 * bottom of the window. StartChild with a negative height means "everything except that much",
 		 * so the body scrolls and the footer does not.
 		 */
-		const float footer = ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y;
+		// Two rows: the Apply/Cancel/Close buttons, and the attribution line required by
+		// LICENSE-ADDITIONAL-TERMS.md (GPL v3 Section 7(b)).  The body loses one row, not the
+		// attribution.
+		const float footer = ImGui::GetFrameHeightWithSpacing() * 2.0f;
 
 		/*
 		 * No background on the scrolling body.
@@ -1519,6 +1526,17 @@ bool OverlayNewFrame(Util::Config::Node& config)
 		ImGui::SameLine();
 		if (OverlayButton("关闭##OverlayClose", ImVec2(buttonWidth, 0)))
 			g_visible = false;
+
+		/*
+		 * Attribution required by LICENSE-ADDITIONAL-TERMS.md (GPL v3 Section 7(b)).
+		 * Always drawn while the panel is open; there is no setting that hides it.
+		 */
+		ImGui::Spacing();
+		ImGui::TextDisabled("%s by %s  -", MODEL3VULKAN_TITLE, MODEL3VULKAN_AUTHOR);
+		ImGui::SameLine();
+		if (ImGui::TextLink(MODEL3VULKAN_REPO_URL))
+			OSD::Platform::OpenURL(MODEL3VULKAN_REPO_URL);
+		HandOver();
 	}
 	ImGui::End();
 	ImGui::PopStyleVar(2);

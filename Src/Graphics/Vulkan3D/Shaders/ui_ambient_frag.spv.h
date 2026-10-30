@@ -1,3 +1,8 @@
+/*
+ * Model 3-Vulkan - generated SPIR-V header. Do not edit; regenerate with Scripts/CompileVulkanShaders.cmd.
+ * Copyright (C) 2026 REXABYTE SOFTWARE INC. (Igloo-Garage / Rex)
+ * Additional Terms under GNU GPLv3 Section 7 apply to this file (see LICENSE-ADDITIONAL-TERMS.md).
+ */
 #pragma once
 #include <cstddef>
 #include <cstdint>

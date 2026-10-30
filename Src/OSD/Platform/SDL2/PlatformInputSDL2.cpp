@@ -1,9 +1,9 @@
 /**
- ** Supermodel-VK
+ ** Model 3-Vulkan
  ** A Vulkan-focused fork of Supermodel, the Sega Model 3 arcade emulator.
- ** Copyright 2026 The Supermodel-VK authors
+ ** Copyright (C) 2026 REXABYTE SOFTWARE INC. (Igloo-Garage / Rex)
  **
- ** This file is part of Supermodel-VK, and is derived from Supermodel,
+ ** This file is part of Model 3-Vulkan, and is derived from Supermodel,
  ** Copyright 2003-2026 The Supermodel Team.
  **
  ** Supermodel is free software: you can redistribute it and/or modify it under
@@ -483,7 +483,7 @@ bool GetGamepadState(GamepadId id, GamepadState* state)
     for (unsigned i = 0; i < kMaxGamepadButtons && static_cast<int>(i) < buttonCount; ++i)
     {
         if (SDL_JoystickGetButton(gamepad->joystick, static_cast<int>(i)) != 0)
-            state->buttons |= (1u << i);
+            state->buttons.set(i, true);
     }
 
     const int hatCount = SDL_JoystickNumHats(gamepad->joystick);
