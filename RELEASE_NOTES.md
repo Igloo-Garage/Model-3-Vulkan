@@ -1,5 +1,41 @@
 # Model 3-Vulkan Release Notes
 
+## v0.9.8.7 — macOS only (2026-10-30)
+
+> **This release is for macOS only.** It contains one asset, `Model3-Vulkan.v0.9.8.7.for.macOS.tar.gz`.
+> There is no Windows or Linux build in this release, and none is needed: nothing outside the
+> macOS platform layer changed since v0.9.8.6.
+
+**Model 3-Vulkan v0.9.8.7 makes the macOS build start again.** v0.9.8.6 refused to launch with
+"Vulkan 1.3 required" (`VkResult -7`) on every Mac that has been tried; this release fixes the
+three macOS-only defects behind that message.
+
+### Fixed (macOS)
+
+* **Startup no longer fails with `VkResult -7`.** The preflight asked for `VK_KHR_portability_enumeration`, an extension the Vulkan *loader* synthesises. The macOS package loads MoltenVK directly through volk with no loader in between, so the request was rejected before any device was looked at. The extension is now requested only when the implementation actually lists it, and the portability flag is set together with it.
+* **The preflight no longer rejects a Vulkan 1.2 device that the renderer accepts.** `ClassifyDevice()` has always allowed either Vulkan 1.3 or Vulkan 1.2 with `VK_KHR_dynamic_rendering` plus `VK_KHR_synchronization2`; the preflight only accepted 1.3, so a machine the renderer could drive was turned away at the door. Both now use the same rule.
+* **The macOS package finds its own data again.** The path helper looked for `Config/` beside the executable while the archive ships `Data/Config/`, so `Games.xml`, `Boxarts/`, NVRAM and saves were all invisible. `Data/` is used when it exists; the old layout still works as a fallback. The default ROM folder is `roms/`, next to the executable.
+
+### Known limitation on macOS 13
+
+`.zst` save containers need **macOS 14 or newer**. The optional HostCore module is a .NET Native AOT library that links the system Swift runtime, and the Swift function it needs (`swift_getTypeByMangledNameInContext2`) first shipped in Swift 5.9, which is what macOS 14 includes. On macOS 13 the module does not load, the emulator says so once in the log and falls back to **`.st`**, which works normally — saving, F7 loading and `-load-state` were all verified on macOS 13.7.8. Nothing else is affected.
+
+### No OpenGL build for macOS
+
+The macOS package no longer offers the traditional OpenGL renderer. Keeping three platforms and six builds in step — Vulkan and OpenGL for Windows, Linux and macOS — is more than one person with limited hardware can keep tested, so macOS ships the Vulkan build only. `Supermodel-LegacyOG` remains available on Windows.
+
+### Verified on hardware
+
+macOS 13.7.8 on an Intel Core i5-8365U: the settings window opens, all 56 ROM sets in the local folder are listed and identified, Daytona USA 2 runs (bezel, textures, audio), and a `.st` save state is written and loaded back at the expected PC. The log contains no errors apart from the HostCore notice described above.
+
+### Settings for Intel integrated graphics
+
+On a 24-EU Intel iGPU the 3D scene is the expensive part. If a game is choppy, open **Advanced → Hardware preset** and choose **integrated graphics (992×768)** or the **ultra-low (496×384)** preset: the 3D scene is rendered at a fixed lower resolution and scaled up, while the HUD stays sharp.
+
+Thanks to Mateus109 for the report (issue #12).
+
+Compatibility: save states and NVRAM are unchanged; `SUPERMODEL_VERSION` is untouched. The Windows and Linux builds are unchanged since v0.9.8.6.
+
 ## v0.9.8.6 (2026-10-29)
 
 **Model 3-Vulkan v0.9.8.6** makes every hotkey configurable from the INI file, fixes input handling for mice, standalone shifters and button boxes, and adds a one-click automatic launch.
