@@ -39,6 +39,8 @@ Compatibility: save states and NVRAM are unchanged; `SUPERMODEL_VERSION` is unto
 
 ## v0.9.8.6 (2026-10-29)
 
+> **Attention macOS users: download [v0.9.8.6m](https://github.com/Igloo-Garage/Model-3-Vulkan/releases/tag/v0.9.8.6m) instead — the macOS build attached to this release does not start.** The Vulkan preflight in this archive fails with `VkResult -7`, so the emulator never reaches its settings window on macOS. v0.9.8.6m is the macOS-only rebuild that fixes it; the Windows and Linux downloads on this page are unaffected and still current.
+
 **Model 3-Vulkan v0.9.8.6** makes every hotkey configurable from the INI file, fixes input handling for mice, standalone shifters and button boxes, and adds a one-click automatic launch.
 
 ### 🎮 Input
