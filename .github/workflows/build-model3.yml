@@ -95,12 +95,11 @@ jobs:
       - name: Publish universal HostCore
         run: |
           set -euo pipefail
-          # Native AOT uses the runner SDK's default minimum (macOS 14.0 on macos-latest) unless
-          # clang is told otherwise, and a dylib built for 14.0 cannot be loaded on macOS 13.
-          # clang honours MACOSX_DEPLOYMENT_TARGET, so pin it to the executable's 13.3.
-          export MACOSX_DEPLOYMENT_TARGET=13.3
-          dotnet publish HostCore/Model3VulkanHostCore.csproj -c Release -r osx-x64 -o HostCore/publish-x64
-          dotnet publish HostCore/Model3VulkanHostCore.csproj -c Release -r osx-arm64 -o HostCore/publish-arm64
+          # Native AOT defaults AppleMinOSVersion to 14.0 on osx, and a dylib built for 14.0 cannot
+          # be loaded on macOS 13 (dyld: "built for macOS 14.0 which is newer than running OS").
+          # Pin it to the executable's 13.3.
+          dotnet publish HostCore/Model3VulkanHostCore.csproj -c Release -r osx-x64 -o HostCore/publish-x64 -p:AppleMinOSVersion=13.3
+          dotnet publish HostCore/Model3VulkanHostCore.csproj -c Release -r osx-arm64 -o HostCore/publish-arm64 -p:AppleMinOSVersion=13.3
           lipo -create \
             -output build-cmake/bin/libModel3VulkanHostCore.dylib \
             HostCore/publish-x64/libModel3VulkanHostCore.dylib \
