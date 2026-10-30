@@ -139,6 +139,33 @@ bool HasInstanceExtension(const char* name)
 }
 #endif
 
+/*
+ * Device-side counterpart of the check above. The instance-level volk table is not loaded at this
+ * point - ProbeVulkan13() deliberately keeps its throw-away instance separate from the renderer's -
+ * so the entry point is passed in from there.
+ */
+bool HasDeviceExtension(PFN_vkEnumerateDeviceExtensionProperties enumerate,
+    VkPhysicalDevice device,
+    const char* name)
+{
+    if (enumerate == nullptr)
+        return false;
+
+    uint32_t count = 0;
+    if (enumerate(device, nullptr, &count, nullptr) != VK_SUCCESS || count == 0)
+        return false;
+
+    std::vector<VkExtensionProperties> properties(count);
+    if (enumerate(device, nullptr, &count, properties.data()) != VK_SUCCESS)
+        return false;
+
+    return std::any_of(properties.begin(), properties.end(),
+        [name](const VkExtensionProperties& property)
+        {
+            return std::strcmp(property.extensionName, name) == 0;
+        });
+}
+
 int DeviceScore(const VkPhysicalDeviceProperties& props)
 {
     switch (props.deviceType)
@@ -272,8 +299,11 @@ std::expected<VulkanProbe, VulkanRequirementError> ProbeVulkan13()
         vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceFeatures2"));
     const auto getQueueFamilies = reinterpret_cast<PFN_vkGetPhysicalDeviceQueueFamilyProperties>(
         vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceQueueFamilyProperties"));
+    const auto enumerateDeviceExtensions = reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(
+        vkGetInstanceProcAddr(instance, "vkEnumerateDeviceExtensionProperties"));
 
-    if (!enumerateDevices || !getProperties || !getFeatures2 || !getQueueFamilies || !owner.destroy)
+    if (!enumerateDevices || !getProperties || !getFeatures2 || !getQueueFamilies ||
+        !enumerateDeviceExtensions || !owner.destroy)
     {
         return std::unexpected(VulkanRequirementError{
             VulkanRequirement::LoaderUnavailable,
@@ -335,39 +365,111 @@ std::expected<VulkanProbe, VulkanRequirementError> ProbeVulkan13()
             }
         };
 
-        if (properties.apiVersion < VK_API_VERSION_1_3)
+        /*
+         * The renderer accepts two routes (see ClassifyDevice in VulkanContext.cpp): Vulkan 1.3
+         * core, or Vulkan 1.2 with the dynamic rendering and synchronization2 extensions. The
+         * preflight used to demand 1.3 only, which rejected Intel Macs whose MoltenVK reports 1.2
+         * even though the renderer could run there - macOS was the visible casualty.
+         */
+        const bool api13 = properties.apiVersion >= VK_API_VERSION_1_3;
+        const bool api12 = properties.apiVersion >= VK_API_VERSION_1_2;
+
+        if (!api12)
         {
             reject(1, VulkanRequirement::ApiVersionTooLow,
-                std::format("'{}' reports Vulkan {}.{}, but this build requires Vulkan 1.3.",
+                std::format("'{}' reports Vulkan {}.{}; this build needs Vulkan 1.3, or Vulkan 1.2 "
+                    "with the dynamic rendering and synchronization2 extensions.",
                     properties.deviceName,
                     VK_API_VERSION_MAJOR(properties.apiVersion),
                     VK_API_VERSION_MINOR(properties.apiVersion)));
             continue;
         }
 
-        VkPhysicalDeviceVulkan13Features features13 = {};
-        features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
-
-        VkPhysicalDeviceFeatures2 features2 = {};
-        features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-        features2.pNext = &features13;
-        getFeatures2(device, &features2);
-
-        if (!features13.dynamicRendering || !features13.synchronization2)
+        if (api13)
         {
-            std::string missing;
-            if (!features13.dynamicRendering)
-                missing += "dynamicRendering";
-            if (!features13.synchronization2)
-                missing += missing.empty() ? "synchronization2" : " and synchronization2";
+            VkPhysicalDeviceVulkan13Features features13 = {};
+            features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
 
-            reject(3, VulkanRequirement::MissingFeature,
-                std::format("'{}' reports Vulkan {}.{} but does not expose {}.",
-                    properties.deviceName,
-                    VK_API_VERSION_MAJOR(properties.apiVersion),
-                    VK_API_VERSION_MINOR(properties.apiVersion),
-                    missing));
-            continue;
+            VkPhysicalDeviceFeatures2 features2 = {};
+            features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            features2.pNext = &features13;
+            getFeatures2(device, &features2);
+
+            if (!features13.dynamicRendering || !features13.synchronization2)
+            {
+                std::string missing;
+                if (!features13.dynamicRendering)
+                    missing += "dynamicRendering";
+                if (!features13.synchronization2)
+                    missing += missing.empty() ? "synchronization2" : " and synchronization2";
+
+                reject(3, VulkanRequirement::MissingFeature,
+                    std::format("'{}' reports Vulkan {}.{} but does not expose {}.",
+                        properties.deviceName,
+                        VK_API_VERSION_MAJOR(properties.apiVersion),
+                        VK_API_VERSION_MINOR(properties.apiVersion),
+                        missing));
+                continue;
+            }
+        }
+        else
+        {
+            const bool hasDynamicRendering = HasDeviceExtension(enumerateDeviceExtensions, device,
+                VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
+            const bool hasSynchronization2 = HasDeviceExtension(enumerateDeviceExtensions, device,
+                VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
+
+            if (!hasDynamicRendering || !hasSynchronization2)
+            {
+                std::string missing;
+                if (!hasDynamicRendering)
+                    missing += "VK_KHR_dynamic_rendering";
+                if (!hasSynchronization2)
+                    missing += missing.empty() ? "VK_KHR_synchronization2"
+                                               : " and VK_KHR_synchronization2";
+
+                reject(1, VulkanRequirement::ApiVersionTooLow,
+                    std::format("'{}' reports Vulkan {}.{} without {}; this build needs Vulkan 1.3, "
+                        "or Vulkan 1.2 with both extensions.",
+                        properties.deviceName,
+                        VK_API_VERSION_MAJOR(properties.apiVersion),
+                        VK_API_VERSION_MINOR(properties.apiVersion),
+                        missing));
+                continue;
+            }
+
+            /*
+             * Chaining VkPhysicalDeviceVulkan13Features is not valid on a 1.2 device - the same
+             * two booleans come from the extension feature structs, which is exactly what the
+             * renderer does when it enables them.
+             */
+            VkPhysicalDeviceDynamicRenderingFeaturesKHR dynamicRendering = {};
+            dynamicRendering.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR;
+            VkPhysicalDeviceSynchronization2FeaturesKHR synchronization2 = {};
+            synchronization2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES_KHR;
+            dynamicRendering.pNext = &synchronization2;
+
+            VkPhysicalDeviceFeatures2 features2 = {};
+            features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            features2.pNext = &dynamicRendering;
+            getFeatures2(device, &features2);
+
+            if (!dynamicRendering.dynamicRendering || !synchronization2.synchronization2)
+            {
+                std::string missing;
+                if (!dynamicRendering.dynamicRendering)
+                    missing += "dynamicRendering";
+                if (!synchronization2.synchronization2)
+                    missing += missing.empty() ? "synchronization2" : " and synchronization2";
+
+                reject(3, VulkanRequirement::MissingFeature,
+                    std::format("'{}' reports Vulkan {}.{} but does not expose {}.",
+                        properties.deviceName,
+                        VK_API_VERSION_MAJOR(properties.apiVersion),
+                        VK_API_VERSION_MINOR(properties.apiVersion),
+                        missing));
+                continue;
+            }
         }
 
         if (!HasGraphicsQueue(getQueueFamilies, device))
@@ -456,13 +558,13 @@ void ReportVulkanRequirementFailure(const VulkanRequirementError& error)
 #endif
 
     const std::string message = std::format(
-        "Model3-Vulkan requires a graphics device with Vulkan 1.3 and the "
-        "core dynamicRendering and synchronization2 features.\n\n"
+        "Model3-Vulkan requires Vulkan 1.3, or Vulkan 1.2 with the dynamic rendering "
+        "(VK_KHR_dynamic_rendering) and synchronization2 (VK_KHR_synchronization2) extensions.\n\n"
         "{}\n\n{}",
         error.detail.empty() ? detected : error.detail + "\n\n" + detected,
         advice);
 
-    ShowFatalError("Model3-Vulkan - Vulkan 1.3 required", message);
+    ShowFatalError("Model3-Vulkan - Vulkan requirements not met", message);
 }
 
 const std::vector<std::string>& KnownVulkanDeviceNames()
