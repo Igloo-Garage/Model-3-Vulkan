@@ -890,8 +890,26 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/HostCore/Model3VulkanHostCore.csproj")
             set(hostcore_published "libModel3VulkanHostCore.so")
         endif()
 
+        #
+        # Native AOT hands clang the runner's SDK minimum unless told otherwise, so a publish on
+        # macos-latest produced a dylib marked "built for macOS 14.0". macOS 13 then refuses it at
+        # dlopen() time ("Symbol not found: _swift_getTypeByMangledNameInContext2 ... built for
+        # macOS 14.0 which is newer than running OS") and .zst saves are silently unavailable.
+        # clang honours MACOSX_DEPLOYMENT_TARGET, so pin it to the same target as the executable.
+        #
+        if(APPLE)
+            if(CMAKE_OSX_DEPLOYMENT_TARGET)
+                set(hostcore_env ${CMAKE_COMMAND} -E env
+                    "MACOSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET}")
+            else()
+                set(hostcore_env ${CMAKE_COMMAND} -E env "MACOSX_DEPLOYMENT_TARGET=13.3")
+            endif()
+        else()
+            set(hostcore_env "")
+        endif()
+
         add_custom_target(hostcore
-            COMMAND ${DOTNET_EXECUTABLE} publish
+            COMMAND ${hostcore_env} ${DOTNET_EXECUTABLE} publish
                 "${CMAKE_SOURCE_DIR}/HostCore/Model3VulkanHostCore.csproj"
                 -c Release -r ${hostcore_rid}
                 -o "${CMAKE_SOURCE_DIR}/HostCore/publish"
