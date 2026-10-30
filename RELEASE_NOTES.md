@@ -1,12 +1,13 @@
 # Model 3-Vulkan Release Notes
 
-## v0.9.8.7 — macOS only (2026-10-30)
+## v0.9.8.6m — macOS only (2026-10-30)
 
-> **This release is for macOS only.** It contains one asset, `Model3-Vulkan.v0.9.8.7.for.macOS.tar.gz`.
+> **This release is for macOS only.** It contains one asset, `Model3-Vulkan.v0.9.8.6m.for.macOS.tar.gz`.
 > There is no Windows or Linux build in this release, and none is needed: nothing outside the
-> macOS platform layer changed since v0.9.8.6.
+> macOS platform layer changed since v0.9.8.6. The `m` suffix marks the macOS build of 0.9.8.6;
+> the Windows and Linux builds keep the 0.9.8.6 number.
 
-**Model 3-Vulkan v0.9.8.7 makes the macOS build start again.** v0.9.8.6 refused to launch with
+**Model 3-Vulkan v0.9.8.6m makes the macOS build start again.** v0.9.8.6 refused to launch with
 "Vulkan 1.3 required" (`VkResult -7`) on every Mac that has been tried; this release fixes the
 three macOS-only defects behind that message.
 
