@@ -15,8 +15,10 @@
 
 * **Auto-Launch on Startup** — right-click a row in the game list and choose it to start that game automatically the next time the program opens. The row is marked with `★`; **Clear Auto-Launch** on the same row undoes it. It fires once per run, so pressing `Esc` returns to the list rather than restarting the game, and starting with a ROM set on the command line is unaffected because that path never opens the list. Three rough edges found while testing that path are fixed too: the key no longer shows up as a stray untranslated text box on the Core page, launching straight into a starred game no longer flashes the settings window, and the menu entry is greyed out for sets that cannot start instead of silently doing nothing.
 
-  ![Auto-Launch on Startup](https://raw.githubusercontent.com/Igloo-Garage/Model-3-Vulkan/v0.9.8.6/Docs/images/updates/auto-launch%20on%20startup.webp)
-  ![Clear Auto-Launch](https://raw.githubusercontent.com/Igloo-Garage/Model-3-Vulkan/v0.9.8.6/Docs/images/updates/clear%20auto-launch.webp)
+  <p>
+    <img src="https://raw.githubusercontent.com/Igloo-Garage/Model-3-Vulkan/v0.9.8.6/Docs/images/updates/auto-launch%20on%20startup.webp" width="48%" alt="Auto-Launch on Startup">
+    <img src="https://raw.githubusercontent.com/Igloo-Garage/Model-3-Vulkan/v0.9.8.6/Docs/images/updates/clear%20auto-launch.webp" width="48%" alt="Clear Auto-Launch">
+  </p>
 
 Compatibility: save states and NVRAM are unchanged; `SUPERMODEL_VERSION` is untouched.
 
