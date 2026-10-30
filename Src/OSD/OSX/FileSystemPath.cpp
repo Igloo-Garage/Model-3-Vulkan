@@ -65,6 +65,14 @@ namespace FileSystemPath
      * the settings were read from and written to a stray Config folder that did not exist next to
      * the program - the interface worked, but "save settings" had nowhere to go.
      *
+     * The packaged layout keeps Config/, Assets/, NVRAM/, Saves/ and the log under Data/ next to the
+     * executable - the same shape build.bat assembles for Windows. This used to return <exe>/Config,
+     * so a macOS install never found Games.xml, the boxarts or its own settings and wrote a stray
+     * Config/ next to the binary instead.
+     *
+     * A tree without Data/ (an in-tree development build, or a package made before this change)
+     * keeps the old location, so nothing that works today starts reading a second, empty config.
+     *
      * The directories are created on demand for the same reason the other platforms do it: the
      * package ships Config, NVRAM and Saves, but Analysis and Screenshots are created on first use,
      * and a user who deletes one should not lose the feature silently.
@@ -75,10 +83,16 @@ namespace FileSystemPath
         if (base.empty())
             return pathType == Log ? "" : SubPath(pathType);
 
-        if (pathType == Log)
-            return base;
+        struct stat info;
+        const bool haveData = stat((base + "Data").c_str(), &info) == 0 && S_ISDIR(info.st_mode);
+        const bool haveLegacyConfig = stat((base + "Config").c_str(), &info) == 0 && S_ISDIR(info.st_mode);
+        const std::string root = (haveData || !haveLegacyConfig) ? base + "Data/" : base;
+        (void)mkdir(root.c_str(), 0775);
 
-        const std::string path = base + SubPath(pathType);
+        if (pathType == Log)
+            return root;
+
+        const std::string path = root + SubPath(pathType);
         (void)mkdir(path.c_str(), 0775);
         return path;
     }
@@ -144,12 +158,13 @@ namespace FileSystemPath
             {
                 // EEXIST is the normal case; a real failure is reported by the settings window as
                 // a missing directory rather than being hidden here.
-                (void)mkdir((base + "ROMs/").c_str(), 0775);
+                (void)mkdir((base + "roms/").c_str(), 0775);
             }
 
             // Stored as a relative path on purpose: ResolvePath() anchors it to the executable's
-            // directory, so the whole folder can be moved without breaking the setting.
-            return "ROMs/";
+            // directory, so the whole folder can be moved without breaking the setting. Lower case
+            // to match the folder package-cmake.sh ships.
+            return "roms/";
         }();
         return roms;
     }
