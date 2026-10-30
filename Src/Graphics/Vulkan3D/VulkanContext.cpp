@@ -337,6 +337,21 @@ bool CVulkanContext::CreateInstance()
 			OSD::Platform::GetError());
 		return false;
 	}
+	/*
+	 * VK_KHR_portability_enumeration is contributed by a Vulkan loader sitting in front of MoltenVK:
+	 * the loader synthesises it from the ICD's "is_portability_driver" flag. The MoltenVK dylib
+	 * that ships in Frameworks/ does not list the extension itself, and volk opens that dylib
+	 * directly, so requesting it unconditionally made vkCreateInstance fail with
+	 * VK_ERROR_EXTENSION_NOT_PRESENT (-7) on macOS. Add the extension - and the matching instance
+	 * flag, which is only legal together with it - when the implementation really advertises it;
+	 * that keeps the developer case (a system loader) working as well.
+	 */
+	bool portabilityEnumeration = false;
+#if defined(__APPLE__)
+	portabilityEnumeration = LayerProvidesInstanceExtension(nullptr, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+	if (portabilityEnumeration)
+		extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+#endif
 	// Everything below this point is optional and must be removed as a block if the validation layer
 	// cannot be created.
 	const size_t baseExtensionCount = extensions.size();
@@ -400,6 +415,8 @@ bool CVulkanContext::CreateInstance()
 	info.ppEnabledExtensionNames = extensions.data();
 	info.enabledLayerCount = (uint32_t)layers.size();
 	info.ppEnabledLayerNames = layers.empty() ? nullptr : layers.data();
+	if (portabilityEnumeration)
+		info.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
 
 	VkResult result = VK_SUCCESS;
 #if defined(_WIN32)
@@ -458,9 +475,15 @@ bool CVulkanContext::CreateInstance()
 		 * would have failed a few steps later at shader-module creation, with a message that pointed at
 		 * the shader rather than at the real problem. Reporting the requirement plainly is more useful.
 		 */
-		ErrorLog("Vulkan: vkCreateInstance failed (%d) for a Vulkan 1.3 instance. This backend requires a "
-			"Vulkan 1.3 driver; the OpenGL renderer (New 3D or Legacy 3D) can be chosen on the Video tab.",
-			(int)result);
+		ErrorLog("Vulkan: vkCreateInstance failed (%d) for a Vulkan 1.3 instance.", (int)result);
+#if defined(__APPLE__)
+		ErrorLog("Vulkan: the bundled MoltenVK could not provide Vulkan 1.3 on this system. "
+			"A virtual machine without GPU acceleration, or a GPU Metal does not support, cannot run "
+			"this renderer.");
+#else
+		ErrorLog("Vulkan: this backend requires a Vulkan 1.3 driver; the OpenGL renderer (New 3D or "
+			"Legacy 3D) can be chosen on the Video tab.");
+#endif
 		return false;
 	}
 

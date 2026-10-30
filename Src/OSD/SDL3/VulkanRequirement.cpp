@@ -112,6 +112,33 @@ bool HasGraphicsQueue(
         });
 }
 
+#if defined(__APPLE__)
+/*
+ * Whether the implementation advertises an instance extension.
+ *
+ * On macOS VK_KHR_portability_enumeration belongs to the Vulkan loader, which adds it when an ICD
+ * declares itself a portability driver. volk opens Frameworks/libMoltenVK.dylib directly here, and
+ * MoltenVK does not list the extension itself, so requesting it unconditionally made
+ * vkCreateInstance fail with VK_ERROR_EXTENSION_NOT_PRESENT (-7) on every Mac.
+ */
+bool HasInstanceExtension(const char* name)
+{
+    uint32_t count = 0;
+    if (vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr) != VK_SUCCESS || count == 0)
+        return false;
+
+    std::vector<VkExtensionProperties> properties(count);
+    if (vkEnumerateInstanceExtensionProperties(nullptr, &count, properties.data()) != VK_SUCCESS)
+        return false;
+
+    return std::any_of(properties.begin(), properties.end(),
+        [name](const VkExtensionProperties& property)
+        {
+            return std::strcmp(property.extensionName, name) == 0;
+        });
+}
+#endif
+
 int DeviceScore(const VkPhysicalDeviceProperties& props)
 {
     switch (props.deviceType)
@@ -184,12 +211,20 @@ std::expected<VulkanProbe, VulkanRequirementError> ProbeVulkan13()
     createInfo.pApplicationInfo = &application;
 
 #if defined(__APPLE__)
-    // MoltenVK is a portability implementation; without this flag it exposes
-    // no physical devices at all.
+    /*
+     * Ask for the portability extension only when the implementation actually has it. It is a
+     * loader-provided extension, and the MoltenVK dylib this build opens directly does not
+     * advertise it, so requesting it unconditionally failed instance creation with
+     * VK_ERROR_EXTENSION_NOT_PRESENT (-7). The flag is only valid together with the extension,
+     * so both are conditional.
+     */
     static const char* const portabilityExtension = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
-    createInfo.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
-    createInfo.enabledExtensionCount = 1;
-    createInfo.ppEnabledExtensionNames = &portabilityExtension;
+    if (HasInstanceExtension(portabilityExtension))
+    {
+        createInfo.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+        createInfo.enabledExtensionCount = 1;
+        createInfo.ppEnabledExtensionNames = &portabilityExtension;
+    }
 #endif
 
     VkInstance instance = VK_NULL_HANDLE;
@@ -217,8 +252,8 @@ std::expected<VulkanProbe, VulkanRequirementError> ProbeVulkan13()
     {
         return std::unexpected(VulkanRequirementError{
             VulkanRequirement::InstanceFailed,
-            std::format("vkCreateInstance failed for a Vulkan 1.3 instance (VkResult {}). "
-                        "The installed loader or graphics driver is too old.", static_cast<int>(createResult)),
+            std::format("vkCreateInstance failed for a Vulkan 1.3 instance (VkResult {}).",
+                static_cast<int>(createResult)),
             {}, 0});
     }
 
@@ -404,13 +439,28 @@ void ReportVulkanRequirementFailure(const VulkanRequirementError& error)
             VK_API_VERSION_MAJOR(error.apiVersion),
             VK_API_VERSION_MINOR(error.apiVersion));
 
+    /*
+     * What to tell the user differs by platform. Windows and Linux have an updatable driver and
+     * ship an OpenGL build alongside; macOS carries its own MoltenVK and has no OpenGL executable
+     * in the package, so "update the driver" and "use LegacyOG" are both wrong there.
+     */
+#if defined(__APPLE__)
+    static const char* const advice =
+        "The macOS package already includes MoltenVK, so there is no driver to update. This usually "
+        "means the system could not provide a Metal device: a virtual machine without GPU "
+        "acceleration, or a GPU that Metal does not support.";
+#else
+    static const char* const advice =
+        "Please update the graphics driver. If this machine cannot provide Vulkan 1.3, use the "
+        "OpenGL build Supermodel-LegacyOG.exe instead.";
+#endif
+
     const std::string message = std::format(
         "Model3-Vulkan requires a graphics device with Vulkan 1.3 and the "
         "core dynamicRendering and synchronization2 features.\n\n"
-        "{}\n\n"
-        "Please update the graphics driver. If this machine cannot provide "
-        "Vulkan 1.3, use the OpenGL build Supermodel-LegacyOG.exe instead.",
-        error.detail.empty() ? detected : error.detail + "\n\n" + detected);
+        "{}\n\n{}",
+        error.detail.empty() ? detected : error.detail + "\n\n" + detected,
+        advice);
 
     ShowFatalError("Model3-Vulkan - Vulkan 1.3 required", message);
 }
