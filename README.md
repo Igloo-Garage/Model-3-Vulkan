@@ -325,16 +325,6 @@ The version string is defined in exactly one location: `Src/Version.h`:
 
 ---
 
-## 💖 Community & Support
-
-* **Reddit Community:** [r/Model3Vulkan](https://www.reddit.com/r/Model3Vulkan/) *(Join us for HD texture pack sharing, compatibility discussions, and netplay updates)*
-* **GitHub Discussions / Issues:** Open for technical discussions, bug reports, and hardware feedback.
-* **Support via Ko-fi:** Development is fueled by late-night reverse engineering, hardware validation, and community passion. If you find this project valuable, consider supporting via Ko-fi:
-
-[![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/igloogarage)
-
----
-
 ## 📜 License & Credits
 
 Model 3-Vulkan is licensed under the **GNU General Public License v3.0 (GPLv3)**. See [Docs/LICENSE.txt](Docs/LICENSE.txt) for details.
@@ -352,3 +342,14 @@ In accordance with **Section 7(e) of the GNU General Public License v3.0 (GPLv3)
 Note: ™ denotes an unregistered / common-law trademark or brand asset; see [TRADEMARK.md](TRADEMARK.md) for the full policy, the company details, and the enforcement process.
 
 This project builds upon the reverse-engineering foundations laid by **Bart Trzynadlowski**, **Nik Henson**, **Ian (dukey)**, **Ville Linde**, **Stefano Teso**, and the original **Supermodel** team. Third-party components and attribution details are documented in [`Docs/NOTICE.md`](Docs/NOTICE.md).
+
+---
+## 💖 Community & Support
+
+* **Reddit Community:** [r/Model3Vulkan](https://www.reddit.com/r/Model3Vulkan/) *(Join us for HD texture pack sharing, compatibility discussions, and netplay updates)*
+* **GitHub Discussions / Issues:** Open for technical discussions, bug reports, and hardware feedback.
+* **Support via Ko-fi:** Development is fueled by late-night reverse engineering, hardware validation, and community passion. If you find this project valuable, consider supporting via Ko-fi:
+
+[![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/igloogarage)
+
+
