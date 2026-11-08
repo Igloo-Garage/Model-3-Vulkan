@@ -106,6 +106,7 @@ void CVulkanTextureCache::Shutdown()
 	vkDeviceWaitIdle(device);
 	m_hashCache.clear();
 	m_dumpedHashes.clear();
+	m_dumpedOpaque.clear();
 	for (auto& slot : m_slots)
 		DestroySlot(slot);
 	m_slots.clear();
@@ -1342,26 +1343,48 @@ uint64_t CVulkanTextureCache::TextureHash(int page, int x, int y, int width, int
 	return hash;
 }
 
-void CVulkanTextureCache::DumpTexture(uint64_t hash, int page, int x, int y, int width, int height, int format)
+void CVulkanTextureCache::DumpTexture(uint64_t hash, int page, int x, int y, int width, int height, int format,
+	bool useAlpha)
 {
 	if (!m_hdDump || m_textureRam == nullptr || hash == 0)
 		return;
-	if (m_dumpedHashes.find(hash) != m_dumpedHashes.end())
-		return;
-	if (m_dumpedHashes.size() >= 50000)
+
+	const bool dumped = m_dumpedHashes.find(hash) != m_dumpedHashes.end();
+	if (dumped)
 	{
-		if (!m_dumpLimitReported)
+		// Written before the first material that reads alpha drew this rectangle, so the file has
+		// the alpha channel flattened. Redo it now: draw order is arbitrary, and a pack built from
+		// the flattened copy would lose the original's contour. The hash stays, so the file name -
+		// and therefore any replacement already made for it - does not change.
+		if (useAlpha && m_dumpedOpaque.erase(hash) != 0)
 		{
-			m_dumpLimitReported = true;
-			ErrorLog("HD textures: 50000 textures dumped this session; stopping. Reload the game to start a fresh set.");
+			InfoLog("HD textures: '%016llx' is also used with alpha; re-dumping it with the source alpha channel.",
+				(unsigned long long)hash);
 		}
-		return;
+		else
+		{
+			return;
+		}
+	}
+	else
+	{
+		if (m_dumpedHashes.size() >= 50000)
+		{
+			if (!m_dumpLimitReported)
+			{
+				m_dumpLimitReported = true;
+				ErrorLog("HD textures: 50000 textures dumped this session; stopping. Reload the game to start a fresh set.");
+			}
+			return;
+		}
+		m_dumpedHashes.insert(hash);
+		if (!useAlpha)
+			m_dumpedOpaque.insert(hash);
 	}
 
 	page &= 1;
-	m_dumpedHashes.insert(hash);
 	m_hdPack.QueueDump(hash, page, x, y, width, height, format,
-		m_textureRam + (size_t)page * (kPageWidth * kPageHeight), kPageWidth, kPageHeight);
+		m_textureRam + (size_t)page * (kPageWidth * kPageHeight), kPageWidth, kPageHeight, useAlpha);
 }
 
 int CVulkanTextureCache::ResolveHDTexture(uint64_t hash, int wrapX, int wrapY)

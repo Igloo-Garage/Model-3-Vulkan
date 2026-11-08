@@ -144,6 +144,7 @@ struct DisplayInfo
 	int height = 0;             // (the system DPI's space - see ReadPanelMode in Main.cpp)
 	int panelWidth = 0;         // the panel's own mode, from the display driver; Windows only
 	int panelHeight = 0;
+	float pixelDensity = 1.0f;  // device pixels per coordinate unit; 2.0 on a Retina Mac
 	int desktopHz = 0;
 	bool hasArcadeMode = false;
 };

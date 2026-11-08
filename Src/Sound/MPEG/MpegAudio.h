@@ -19,6 +19,7 @@ namespace MpegDec
 	int		GetActiveSize();
 	bool	GetLoop();
 	void	DecodeAudio(int16_t* left, int16_t* right, int numStereoSamples);
+	void	DecodeAudioFloat(float* left, float* right, int numStereoSamples);
 	void	Stop();
 	bool	IsLoaded();
 }

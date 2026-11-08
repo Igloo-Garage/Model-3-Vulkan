@@ -1,5 +1,5 @@
 ========================================================================
-Model 3-Vulkan (v0.9.8.6)
+Model 3-Vulkan (v0.9.9.6)
 Modernized Standalone Sega Model 3 Arcade Emulator
 Igloo-Garage
 REXABYTE SOFTWARE INC., British Columbia, Canada
@@ -26,47 +26,92 @@ No copyrighted ROM files or BIOS dumps are included in this package.
 KEY HIGHLIGHTS & IMPROVEMENTS
 ------------------------------------------------------------------------
 
-  * Native Vulkan 1.3 3D Engine:
-    - Accurate Real3D texture paging, hardware quad rasterization, and
-      three hardware-accurate transparency passes.
-    - Resolves 20-year-old transparency glitches: proper particle layering
-      on tire smoke/exhaust in Daytona USA 2 & Scud Race, and fixes the
-      blinding blizzard overexposure in Sega Rally 2.
+  * PowerPC 603e to x86-64 Hybrid JIT:
+    - Hot PowerPC basic blocks are translated once into native x86-64
+      and executed directly, with a 16 MB code cache, direct-memory
+      windows, self-modifying-code page tracking and idle-loop skipping.
+    - Verified in lock-step against the interpreter across 675 million
+      blocks with zero mismatches and pixel-identical output.
+    - Up to ~4.1x higher frame rates in CPU-bound scenes (224.5 Hz vs
+      55.2 Hz in our test). The C interpreter remains one menu entry away.
 
-  * Glitch-Free Decoupled Audio:
-    - Real-time sound emulation running on a dedicated thread; moving/resizing
-      windows or loading assets will never stutter or pop audio.
-    - Permanently resolves the infamous Fighting Vipers 2 match-end DSP
-      runaway loop screech (retiring the legacy-scsp workaround).
+  * Native Vulkan 1.3 3D Engine:
+    - Accurate Real3D texture paging, hardware quad rasterization, exact
+      quad interpolation and three hardware-accurate transparency passes.
+    - Optional per-pixel transparency sorting (AlphaSortMode = 1) for
+      smoke, spray, foliage and glass that the two-layer scheme cannot
+      order correctly.
+    - Two-subpass on-chip composite: 4K + 4x MSAA VF3 went from 226 to
+      240-241 Hz, bit-identical at 1x.
+
+  * Need for Speed-style Chase Camera:
+    - Spring-damper horizontal yaw stabilisation around the player car's
+      pivot, so gamepad micro-corrections no longer swing the whole
+      horizon. Full-screen 3D HUDs (speedometer, route map, arrows) stay
+      perfectly still. Off / Light / Standard / Strong.
+
+  * Real Force Feedback & Wheel Calibration:
+    - SDL3 haptics initialised correctly on Windows; raw direct-drive
+      wheel bases (SIMAGIC, MOZA, Fanatec and similar) are recognised.
+    - Constant-force sign/axis encoding fixed, 20 ms attack envelope,
+      SDL_HAPTIC_SINE vibration with rumble fallback, hardware autocenter
+      released to the game.
+    - Live wheel/pedal deadzone and full-travel calibration table plus a
+      one-click H-shifter neutral binding generator.
+
+  * Cabinet-Grade Audio:
+    - Native 4.0 Quad (default) and 5.1 Surround output, with a smart
+      common-mode Center extractor and a 120 Hz second-order Butterworth
+      LFE low-pass for the optional 5.1 upmix.
+    - 4-tap Catmull-Rom cubic interpolation on non-FM SCSP voices, slave-
+      SCSP FM cross-talk fix, dynamic envelope/LFO register updates.
+    - 32-bit float DSB MPEG decoding into a 64-tap polyphase resampler
+      with per-sample gain ramping, plus a C1-continuous knee soft-clipper
+      on the master bus.
+    - Built-in lock-free multi-channel WAV (32-bit float / 16-bit PCM)
+      and FLAC (24-bit / 16-bit) recorder. Off by default.
 
   * Modern Display Synchronization:
-    - Arcade-exact 57.524 Hz logic pacing with silky-smooth frame delivery
-      on modern VRR (G-Sync / FreeSync) and 120/144/240 Hz displays.
+    - Arcade-exact 57.524 Hz logic pacing with smooth frame delivery on
+      VRR (G-Sync / FreeSync) and 120/144/240 Hz displays, plus VRR
+      integer multiples (2x/3x/4x/8x) and F8 hot-switching.
+    - Present-phase calibration cuts roughly 4.6 ms of end-to-end latency
+      on a Fixed 120 Hz setup.
 
   * Visual Save State Engine (.zst):
-    - 16 dedicated visual save slots per game with live thumbnail previews.
-    - Next-gen Zstandard compression reduces save state sizes to ~1/6th of
-      legacy formats (saving gigabytes on handhelds like Steam Deck).
+    - Dedicated visual save slots per game with live thumbnail previews.
+    - Zstandard compression keeps save states compact for handhelds.
+    - Save states include the 53C810 PCI state and the simulated network
+      board, so VF3 and Scud Race resume instead of stalling on the DMA
+      chain.
 
-  * Modern Presentation & Handheld Enhancements:
-    - Full graphical UI with game list and instant settings adjustments.
-    - True widescreen frustum expansion, authentic CRT beam/phosphor filters,
-      integer scaling, and custom bezel backdrops.
-    - Support for modern racing wheel force feedback and dual light guns.
+  * HD Texture Packs:
+    - PNG, WebP, DDS BC1/BC2/BC3/BC5/BC7 and .dds.zst replacement textures
+      with bindless sampling, async decode and hot reload.
+    - F4 toggles replacement/original; F3 rescans the pack while playing.
+
+  * Modern Presentation & Interface:
+    - Frosted-glass panels, three complete themes (warm light, warm dark,
+      original flat), 63 WebP box arts and a cover preview.
+    - True widescreen frustum expansion, CRT beam/phosphor filters,
+      integer scaling, custom bezel backdrops and Sinden light-gun border.
+    - Per-game audio balance, portable ROM folders, multi-mouse support
+      and dual light guns.
 
 ------------------------------------------------------------------------
-THE TWO EXECUTABLES
+ONE EXECUTABLE
 ------------------------------------------------------------------------
 
-  1. Model3-Vulkan.exe (Default / Recommended)
-     - Requires: Vulkan 1.3 compatible GPU & drivers.
-     - Features: Full modern renderer, high-refresh pacing, .zst visual saves,
-       and in-game telemetry HUD.
+  Model3-Vulkan.exe
 
-  2. Supermodel-LegacyOG.exe (Fallback)
-     - Requires: OpenGL 4.1.
-     - Purpose: Lightweight standalone fallback build ensuring plug-and-play
-       compatibility on older legacy GPUs (e.g., Intel 4th Gen Haswell).
+  - Requires: a Vulkan 1.3 compatible GPU and driver.
+  - Includes: the full Vulkan renderer, hybrid JIT, high-refresh pacing,
+    .zst visual saves, the in-game Tab panel and the statistics HUD.
+  - Statically linked: no SDL, Vulkan-loader or VC++ redistributable to
+    install separately (a working Vulkan 1.3 driver is still required).
+
+  Supermodel-LegacyOG.exe (the OpenGL fallback) is no longer part of the
+  release package. The Vulkan build is the product.
 
 ------------------------------------------------------------------------
 QUICK START (30 SECONDS)
@@ -91,6 +136,8 @@ DEFAULT HOTKEYS
   ` (Tilde)         Toggle live hardware statistics HUD
   F5 / F6 / F7      Save state / Next save slot / Load state
   F8                Toggle presentation cadence (1x <-> 2x)
+  F3 / Shift + F4   Reload HD texture pack (rescan the folder)
+  F4                Toggle HD texture replacements / original textures
   F9 / F10          Music volume Down / Up
   F11 / F12         Sound effects volume Down / Up
   Alt + S           Capture screenshot (saved to Data\Screenshots\)
@@ -102,12 +149,13 @@ DIRECTORY LAYOUT
 
   roms\             Default directory for game ROM archives (.zip)
   Data\Config\      Configuration matrices, game lists, and button maps
-  Data\Assets\      Box art, crosshair overlays, and bezel graphics
+  Data\Assets\      Box art, crosshair overlays, HD textures, and bezel graphics
   Data\Saves\       Modern visual save states (.zst) and legacy imports
   Data\NVRAM\       Virtual arcade battery-backed NVRAM files
   Data\Screenshots\ High-resolution screenshots
+  Data\Recordings\  Optional WAV/FLAC multi-channel audio recordings
   Data\Cache\       Pipeline and shader caches (auto-generated)
-  Data\Supermodel.log Primary runtime diagnosis log
+  Data\Model3Vulkan.log  Primary runtime diagnosis log
   Scripts\          Display mode helpers for arcade refresh calibration
 
 ------------------------------------------------------------------------
@@ -115,11 +163,16 @@ SYSTEM REQUIREMENTS
 ------------------------------------------------------------------------
 
   * Operating System: Windows 10 or Windows 11 (64-bit).
-  * GPU (Vulkan): Vulkan 1.3 capable GPU (NVIDIA GTX 900+ / AMD RX 400+ /
-    Intel Arc or Iris Xe; older Intel HD 500-class iGPUs do not provide
-    Vulkan 1.3 and should use the OpenGL build).
-  * GPU (OpenGL Fallback): OpenGL 4.1 compatible graphics adapter.
+  * GPU: Vulkan 1.3 capable (NVIDIA GTX 900+ / AMD RX 400+ / Intel Arc or
+    Iris Xe; older Intel HD 500-class iGPUs do not provide Vulkan 1.3).
   * No external runtime dependencies required (statically linked).
+
+  Default state on a fresh install: audio recording, HD texture loading and
+  dumping, raw texture/memory dumps, the statistics overlay, MSAA, CRT/glow
+  filters and force feedback are all OFF. Hybrid JIT, 4.0 quad audio, Auto
+  pacing with motion interpolation, chase-camera stabilisation and the
+  frosted-glass interface are ON. See RELEASE_NOTES.md and usermanual.md
+  for the full list.
 
 ------------------------------------------------------------------------
 CREDITS & LICENSING

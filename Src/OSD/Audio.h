@@ -38,6 +38,7 @@ extern void SetAudioCallback(AudioCallbackFPtr callback, void *data);
 
 extern void SetAudioEnabled(bool enabled);
 extern void SetAudioType(Game::AudioTypes type);
+extern void SetAudioGameTitle(const std::string& title);
 
 /*
  * FlushAudioBuffer()
@@ -139,7 +140,7 @@ struct AudioStatus
     bool muted = false;         // playback is intentionally silenced (Alt+P, the panel's pause)
     unsigned bufferMs = 0;      // audio queued ahead of the play position
     unsigned bufferSizeMs = 0;  // capacity of the ring buffer
-    unsigned channels = 0;      // host channels in use (1, 2 or 4)
+    unsigned channels = 0;      // host channels in use (1, 2, 4 or 6)
     unsigned underRuns = 0;     // cumulative since OpenAudio()
     unsigned overRuns = 0;
     float peakLeft = 0.0f;      // peak since the previous call, 1.0 = full scale (may exceed it)

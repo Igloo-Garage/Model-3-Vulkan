@@ -3,7 +3,7 @@ param([int]$Seconds = 10)
 
 $root = Split-Path -Parent $PSScriptRoot
 $exe = Join-Path $root "build-cmake\bin\Model3-Vulkan.exe"
-$log = Join-Path $root "build-cmake\bin\Data\Supermodel.log"
+$log = Join-Path $root "build-cmake\bin\Data\Model3Vulkan.log"
 if (Test-Path $log) { Remove-Item $log -Force }
 
 $p = Start-Process -FilePath $exe -WorkingDirectory (Join-Path $root "build-cmake\bin") -PassThru

@@ -29,11 +29,26 @@
 #ifndef INCLUDED_SDLINCLUDES_H
 #define INCLUDED_SDLINCLUDES_H
 
+/*
+ * The macOS build used to take SDL2 and SDL2_net from frameworks, where the headers are
+ * addressed as <SDL2/SDL.h> and <SDL2_net/SDL_net.h>.  The CMake build compiles the same
+ * libraries from Libraries/ and gets the plain header names instead, so each macOS include
+ * is used only when it actually resolves.  __has_include keeps both layouts working; the
+ * framework path stays available for Makefiles/Makefile.OSX.
+ */
 #if defined(SUPERMODEL_PLATFORM_SDL3)
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_audio.h>
 
+#elif defined(SUPERMODEL_OSX) && defined(__has_include)
+#if __has_include(<SDL2/SDL.h>)
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_audio.h>
+#else
+#include <SDL.h>
+#include <SDL_audio.h>
+#endif
 #elif defined(SUPERMODEL_OSX)
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_audio.h>
@@ -43,7 +58,7 @@
 #endif
 
 #if !defined(SUPERMODEL_PLATFORM_SDL3)
-#ifdef SUPERMODEL_OSX
+#if defined(SUPERMODEL_OSX) && defined(__has_include) && __has_include(<SDL2_net/SDL_net.h>)
 #include <SDL2_net/SDL_net.h>
 #else
 #include <SDL_net.h>

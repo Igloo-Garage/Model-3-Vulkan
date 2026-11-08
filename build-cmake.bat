@@ -45,8 +45,8 @@ if errorlevel 1 exit /b 1
 
 cmake -S "%ROOT%" -B "%ROOT%\build-cmake" -G Ninja ^
     -DCMAKE_BUILD_TYPE=Release ^
-    -DUSE_SDL2=ON ^
-    -DUSE_SDL3=OFF ^
+    -DUSE_SDL2=OFF ^
+    -DUSE_SDL3=ON ^
     -DSUPERMODEL_SDL3_PURE_VULKAN=ON ^
     %*
 if errorlevel 1 exit /b 1
@@ -55,7 +55,6 @@ cmake --build "%ROOT%\build-cmake" --config Release --parallel
 if errorlevel 1 exit /b 1
 
 echo.
-echo Built: %ROOT%\build-cmake\bin\Supermodel-LegacyOG.exe
 if exist "%ROOT%\build-cmake\bin\Model3-Vulkan.exe" (
     echo Built: %ROOT%\build-cmake\bin\Model3-Vulkan.exe
 )

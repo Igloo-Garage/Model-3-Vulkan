@@ -55,6 +55,10 @@
 
 #include "Audio.h"
 #include "Model3/Model3Timing.h"
+#include "OSD/FileSystemPath.h"
+#include "Sound/IglooAudioDSP.h"
+#include "Sound/IglooMultiChannelRecorder.h"
+#include "Util/Format.h"
 
 #include "Supermodel.h"
 #include "SDLIncludes.h"
@@ -62,8 +66,18 @@
 #include <cmath>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <ctime>
+#include <iomanip>
+#include <mutex>
 #include <string>
+#include <thread>
+#include <vector>
 
 // Format the emulator mixes in. The SCSP and the DSB both produce float samples in the S16 domain.
 // The SDL3 build hands those to the stream as F32 and lets SDL convert to the device's real format,
@@ -79,12 +93,11 @@ typedef INT16 AudioSample;
 
 static inline AudioSample ToHostSample(float sample)
 {
+    const float normalized = Igloo::AudioDSP::MasterSoftClip(sample * (1.0f / 32768.0f));
 #if defined(SUPERMODEL_PLATFORM_SDL3)
-    // Input is in the SCSP's S16-scaled float domain; the stream wants -1.0..+1.0. This is the only
-    // clamp in the path, so nothing that fits in 16 bits is clipped before it arrives here.
-    return std::max(-1.0f, std::min(1.0f, sample * (1.0f / 32768.0f)));
+    return normalized;
 #else
-    INT32 xi = (INT32)sample;
+    INT32 xi = (INT32)std::lrintf(normalized * 32767.0f);
     if (xi > INT16_MAX)
         xi = INT16_MAX;
     if (xi < INT16_MIN)
@@ -103,9 +116,23 @@ static inline AudioSample ToHostSample(float sample)
 #define MAX_LATENCY        (100)
 
 #define NUM_CHANNELS_M3 (4)
+#define MAX_HOST_CHANNELS (6)
 
 Game::AudioTypes AudioType;
-int nbHostAudioChannels = NUM_CHANNELS_M3;   // Number of channels on host
+static std::string s_audioGameTitle = "Audio";
+int nbHostAudioChannels = NUM_CHANNELS_M3;   // Number of channels on host (1, 2, 4, or 6)
+static bool s_surroundUpmix51 = true;        // 5.1 Hardware Upmixer (synthesizes FC + LFE < 120Hz)
+
+static Igloo::AudioDSP::ButterworthBiquadLPF s_lfeFilter;
+static Igloo::Audio::MultiChannelRecorder<AudioSample> s_wavRecorder;
+
+static void RecorderLogBridge(bool isError, const char* msg)
+{
+    if (isError)
+        ErrorLog("%s", msg);
+    else
+        InfoLog("%s", msg);
+}
 
 #define SAMPLES_PER_FRAME_M3  (INT32)(SAMPLE_RATE_M3 / MODEL3_FPS)
 
@@ -136,7 +163,7 @@ float balanceFactorRearRight  = 1.0f;
  * inherited by the next game: it started with no sound at all, from any renderer, until the program
  * itself was restarted. OpenAudio() and CloseAudio() force the flag back on for exactly that reason.
  */
-static bool enabled = true;         // True if sound output is enabled
+static std::atomic<bool> enabled = true; // True if sound output is enabled (main thread writes, audio callback reads)
 
 /*
  * Optional output-level probe, enabled with SM3D_AUDIO_LEVEL=1.
@@ -341,6 +368,7 @@ void FlushAudioBuffer(void)
     UnlockAudioBuffer();
 
     // Whatever comes next starts from silence, so it should not start at full level.
+    s_lfeFilter.Reset();
     ArmAudioFadeIn();
 }
 
@@ -351,6 +379,11 @@ void FlushAudioBuffer(void)
 void SetAudioType(Game::AudioTypes type)
 {
     AudioType = type;
+}
+
+void SetAudioGameTitle(const std::string& title)
+{
+    s_audioGameTitle = title;
 }
 
 static float MixFloat(float x, float y)
@@ -384,7 +417,11 @@ public:
     void Write(const void* src, UINT32 len)
     {
         if (len)
+        {
             SDL_PutAudioStreamData(m_stream, src, (int)len);
+            if (s_wavRecorder.IsRecording())
+                s_wavRecorder.PushFromAudioCallback(static_cast<const AudioSample*>(src), len / sizeof(AudioSample));
+        }
     }
 
     void Silence(UINT32 len)
@@ -395,6 +432,8 @@ public:
         {
             const UINT32 chunk = (len > sizeof(zeros) ? (UINT32)sizeof(zeros) : len);
             SDL_PutAudioStreamData(m_stream, zeros, (int)chunk);
+            if (s_wavRecorder.IsRecording())
+                s_wavRecorder.PushFromAudioCallback(reinterpret_cast<const AudioSample*>(zeros), chunk / sizeof(AudioSample));
             len -= chunk;
         }
     }
@@ -410,12 +449,16 @@ private:
         {
             memcpy(m_pos, src, len);
             m_pos += len;
+            if (s_wavRecorder.IsRecording())
+                s_wavRecorder.PushFromAudioCallback(static_cast<const AudioSample*>(src), len / sizeof(AudioSample));
         }
     }
 
     void Silence(UINT32 len)
     {
         memset(m_pos, 0, len);
+        if (s_wavRecorder.IsRecording())
+            s_wavRecorder.PushFromAudioCallback(reinterpret_cast<const AudioSample*>(m_pos), len / sizeof(AudioSample));
         m_pos += len;
     }
 
@@ -561,6 +604,64 @@ static void PlayCallback(void* data, Uint8* stream, int len)
 
 #endif
 
+static inline void ResolveQuadChannels(
+    float frontLeftValue, float frontRightValue, float rearLeftValue, float rearRightValue,
+    bool flipStereo, float& outFL, float& outFR, float& outRL, float& outRR) noexcept
+{
+    switch (AudioType)
+    {
+    case Game::MONO:
+    {
+        const float monovalue = MixFloat(MixFloat(frontLeftValue, frontRightValue), MixFloat(rearLeftValue, rearRightValue));
+        outFL = monovalue;
+        outFR = monovalue;
+        outRL = monovalue;
+        outRR = monovalue;
+        break;
+    }
+    case Game::STEREO_LR:
+    case Game::STEREO_RL:
+    {
+        const float leftvalue  = MixFloat(frontLeftValue, frontRightValue);
+        const float rightvalue = MixFloat(rearLeftValue,  rearRightValue);
+        outFL = flipStereo ? rightvalue : leftvalue;
+        outFR = flipStereo ? leftvalue  : rightvalue;
+        outRL = outFL;
+        outRR = outFR;
+        break;
+    }
+    case Game::QUAD_1_FLR_2_RLR:
+    case Game::QUAD_1_FRL_2_RRL:
+        outFL = flipStereo ? frontRightValue : frontLeftValue;
+        outFR = flipStereo ? frontLeftValue  : frontRightValue;
+        outRL = flipStereo ? rearRightValue  : rearLeftValue;
+        outRR = flipStereo ? rearLeftValue   : rearRightValue;
+        break;
+
+    case Game::QUAD_1_RLR_2_FLR:
+    case Game::QUAD_1_RRL_2_FRL:
+        outFL = flipStereo ? rearRightValue  : rearLeftValue;
+        outFR = flipStereo ? rearLeftValue   : rearRightValue;
+        outRL = flipStereo ? frontRightValue : frontLeftValue;
+        outRR = flipStereo ? frontLeftValue  : frontRightValue;
+        break;
+
+    case Game::QUAD_1_LR_2_FR_MIX:
+    default:
+    {
+        const float newFL = MixFloat(frontLeftValue,  rearLeftValue);
+        const float newFR = MixFloat(frontLeftValue,  rearRightValue);
+        const float newRL = MixFloat(frontRightValue, rearLeftValue);
+        const float newRR = MixFloat(frontRightValue, rearRightValue);
+        outFL = flipStereo ? newFR : newFL;
+        outFR = flipStereo ? newFL : newFR;
+        outRL = flipStereo ? newRR : newRL;
+        outRR = flipStereo ? newRL : newRR;
+        break;
+    }
+    }
+}
+
 static void MixChannels(unsigned numSamples, const float* leftFrontBuffer, const float* rightFrontBuffer, const float* leftRearBuffer, const float* rightRearBuffer, AudioSample* p, bool flipStereo)
 {
     if (nbHostAudioChannels == 1) {
@@ -597,98 +698,46 @@ static void MixChannels(unsigned numSamples, const float* leftFrontBuffer, const
                 }
             }
         } else if (nbHostAudioChannels == 4) {
+            // 4.0 Quadraphonic interleaving order (Windows / SDL3 standard): [FL, FR, RL, RR]
             for (unsigned i = 0; i < numSamples; i++) {
-                float frontLeftValue = leftFrontBuffer[i]*balanceFactorFrontLeft;
-                float frontRightValue = rightFrontBuffer[i]*balanceFactorFrontRight;
-                float rearLeftValue = leftRearBuffer[i]*balanceFactorRearLeft;
-                float rearRightValue = rightRearBuffer[i]*balanceFactorRearRight;
+                const float frontLeftValue  = leftFrontBuffer[i]  * balanceFactorFrontLeft;
+                const float frontRightValue = rightFrontBuffer[i] * balanceFactorFrontRight;
+                const float rearLeftValue   = leftRearBuffer[i]   * balanceFactorRearLeft;
+                const float rearRightValue  = rightRearBuffer[i]  * balanceFactorRearRight;
 
-                // Check game audio type
-                switch (AudioType) {
-                case Game::MONO: {
-                    const float monovalue = MixFloat(MixFloat(frontLeftValue, frontRightValue), MixFloat(rearLeftValue, rearRightValue));
-                    *p++ = ToHostSample(monovalue);
-                    *p++ = ToHostSample(monovalue);
-                    *p++ = ToHostSample(monovalue);
-                    *p++ = ToHostSample(monovalue);
-                } break;
+                float fl = 0.0f, fr = 0.0f, rl = 0.0f, rr = 0.0f;
+                ResolveQuadChannels(frontLeftValue, frontRightValue, rearLeftValue, rearRightValue,
+                    flipStereo, fl, fr, rl, rr);
 
-                case Game::STEREO_LR:
-                case Game::STEREO_RL: {
-                    const float leftvalue =  MixFloat(frontLeftValue, frontRightValue);
-                    const float rightvalue = MixFloat(rearLeftValue,  rearRightValue);
-                    if (flipStereo) // swap left and right channels
-                    {
-                        *p++ = ToHostSample(rightvalue);
-                        *p++ = ToHostSample(leftvalue);
-                        *p++ = ToHostSample(rightvalue);
-                        *p++ = ToHostSample(leftvalue);
-                    } else {
-                        *p++ = ToHostSample(leftvalue);
-                        *p++ = ToHostSample(rightvalue);
-                        *p++ = ToHostSample(leftvalue);
-                        *p++ = ToHostSample(rightvalue);
-                    }
-                } break;
+                *p++ = ToHostSample(fl);
+                *p++ = ToHostSample(fr);
+                *p++ = ToHostSample(rl);
+                *p++ = ToHostSample(rr);
+            }
+        } else if (nbHostAudioChannels == 6) {
+            // 5.1 Surround interleaving order (Windows WAVEFORMATEXTENSIBLE / SDL3 standard):
+            // [FL, FR, FC, LFE, RL, RR]
+            for (unsigned i = 0; i < numSamples; i++) {
+                const float frontLeftValue  = leftFrontBuffer[i]  * balanceFactorFrontLeft;
+                const float frontRightValue = rightFrontBuffer[i] * balanceFactorFrontRight;
+                const float rearLeftValue   = leftRearBuffer[i]   * balanceFactorRearLeft;
+                const float rearRightValue  = rightRearBuffer[i]  * balanceFactorRearRight;
 
-                case Game::QUAD_1_FLR_2_RLR:
-                case Game::QUAD_1_FRL_2_RRL: {
-                    // Normal channels Front Left/Right then Rear Left/Right
-                    if (flipStereo) // swap left and right channels
-                    {
-                        *p++ = ToHostSample(frontRightValue);
-                        *p++ = ToHostSample(frontLeftValue);
-                        *p++ = ToHostSample(rearRightValue);
-                        *p++ = ToHostSample(rearLeftValue);
-                    } else {
-                        *p++ = ToHostSample(frontLeftValue);
-                        *p++ = ToHostSample(frontRightValue);
-                        *p++ = ToHostSample(rearLeftValue);
-                        *p++ = ToHostSample(rearRightValue);
-                    }
-                } break;
+                float fl = 0.0f, fr = 0.0f, rl = 0.0f, rr = 0.0f;
+                ResolveQuadChannels(frontLeftValue, frontRightValue, rearLeftValue, rearRightValue,
+                    flipStereo, fl, fr, rl, rr);
 
-                case Game::QUAD_1_RLR_2_FLR:
-                case Game::QUAD_1_RRL_2_FRL:
-                    // Reversed channels Front/Rear Left then Front/Rear Right
-                    if (flipStereo) // swap left and right channels
-                    {
-                        *p++ = ToHostSample(rearRightValue);
-                        *p++ = ToHostSample(rearLeftValue);
-                        *p++ = ToHostSample(frontRightValue);
-                        *p++ = ToHostSample(frontLeftValue);
-                    } else {
-                        *p++ = ToHostSample(rearLeftValue);
-                        *p++ = ToHostSample(rearRightValue);
-                        *p++ = ToHostSample(frontLeftValue);
-                        *p++ = ToHostSample(frontRightValue);
-                    }
-                    break;
+                float fc  = 0.0f;
+                float lfe = 0.0f;
+                if (s_surroundUpmix51)
+                    Igloo::AudioDSP::UpmixQuadTo51(fl, fr, rl, rr, fc, lfe, s_lfeFilter);
 
-                case Game::QUAD_1_LR_2_FR_MIX:
-                    // Split mix: one goes to left/right, other front/rear (mono)
-                    // =>Remix all!
-                    {
-                        const float newfrontLeftValue = MixFloat(frontLeftValue, rearLeftValue);
-                        const float newfrontRightValue = MixFloat(frontLeftValue, rearRightValue);
-                        const float newrearLeftValue = MixFloat(frontRightValue, rearLeftValue);
-                        const float newrearRightValue = MixFloat(frontRightValue, rearRightValue);
-
-                        if (flipStereo) // swap left and right channels
-                        {
-                            *p++ = ToHostSample(newfrontRightValue);
-                            *p++ = ToHostSample(newfrontLeftValue);
-                            *p++ = ToHostSample(newrearRightValue);
-                            *p++ = ToHostSample(newrearLeftValue);
-                        } else {
-                            *p++ = ToHostSample(newfrontLeftValue);
-                            *p++ = ToHostSample(newfrontRightValue);
-                            *p++ = ToHostSample(newrearLeftValue);
-                            *p++ = ToHostSample(newrearRightValue);
-                        }
-                    }
-                    break;
-                }
+                *p++ = ToHostSample(fl);  // 0: Front Left (FL)
+                *p++ = ToHostSample(fr);  // 1: Front Right (FR)
+                *p++ = ToHostSample(fc);  // 2: Front Center (FC)
+                *p++ = ToHostSample(lfe); // 3: Low Frequency Effects (LFE)
+                *p++ = ToHostSample(rl);  // 4: Back/Rear Left (RL)
+                *p++ = ToHostSample(rr);  // 5: Back/Rear Right (RR)
             }
         }
     }
@@ -734,19 +783,32 @@ Result OpenAudio(const Util::Config::Node& config)
         return ErrorLog("Unable to initialize SDL audio sub-system: %s\n", SDL_GetError());
 #endif
 
-    // Number of channels requested in config (default is 4)
+    // Number of channels requested in config (1 = Mono, 2 = Stereo, 4 = 4.0 Quad, 6 = 5.1 Surround; default is 4)
     nbHostAudioChannels = (int)s_config->Get("NbSoundChannels").ValueAs<int>();
+    if (nbHostAudioChannels != 1 && nbHostAudioChannels != 2 && nbHostAudioChannels != 4 && nbHostAudioChannels != 6)
+        nbHostAudioChannels = 4;
 
-    // If game is only stereo or mono, enforce host to reduce number of channels
+    s_surroundUpmix51 = s_config->Get("SurroundUpmix51").ValueAsDefault<bool>(true);
+    if (const char* envUpmix = std::getenv("SM3D_SURROUND_UPMIX"))
+        s_surroundUpmix51 = (std::atoi(envUpmix) != 0);
+    s_lfeFilter.Init(SAMPLE_RATE_M3, 120.0);
+
+    bool recordWav = s_config->Get("RecordWav").ValueAsDefault<bool>(false);
+    if (const char* envRec = std::getenv("SM3D_RECORD_WAV"))
+        recordWav = (std::atoi(envRec) != 0);
+    const bool forceMultichannel = recordWav || (std::getenv("SM3D_FORCE_MULTICHANNEL") != nullptr);
+
+    // If game is only stereo or mono, enforce host to reduce number of channels unless 5.1 upmix is requested
     switch (AudioType) {
     case Game::MONO:
         nbHostAudioChannels = std::min(nbHostAudioChannels, 1);
         break;
     case Game::STEREO_LR:
     case Game::STEREO_RL:
-        nbHostAudioChannels = std::min(nbHostAudioChannels, 2);
+        if (!(nbHostAudioChannels == 6 && s_surroundUpmix51))
+            nbHostAudioChannels = std::min(nbHostAudioChannels, 2);
         break;
-    default: // quad types need up to 4 channels; config value already defaults to 4
+    default: // quad types support both 4.0 Quad (4) and 5.1 Surround (6)
         break;
     }
     // Mixer Balance
@@ -814,15 +876,22 @@ Result OpenAudio(const Util::Config::Node& config)
             InfoLog("Audio: unable to query the output device format; mixing %d channel(s).", nbHostAudioChannels);
             return;
         }
-        if (deviceSpec.channels < nbHostAudioChannels) {
-            const int folded = (deviceSpec.channels >= 2) ? 2 : 1;
-            InfoLog("Audio: device '%s' has %d channel(s) (%d Hz); folding the quad mix down to %d.",
-                deviceName ? deviceName : "default", deviceSpec.channels, deviceSpec.freq, folded);
+        if (deviceSpec.channels < nbHostAudioChannels && !forceMultichannel) {
+            int folded = 2;
+            if (deviceSpec.channels >= 4)
+                folded = 4;
+            else if (deviceSpec.channels >= 2)
+                folded = 2;
+            else
+                folded = 1;
+            InfoLog("Audio: device '%s' has %d channel(s) (%d Hz); folding the %d-channel mix down to %d.",
+                deviceName ? deviceName : "default", deviceSpec.channels, deviceSpec.freq, nbHostAudioChannels, folded);
             nbHostAudioChannels = folded;
             desired.channels = folded;
         } else {
-            InfoLog("Audio: device '%s' has %d channel(s) (%d Hz); mixing %d channel(s).",
-                deviceName ? deviceName : "default", deviceSpec.channels, deviceSpec.freq, nbHostAudioChannels);
+            InfoLog("Audio: device '%s' has %d channel(s) (%d Hz); mixing %d channel(s)%s.",
+                deviceName ? deviceName : "default", deviceSpec.channels, deviceSpec.freq, nbHostAudioChannels,
+                (nbHostAudioChannels == 6) ? (s_surroundUpmix51 ? " (5.1 Surround Upmixer ON)" : " (5.1 Discrete)") : "");
         }
     };
     mixForDevice(deviceId);
@@ -835,6 +904,14 @@ Result OpenAudio(const Util::Config::Node& config)
             requestedDevice.c_str(), SDL_GetError());
         deviceId = SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK;
         mixForDevice(deviceId);
+        s_audioStream = SDL_OpenAudioDeviceStream(deviceId, &desired, NULL, NULL);
+    }
+    if (s_audioStream == NULL && desired.channels == 6)
+    {
+        InfoLog("Audio: 6-channel (5.1) stream refused (%s); retrying at 4 channels (4.0 Quad).",
+            SDL_GetError());
+        nbHostAudioChannels = 4;
+        desired.channels = 4;
         s_audioStream = SDL_OpenAudioDeviceStream(deviceId, &desired, NULL, NULL);
     }
     if (s_audioStream == NULL && desired.channels > 2)
@@ -970,6 +1047,23 @@ Result OpenAudio(const Util::Config::Node& config)
     underRuns = 0;
     overRuns = 0;
 
+    // Start multi-channel WAV / FLAC lossless recorder if requested
+    if (recordWav)
+    {
+        using Recorder = Igloo::Audio::MultiChannelRecorder<AudioSample>;
+        std::string fmtSetting = s_config->Get("RecordWavFormat").ValueAsDefault<std::string>("wav_float32");
+        if (const char* envFmt = std::getenv("SM3D_RECORD_WAV_FORMAT"))
+            fmtSetting = envFmt;
+        const auto containerFmt = Recorder::ParseFormatString(fmtSetting);
+        const char* ext = Recorder::IsFlacFormat(containerFmt) ? ".flac" : ".wav";
+
+        const std::string fileName = Igloo::Audio::BuildTimestampedRecordingFileName(
+            s_audioGameTitle, nbHostAudioChannels, ext);
+        const std::string recPath = FileSystemPath::GetPath(FileSystemPath::RecordingsSound) + fileName;
+
+        s_wavRecorder.Start(recPath, SAMPLE_RATE_M3, static_cast<uint16_t>(nbHostAudioChannels), containerFmt, &RecorderLogBridge);
+    }
+
     // Start audio playing
 #if defined(SUPERMODEL_PLATFORM_SDL3)
     SDL_ResumeAudioStreamDevice(s_audioStream);
@@ -1011,8 +1105,8 @@ bool OutputAudio(unsigned numSamples, const float* leftFrontBuffer, const float*
     if (numSamples > maxFrameSamples)
         numSamples = maxFrameSamples;
 
-    // Mix together left and right channels into single chunk of data
-    AudioSample mixBuffer[NUM_CHANNELS_M3 * maxFrameSamples];
+    // Mix together channels into single interleaved chunk of data (up to 6 channels for 5.1)
+    AudioSample mixBuffer[MAX_HOST_CHANNELS * maxFrameSamples];
     MixChannels(numSamples, leftFrontBuffer, rightFrontBuffer, leftRearBuffer, rightRearBuffer, mixBuffer, flipStereo);
 
     /*
@@ -1247,6 +1341,10 @@ void CloseAudio()
     else
         SDL_CloseAudio();
 #endif
+
+    // Stop multi-channel WAV recorder after the audio callback thread is torn down
+    s_wavRecorder.Stop();
+    s_lfeFilter.Reset();
 
     // Delete audio buffer
     delete[] audioBuffer;

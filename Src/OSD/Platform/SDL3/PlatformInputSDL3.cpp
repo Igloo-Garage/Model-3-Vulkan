@@ -73,9 +73,11 @@ struct OpenGamepadEntry
     int hapticConstant = -1;
     int hapticSpring = -1;
     int hapticFriction = -1;
+    int hapticVibration = -1;
     bool hapticConstantSupported = true;
     bool hapticSpringSupported = true;
     bool hapticFrictionSupported = true;
+    bool hapticVibrationSupported = true;
     // Level the constant-force envelope starts from, so an update ramps instead of stepping.
     Sint16 hapticConstantLevel = 0;
 };
@@ -610,10 +612,10 @@ void FillGamepadInfo(SDL_JoystickID id, int index, GamepadInfo* info)
         info->numHats = static_cast<uint8_t>(std::max(0, SDL_GetNumJoystickHats(joystick)));
 
         SDL_PropertiesID props = SDL_GetJoystickProperties(joystick);
-        info->hasHaptic = SDL_GetBooleanProperty(props, SDL_PROP_JOYSTICK_CAP_RUMBLE_BOOLEAN, false);
-        info->hasRumble = info->hasHaptic;
+        info->hasRumble = SDL_GetBooleanProperty(props, SDL_PROP_JOYSTICK_CAP_RUMBLE_BOOLEAN, false);
         info->hasTriggerRumble = SDL_GetBooleanProperty(
             props, SDL_PROP_JOYSTICK_CAP_TRIGGER_RUMBLE_BOOLEAN, false);
+        info->hasHaptic = SDL_IsJoystickHaptic(joystick);
         SDL_CloseJoystick(joystick);
     }
 }
@@ -1204,13 +1206,15 @@ bool UpdateConstantForce(OpenGamepadEntry& entry, float strength)
     SDL_HapticEffect effect = {};
     effect.type = SDL_HAPTIC_CONSTANT;
     effect.constant.direction.type = SDL_HAPTIC_CARTESIAN;
-    effect.constant.direction.dir[0] = strength >= 0.0f ? 1 : -1;
+    // In DirectInput and Linux evdev Cartesian mode, a single-axis wheel uses dir[0] = 0 (X axis)
+    // and encodes torque direction in the sign of constant.level (-32767..+32767).
+    effect.constant.direction.dir[0] = 0;
     effect.constant.length = SDL_HAPTIC_INFINITY;
-    effect.constant.level = static_cast<Sint16>(std::fabs(strength) * 32767.0f);
+    effect.constant.level = static_cast<Sint16>(std::clamp(strength, -1.0f, 1.0f) * 32767.0f);
     effect.constant.attack_length = kHapticSmoothingMs;
-    effect.constant.attack_level = entry.hapticConstantLevel;
+    effect.constant.attack_level = static_cast<Uint16>(std::abs(static_cast<int>(entry.hapticConstantLevel)));
     effect.constant.fade_length = 0;
-    effect.constant.fade_level = effect.constant.level;
+    effect.constant.fade_level = static_cast<Uint16>(std::abs(static_cast<int>(effect.constant.level)));
 
     if (entry.hapticConstant < 0)
     {
@@ -1235,6 +1239,43 @@ bool UpdateConstantForce(OpenGamepadEntry& entry, float strength)
 
     SDL_RunHapticEffect(entry.haptic, entry.hapticConstant, 1);
     entry.hapticConstantLevel = effect.constant.level;
+    return true;
+}
+
+bool UpdatePeriodicForce(OpenGamepadEntry& entry, float strength)
+{
+    if (!entry.hapticVibrationSupported)
+        return false;
+
+    SDL_HapticEffect effect = {};
+    effect.type = SDL_HAPTIC_SINE;
+    effect.periodic.direction.type = SDL_HAPTIC_CARTESIAN;
+    effect.periodic.direction.dir[0] = 0;
+    effect.periodic.length = SDL_HAPTIC_INFINITY;
+    effect.periodic.period = 50;
+    effect.periodic.magnitude = static_cast<Sint16>(std::clamp(strength, 0.0f, 1.0f) * 32767.0f);
+
+    if (entry.hapticVibration < 0)
+    {
+        if (!SDL_HapticEffectSupported(entry.haptic, &effect))
+        {
+            entry.hapticVibrationSupported = false;
+            return false;
+        }
+        entry.hapticVibration = SDL_CreateHapticEffect(entry.haptic, &effect);
+    }
+    else
+    {
+        SDL_UpdateHapticEffect(entry.haptic, entry.hapticVibration, &effect);
+    }
+
+    if (entry.hapticVibration < 0)
+    {
+        entry.hapticVibrationSupported = false;
+        return false;
+    }
+
+    SDL_RunHapticEffect(entry.haptic, entry.hapticVibration, 1);
     return true;
 }
 
@@ -1299,6 +1340,8 @@ bool OpenHaptics(GamepadId id)
     if (entry->haptic == nullptr)
         return false;
 
+    // Disable driver auto-centering so the arcade drive board's spring effect is in full control.
+    SDL_SetHapticAutocenter(entry->haptic, 0);
     SDL_SetHapticGain(entry->haptic, 100);
     return true;
 }
@@ -1315,6 +1358,8 @@ void CloseHaptics(GamepadId id)
         SDL_DestroyHapticEffect(entry->haptic, entry->hapticSpring);
     if (entry->hapticFriction >= 0)
         SDL_DestroyHapticEffect(entry->haptic, entry->hapticFriction);
+    if (entry->hapticVibration >= 0)
+        SDL_DestroyHapticEffect(entry->haptic, entry->hapticVibration);
 
     SDL_CloseHaptic(entry->haptic);
 
@@ -1322,9 +1367,11 @@ void CloseHaptics(GamepadId id)
     entry->hapticConstant = -1;
     entry->hapticSpring = -1;
     entry->hapticFriction = -1;
+    entry->hapticVibration = -1;
     entry->hapticConstantSupported = true;
     entry->hapticSpringSupported = true;
     entry->hapticFrictionSupported = true;
+    entry->hapticVibrationSupported = true;
     entry->hapticConstantLevel = 0;
 }
 
@@ -1353,6 +1400,18 @@ bool SetHapticEffect(GamepadId id, HapticEffect effect, float strength)
         return UpdateConstantForce(*entry, clamped);
     }
 
+    if (effect == HapticEffect::Vibration)
+    {
+        const float clamped = std::clamp(strength, 0.0f, 1.0f);
+        if (clamped == 0.0f)
+        {
+            if (entry->hapticVibration >= 0)
+                SDL_StopHapticEffect(entry->haptic, entry->hapticVibration);
+            return true;
+        }
+        return UpdatePeriodicForce(*entry, clamped);
+    }
+
     const float clamped = std::clamp(strength, 0.0f, 1.0f);
     if (clamped == 0.0f)
     {
@@ -1379,6 +1438,13 @@ void StopHapticEffect(GamepadId id, HapticEffect effect)
         return;
     }
 
+    if (effect == HapticEffect::Vibration)
+    {
+        if (entry->hapticVibration >= 0)
+            SDL_StopHapticEffect(entry->haptic, entry->hapticVibration);
+        return;
+    }
+
     const int effectId = (effect == HapticEffect::Spring) ? entry->hapticSpring : entry->hapticFriction;
     if (effectId >= 0)
         SDL_StopHapticEffect(entry->haptic, effectId);
@@ -1397,7 +1463,7 @@ void StopAllHapticEffects(GamepadId id)
 bool SetGamepadRumble(GamepadId id, float lowFrequency, float highFrequency, uint32_t durationMs)
 {
     OpenGamepadEntry* entry = FindGamepad(id);
-    if (entry == nullptr || entry->gamepad == nullptr || !entry->info.hasRumble)
+    if (entry == nullptr || !entry->info.hasRumble)
         return false;
 
     const auto toIntensity = [](float value) -> Uint16 {
@@ -1405,8 +1471,17 @@ bool SetGamepadRumble(GamepadId id, float lowFrequency, float highFrequency, uin
         return static_cast<Uint16>(clamped * 65535.0f + 0.5f);
     };
 
-    return SDL_RumbleGamepad(entry->gamepad, toIntensity(lowFrequency),
-        toIntensity(highFrequency), durationMs);
+    if (entry->gamepad != nullptr)
+    {
+        return SDL_RumbleGamepad(entry->gamepad, toIntensity(lowFrequency),
+            toIntensity(highFrequency), durationMs);
+    }
+    if (entry->joystick != nullptr)
+    {
+        return SDL_RumbleJoystick(entry->joystick, toIntensity(lowFrequency),
+            toIntensity(highFrequency), durationMs);
+    }
+    return false;
 }
 
 void SetTextInputActive(Window* window, bool active)

@@ -6,7 +6,13 @@ on:
 
 jobs:
   linux:
-    runs-on: ubuntu-latest
+    # Pinned rather than "ubuntu-latest". The runner image decides the glibc and libstdc++ the
+    # release binary links against, and "latest" has already moved to a glibc newer than any
+    # supported target: the 0.9.8.6 tarball required GLIBC_2.43 and could not load on Ubuntu 24.04
+    # (2.39) or on SteamOS, which is exactly the "closes immediately, no log" report from Steam
+    # Deck users. 24.04 is also the oldest LTS that has g++-14, which <print> in the startup layer
+    # needs. Raise this only with the guard step below updated to match.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -14,7 +20,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            cmake ninja-build clang zlib1g-dev libwebp-dev unzip curl \
+            cmake ninja-build g++-14 libdecor-0-dev \
+            zlib1g-dev libwebp-dev unzip curl \
             libudev-dev \
             libx11-dev libxext-dev libxrandr-dev libxi-dev libxcursor-dev \
             libxfixes-dev libwayland-dev libxkbcommon-dev libegl1-mesa-dev \
@@ -32,10 +39,34 @@ jobs:
         run: |
           cmake -S . -B build-cmake -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=gcc-14 \
+            -DCMAKE_CXX_COMPILER=g++-14 \
             -DUSE_SDL2=OFF -DUSE_SDL3=ON -DSUPERMODEL_SDL3_PURE_VULKAN=ON
 
       - name: Build
         run: cmake --build build-cmake --target Model3-Vulkan --parallel
+
+      - name: Check the glibc/libstdc++ baseline
+        run: |
+          set -euo pipefail
+          # Fails the build instead of shipping a binary that only runs on the build image. The
+          # baseline is the oldest target we support: Ubuntu 24.04 (glibc 2.39, libstdc++ from
+          # GCC 14) and SteamOS, which tracks slightly behind it.
+          max_glibc=$(readelf -V build-cmake/bin/Model3-Vulkan \
+            | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -Vu | tail -1)
+          max_cxxabi=$(readelf -V build-cmake/bin/Model3-Vulkan \
+            | grep -oE 'CXXABI_[0-9]+\.[0-9]+(\.[0-9]+)?' | sort -Vu | tail -1)
+          echo "requires $max_glibc and $max_cxxabi"
+          if [ "$max_glibc" != "GLIBC_2.39" ] && \
+             [ "$(printf '%s\n%s\n' "$max_glibc" GLIBC_2.39 | sort -Vu | tail -1)" != "GLIBC_2.39" ]; then
+            echo "::error::the binary requires $max_glibc, newer than the GLIBC_2.39 baseline"
+            exit 1
+          fi
+          if [ "$max_cxxabi" != "CXXABI_1.3.15" ] && \
+             [ "$(printf '%s\n%s\n' "$max_cxxabi" CXXABI_1.3.15 | sort -Vu | tail -1)" != "CXXABI_1.3.15" ]; then
+            echo "::error::the binary requires $max_cxxabi, newer than the CXXABI_1.3.15 baseline (GCC 14)"
+            exit 1
+          fi
 
       - name: Publish HostCore
         run: cmake --build build-cmake --target hostcore

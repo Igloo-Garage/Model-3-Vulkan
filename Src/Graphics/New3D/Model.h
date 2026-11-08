@@ -253,6 +253,8 @@ struct Viewport
 	uint32_t sourceAddress = 0;
 	uint32_t matrixBaseAddr = 0;
 	float	baseMatrix[16] = {};	// C * matrix slot 0
+	float	cameraMatrix[16] = {};	// root camera node matrix (world-to-view)
+	bool	hasCameraMatrix = false;
 	bool	fullScreen = false;		// 0,0,496x384 - the gameplay view
 	int		screenArea = 0;
 };

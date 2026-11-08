@@ -81,13 +81,27 @@ layout(location = 4) flat out vec3 vFaceNormal;
 layout(location = 5) flat out float vTextureNP;
 layout(location = 6) flat out uint vColourBits;
 
-layout(push_constant) uniform PushConstants
+// The scene uniform, matching ViewportUBO in VulkanCommon.h field for field. Declared here as well
+// as in real3d_common.glsl because the two stages are compiled separately and this one has no
+// include of its own; the layout must not drift, which is what the C++ static_asserts guard on the
+// host side.
+layout(set = 0, binding = 1) uniform ViewportUBO
 {
-	mat4 modelView;
+	vec4 spotEllipse;
+	vec4 spotRange;
+	vec4 spotColor;
+	vec4 spotFogColor;
+	vec4 texFilter;
+	vec4 renderOptions;
 	mat4 projection;
 	vec4 lightDir;
 	vec4 lightParams;
 	vec4 fogColour;
+} ubo;
+
+layout(push_constant) uniform PushConstants
+{
+	mat4 modelView;
 	vec4 fogParams;
 	vec4 extra;
 } pc;
@@ -112,5 +126,5 @@ void main()
 	vTextureNP = vertex.normal.w;
 	vColourBits = floatBitsToUint(vertex.face.w);
 
-	gl_Position = pc.projection * view;
+	gl_Position = ubo.projection * view;
 }

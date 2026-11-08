@@ -157,16 +157,26 @@ struct GpuQuadVertex
 	uint32_t colour;		// unorm8x4
 };
 
-// std140 push constants, 208 bytes.
-// extra.x = cota, extra.y = modelScale, extra.z = discardAlpha (0 or 1),
-// extra.w = material index bitcast to float.
+/*
+ * std140 push constants, 96 bytes.
+ *
+ * Only what actually changes per draw lives here: the model matrix, the model's own fog alpha and
+ * the four extra scalars. Everything else in this shader is constant for a whole viewport and lives
+ * in ViewportUBO below, which is bound once per node.
+ *
+ * The 96-byte ceiling is not arbitrary. Vulkan only guarantees 128 bytes of push constants, and
+ * AMD's Windows driver reports exactly that - 128 bytes, against 256 on every other driver this
+ * renderer has been tested on. The block used to be 208 bytes with the projection matrix, the light
+ * parameters and the fog colour in it, so every AMD GPU on Windows was rejected at startup before a
+ * single frame was drawn. Those three are per-viewport data that was being re-sent hundreds of times
+ * per frame; moving them to the viewport uniform is both the fix and less work per draw.
+ *
+ * extra.x = cota, extra.y = modelScale, extra.z = discardAlpha (0 or 1),
+ * extra.w = material index bitcast to float.
+ */
 struct R3DPush
 {
 	float modelView[16];
-	float projection[16];
-	float lightDir[4];
-	float lightParams[4];
-	float fogColour[4];
 	float fogParams[4];
 	float extra[4];
 };
@@ -204,6 +214,24 @@ struct ViewportUBO
 	 *   zw unused.
 	 */
 	float renderOptions[4];
+	/*
+	 * Per-viewport scene state that used to be pushed per draw.
+	 *
+	 * The projection is already Y-flipped by the caller (see CVulkan3D::DrawBucket), the way the
+	 * shader expects it; the light parameters and the fog colour are copied verbatim from the
+	 * viewport. These change when the viewport changes, not when the model does, so carrying them in
+	 * the block that is already rewritten per node costs nothing and keeps the push constant range
+	 * inside the 128 bytes every driver guarantees (see R3DPush).
+	 *
+	 *   projection  - world-to-clip, Y flipped
+	 *   lightDir    - xyz = sun direction, w = intensity
+	 *   lightParams - x = lighting param, y = sun clamp, z = intensity clamp, w = hardware step
+	 *   fogColour   - rgb = fog colour, a = fog density
+	 */
+	float projection[16];
+	float lightDir[4];
+	float lightParams[4];
+	float fogColour[4];
 };
 
 // std140 push constants for the ambient / scroll fog background pass. 64 bytes.
@@ -222,8 +250,10 @@ static_assert(offsetof(GpuQuadVertex, normal) == 16, "GpuQuadVertex std430 layou
 static_assert(offsetof(GpuQuadVertex, uv) == 32, "GpuQuadVertex std430 layout");
 static_assert(offsetof(GpuQuadVertex, faceNormal) == 48, "GpuQuadVertex std430 layout");
 static_assert(offsetof(GpuQuadVertex, colour) == 60, "GpuQuadVertex std430 layout");
-static_assert(sizeof(R3DPush) == 208, "R3DPush size");
-static_assert(sizeof(ViewportUBO) == 96, "ViewportUBO size");
+// 96, not the 208 it used to be: the ceiling is the 128 bytes every Vulkan driver guarantees, and
+// AMD's Windows driver guarantees exactly that much.
+static_assert(sizeof(R3DPush) == 96, "R3DPush size");
+static_assert(sizeof(ViewportUBO) == 208, "ViewportUBO size");
 static_assert(sizeof(R3DFogPush) == 64, "R3DFogPush size");
 
 /*

@@ -244,6 +244,21 @@ FontProbeResult ProbeFontData(const void* data, std::size_t size, int faceIndex)
     if (!stbtt_InitFont(&info, bytes, (int)offset))
         return { false, "the bundled rasteriser rejected it" };
 
+    /*
+     * A font can parse perfectly and still be unusable for this interface.
+     *
+     * Droid Sans Fallback - the CJK-only face several distributions ship as their fallback - maps no
+     * Basic Latin code point at all. Accepting it drew every widget and no label: the window came up
+     * with blank buttons, which reads as a renderer fault rather than as a font choice (seen on a
+     * stock Ubuntu 24.04, where neither WenQuanYi nor Noto CJK is installed by default).
+     *
+     * Latin is required in every interface language, not only English: the labels hold version
+     * numbers, ROM set names and shortcuts. CJK is not required here, because a Latin-only face is a
+     * perfectly usable fallback for the English interface and the bundled font covers Chinese.
+     */
+    if (stbtt_FindGlyphIndex(&info, 'A') == 0 || stbtt_FindGlyphIndex(&info, '0') == 0)
+        return { false, "no Basic Latin glyphs (a CJK-only fallback font)" };
+
     return { true, "" };
 }
 

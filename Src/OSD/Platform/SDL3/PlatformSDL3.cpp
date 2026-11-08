@@ -81,6 +81,22 @@ DisplayId DisplayIdFromSDL(SDL_DisplayID id)
 
 bool Initialize(uint32_t subsystems)
 {
+    /*
+     * On Windows, SDL3's DirectInput haptic backend (SDL_DINPUT_HapticInit) skips
+     * DI8DEVCLASS_GAMECTRL when SDL_INIT_JOYSTICK is already initialized, expecting
+     * WINDOWS_JoystickDetect() to register haptic devices via SDL_DINPUT_HapticMaybeAddDevice().
+     * Conversely, WINDOWS_JoystickDetect() is a no-op for haptics if SDL_INIT_HAPTIC has not
+     * initialized DirectInput yet, and SDL_InitSubSystem() always initializes SDL_INIT_JOYSTICK
+     * before SDL_INIT_HAPTIC when both flags are passed together. Initializing SDL_INIT_HAPTIC
+     * first whenever gamepad or haptic support is requested ensures SDL_hapticlist is populated
+     * for DirectInput steering wheels and joysticks.
+     */
+    if (subsystems & (Subsystem_Gamepad | Subsystem_Haptic))
+    {
+        if (!SDL_WasInit(SDL_INIT_HAPTIC))
+            SDL_InitSubSystem(SDL_INIT_HAPTIC);
+    }
+
     SDL_InitFlags flags = 0;
     if (subsystems & Subsystem_Video)
         flags |= SDL_INIT_VIDEO;
@@ -245,8 +261,26 @@ void CenterWindowOnDisplay(Window* window, DisplayId display)
 
 void SetWindowSize(Window* window, int width, int height)
 {
-    if (IsWindowValid(window))
-        SDL_SetWindowSize(window->sdl, width, height);
+    if (!IsWindowValid(window))
+        return;
+
+    SDL_SetWindowSize(window->sdl, width, height);
+
+    /*
+     * Wait for the resize to be applied.
+     *
+     * Wayland applies a resize asynchronously: SDL_SetWindowSize records the request, the compositor
+     * confirms it with a configure event later, and SDL_GetWindowSize keeps reporting the old size
+     * until then. Callers read the size immediately afterwards to place the picture (CalcScreenGeometry),
+     * so the geometry was computed from a stale size. With the game window created before its size was
+     * known, that produced a 1x1 picture: the game rendered into a single pixel and the screen looked
+     * black.
+     *
+     * SDL_SyncWindow blocks until pending window operations are finished, which is the guarantee
+     * GetWindowSize needs here. It is cheap where the backend applies sizes synchronously, and the
+     * interface only calls this when the size actually changes.
+     */
+    SDL_SyncWindow(window->sdl);
 }
 
 void SetWindowMinimumSize(Window* window, int width, int height)
@@ -623,6 +657,8 @@ bool GetDisplayMode(DisplayId display, int index, DisplayMode* mode)
     mode->width = modes[index]->w;
     mode->height = modes[index]->h;
     mode->refreshHz = modes[index]->refresh_rate;
+    // macOS reports a scaled mode in points; pixel_density is what turns it back into panel pixels.
+    mode->pixelDensity = modes[index]->pixel_density > 0.0f ? modes[index]->pixel_density : 1.0f;
     SDL_free(modes);
     return true;
 }
@@ -639,6 +675,7 @@ bool GetDesktopDisplayMode(DisplayId display, DisplayMode* mode)
     mode->width = current->w;
     mode->height = current->h;
     mode->refreshHz = current->refresh_rate;
+    mode->pixelDensity = current->pixel_density > 0.0f ? current->pixel_density : 1.0f;
     return true;
 }
 
@@ -655,6 +692,7 @@ bool GetCurrentDisplayMode(Window* window, DisplayMode* mode)
     mode->width = current->w;
     mode->height = current->h;
     mode->refreshHz = current->refresh_rate;
+    mode->pixelDensity = current->pixel_density > 0.0f ? current->pixel_density : 1.0f;
     return true;
 }
 

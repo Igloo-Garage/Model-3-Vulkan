@@ -1,226 +1,358 @@
-# Model 3-Vulkan Release Notes
+# Model 3-Vulkan v0.9.9.6 — Release Notes
 
-## v0.9.8.6m — macOS only (2026-10-30)
+**2026-11-07 · Windows (this download) · Linux / macOS builds from the same tree are produced by CI**
 
-> **This release is for macOS only.** It contains one asset, `Model3-Vulkan.v0.9.8.6m.for.macOS.tar.gz`.
-> There is no Windows or Linux build in this release, and none is needed: nothing outside the
-> macOS platform layer changed since v0.9.8.6. The `m` suffix marks the macOS build of 0.9.8.6;
-> the Windows and Linux builds keep the 0.9.8.6 number.
+Model 3-Vulkan v0.9.9.6 is the biggest release this fork has shipped. It is not a maintenance
+build: the emulation core now has a PowerPC → x86-64 hybrid JIT, the audio path can drive a real
+4.0/5.1 arcade cabinet and record it losslessly, the chase camera has a proper Need for Speed-style
+stabilizer, direct-drive wheels finally get real force feedback and live pedal calibration, and the
+settings window has been rebuilt around frosted glass and three complete themes.
 
-**Model 3-Vulkan v0.9.8.6m makes the macOS build start again.** v0.9.8.6 refused to launch with
-"Vulkan 1.3 required" (`VkResult -7`) on every Mac that has been tried; this release fixes the
-three macOS-only defects behind that message.
-
-### Fixed (macOS)
-
-* **Startup no longer fails with `VkResult -7`.** The preflight asked for `VK_KHR_portability_enumeration`, an extension the Vulkan *loader* synthesises. The macOS package loads MoltenVK directly through volk with no loader in between, so the request was rejected before any device was looked at. The extension is now requested only when the implementation actually lists it, and the portability flag is set together with it.
-* **The preflight no longer rejects a Vulkan 1.2 device that the renderer accepts.** `ClassifyDevice()` has always allowed either Vulkan 1.3 or Vulkan 1.2 with `VK_KHR_dynamic_rendering` plus `VK_KHR_synchronization2`; the preflight only accepted 1.3, so a machine the renderer could drive was turned away at the door. Both now use the same rule.
-* **The macOS package finds its own data again.** The path helper looked for `Config/` beside the executable while the archive ships `Data/Config/`, so `Games.xml`, `Boxarts/`, NVRAM and saves were all invisible. `Data/` is used when it exists; the old layout still works as a fallback. The default ROM folder is `roms/`, next to the executable.
-
-### Known limitation on macOS 13
-
-`.zst` save containers need **macOS 14 or newer**. The optional HostCore module is a .NET Native AOT library that links the system Swift runtime, and the Swift function it needs (`swift_getTypeByMangledNameInContext2`) first shipped in Swift 5.9, which is what macOS 14 includes. On macOS 13 the module does not load, the emulator says so once in the log and falls back to **`.st`**, which works normally — saving, F7 loading and `-load-state` were all verified on macOS 13.7.8. Nothing else is affected.
-
-### No OpenGL build for macOS
-
-The macOS package no longer offers the traditional OpenGL renderer. Keeping three platforms and six builds in step — Vulkan and OpenGL for Windows, Linux and macOS — is more than one person with limited hardware can keep tested, so macOS ships the Vulkan build only. `Supermodel-LegacyOG` remains available on Windows.
-
-### Verified on hardware
-
-macOS 13.7.8 on an Intel Core i5-8365U: the settings window opens, all 56 ROM sets in the local folder are listed and identified, Daytona USA 2 runs (bezel, textures, audio), and a `.st` save state is written and loaded back at the expected PC. The log contains no errors apart from the HostCore notice described above.
-
-### Settings for Intel integrated graphics
-
-On a 24-EU Intel iGPU the 3D scene is the expensive part. If a game is choppy, open **Advanced → Hardware preset** and choose **integrated graphics (992×768)** or the **ultra-low (496×384)** preset: the 3D scene is rendered at a fixed lower resolution and scaled up, while the HUD stays sharp.
-
-Thanks to Mateus109 for the report (issue #12).
-
-Compatibility: save states and NVRAM are unchanged; `SUPERMODEL_VERSION` is untouched. The Windows and Linux builds are unchanged since v0.9.8.6.
-
-## v0.9.8.6 (2026-10-29)
-
-> **Attention macOS users: download [v0.9.8.6m](https://github.com/Igloo-Garage/Model-3-Vulkan/releases/tag/v0.9.8.6m) instead — the macOS build attached to this release does not start.** The Vulkan preflight in this archive fails with `VkResult -7`, so the emulator never reaches its settings window on macOS. v0.9.8.6m is the macOS-only rebuild that fixes it; the Windows and Linux downloads on this page are unaffected and still current.
-
-**Model 3-Vulkan v0.9.8.6** makes every hotkey configurable from the INI file, fixes input handling for mice, standalone shifters and button boxes, and adds a one-click automatic launch.
-
-### 🎮 Input
-
-* **Hotkeys in the INI** — every in-game hotkey is an `InputUI...` entry (`InputUIExit`, `InputUISaveState`, `InputUIToggleOverlay`, ...), so a front end such as RetroBat or a cabinet build can assign its own buttons. Chords use the normal binding syntax, e.g. `JOY1_BUTTON7+JOY1_BUTTON8`. The Controls page still neither lists nor rewrites these keys, so editing the interface - or pressing **Apply recommended bindings** - never clobbers what a front end wrote; a key left out keeps the built-in default and `NONE` disables one. The two-line patch was proposed by **Tartifless** over at RetroBat (RetroBat-Official/emulatorlauncher#1456) and is included as-is.
-* **Binding a mouse axis works again** — a full-axis capture compared the pointer against the display centre and could keep both X and Y, producing `MOUSE_XAXIS+MOUSE_YAXIS`, which the input system rejects as an invalid combination; the capture then silently failed. Only the dominant axis (the larger displacement) is captured now, and a capture in progress no longer appends a second axis when the pointer or a resting pedal crosses the centre, so a full-axis binding always ends up as exactly one source.
-* **Standalone shifters, handbrakes and >16-button devices work in the default input mode** — with `sdlgamepad` selected, SDL3 devices that do not identify as game controllers used to be skipped, so a MOZA H-shifter or a handbrake could not be bound at all. They are opened alongside the controllers now, `BUTTON17` and up are readable on any device, and standard pads keep exactly the button numbering they had.
-* **The control-preset combo stays on what you picked** — selecting "Keyboard only" was replaced on the next frame by the value still in the INI.
-
-### 🖥️ Interface
-
-* **Auto-Launch on Startup** — right-click a row in the game list and choose it to start that game automatically the next time the program opens. The row is marked with `★`; **Clear Auto-Launch** on the same row undoes it. It fires once per run, so pressing `Esc` returns to the list rather than restarting the game, and starting with a ROM set on the command line is unaffected because that path never opens the list. Three rough edges found while testing that path are fixed too: the key no longer shows up as a stray untranslated text box on the Core page, launching straight into a starred game no longer flashes the settings window, and the menu entry is greyed out for sets that cannot start instead of silently doing nothing.
-
-  <p>
-    <img src="https://raw.githubusercontent.com/Igloo-Garage/Model-3-Vulkan/v0.9.8.6/Docs/images/updates/auto-launch%20on%20startup.webp" width="48%" alt="Auto-Launch on Startup">
-    <img src="https://raw.githubusercontent.com/Igloo-Garage/Model-3-Vulkan/v0.9.8.6/Docs/images/updates/clear%20auto-launch.webp" width="48%" alt="Clear Auto-Launch">
-  </p>
-
-Compatibility: save states and NVRAM are unchanged; `SUPERMODEL_VERSION` is untouched.
-
-## v0.9.8.3b Maintenance Release (2026-10-28)
-
-**Model 3-Vulkan v0.9.8.3b** is a maintenance update for the v0.9.8.3a milestone. It fixes a regression that silenced sound effects in every title and completes the native DDS path for HD texture packs.
-
-### 🔧 Fixes
-
-* **Sound effects restored in every game.** A misplaced `else` in `CSoundBoard::RunFrame()` cleared the SCSP output buffers immediately after the sound board filled them, so only the MPEG music survived. Engine, tyre, collision and menu effects were silent on fresh boots and on loaded saves alike; they are back now. Music playback, the quad-to-stereo fold and existing save states are unaffected.
-
-### 🖼️ HD Texture Packs
-
-* **`.dds` / `.dds.zst` support** — BC1, BC2, BC3, BC5 and BC7 images go straight into VRAM with the mip chain from the file (no blit pass). Files are uploaded in resumable chunks, so a 4096×4096 BC7 chain no longer starves the staging ring.
-* **Pack order is `.dds.zst` > `.dds` > `.webp` > `.png`** when several files carry the same hash.
-* **F4 toggles replacements and F3 rescans the folder**, so a pack can be compared against the original artwork without opening the in-game panel.
-
-### 🛠️ Under the hood
-
-* `SM3D_AUDIO_LEVEL=1` now reports the source peak split into front and rear channels, which makes "the machine is playing but one channel is missing" visible in the log.
-* The 3D scene targets are handed to the 2D compositor on every exit path (including the white-flash frame), and new targets are transitioned before the first composite, so `VUID-vkCmdDraw-imageLayout-00344` no longer appears after a flash frame.
-* A same-layout write-after-write barrier was added for attachments cleared at the start of a scene pass, closing a cross-submit hazard visible to synchronisation validation.
-
-Compatibility: save states written by v0.9.8.3a (and by the Supermodel-VK fork) load unchanged; `SUPERMODEL_VERSION` is untouched.
-
-## v0.9.8.3a Milestone Release (2026-10-28)
-
-**Model 3-Vulkan v0.9.8.3a** represents a historic architectural milestone in Sega Model 3 emulation. This release officially graduates the project from **Supermodel-VK** into **Model 3-Vulkan**, decoupling the modern rendering pipeline from legacy OpenGL into a dedicated, high-performance Vulkan 1.3 architecture.
+If you are coming from **v0.9.8.6a**, the JIT, camera, force-feedback, audio, save-state, graphics
+and interface sections below are new. The platform section also recaps the v0.9.8.6a / v0.9.8.6x
+hotfixes so a fresh reader sees the whole picture.
 
 ---
 
-### 🌟 Executive Summary
+## The short version
 
-* **Project Graduation**: Transitioned to an independent, standalone Vulkan 1.3 and SDL3 architecture. Legacy OpenGL is cleanly preserved as a standalone fallback binary (`Supermodel-LegacyOG.exe`).
-* **Real3D Hardware Simulation**: Completely resolved long-standing graphics artifacts, including Real3D hardware-accurate checkerboard transparency (Mode 2) and Quad pull-model SSBOs.
-* **Native HD Texture Pack Engine**: Unlocked the first-ever native texture replacement pipeline for Sega Model 3 arcade games with automatic hardware Mipmaps and `textureGrad` bypass.
-* **Audio Overhaul**: Decoupled the sound emulation into a dedicated real-time thread, permanently retiring the 6-year-old `LegacySoundDSP` workaround by correcting SCSP memory mapping.
-* **Modern Storage & State Management**: Introduced visual 16-slot save state management with Zstandard (`.zst`) compression, slashing save state file sizes by ~83% (crucial for handhelds like the Steam Deck).
-* **Display Pacing & Low-Latency Input**: Native 57.524 Hz arcade refresh rate with 120Hz/144Hz+ motion interpolation via `CDisplayPacer`, backed by an ultra-low latency SDL3 Raw Input and HIDAPI input foundation.
-
----
-
-### 🎨 Visuals & Real3D Emulation Accuracy
-
-#### 1. 100% Hardware Quad Pull-Model (SSBO)
-* Completely eliminated geometry shaders. Quads are now pulled directly from shader storage buffer objects (SSBOs).
-* Implemented an inverse-bilinear solver directly within the fragment shader to recover perspective-correct `(s, t)` coordinates and native quad interpolation.
-* Preserves GPU Early-Z depth culling across all modern graphics pipelines, significantly boosting fill-rate efficiency on integrated and discrete GPUs alike.
-
-#### 2. 4x EWA Anisotropic Filtering
-* Engineered an elliptical weighted average (EWA) anisotropic filtering pipeline using a 2×2 Gram matrix eigenvalue extraction with dynamic tap calculation.
-* Eliminates oblique texture shimmering and cross-seam edge bleeding along track boundaries and distant geometry.
-
-#### 3. Groundbreaking 3-Tier Transparency Architecture
-* **Mode 0: Bit-Exact Two-Pass (`AlphaSortMode = 0`)**:
-  * Utilizes on-chip `subpassLoad` with `VK_ATTACHMENT_STORE_OP_DONT_CARE` tile memory access for optimal bandwidth efficiency on low-power and integrated GPUs.
-* **Mode 1: Per-Pixel Sorted A-Buffer OIT (`AlphaSortMode = 1`)**:
-  * Employs a 4-slot structure-of-arrays (SoA) A-Buffer backed by a 5-step constant-time sorting network (<0.75ms resolve at 4K MSAA).
-* **Mode 2: Arcade Hardware Checkerboard (`AlphaSortMode = 2` — *World First*)**:
-  * Faithfully revives Real3D’s 1996 single-pass 50% stipple dither mask and transparent Z-write depth competition.
-  * **Fixes Blinding Exhaust & Tire Burnout Smoke**: Multi-layered smoke particles in *Daytona USA 2* and *Scud Race* no longer stack exponentially into solid, blinding white walls of milk; they now render with authentic arcade depth, proper particle layering, and natural falloff.
-  * **Fixes Sega Rally 2 Blizzard Blowout**: Permanently resolves the 20-year-old snow/fog overexposure bug where player cars were swallowed into solid white voids.
-  * **Eliminates Dirty Foliage Halos**: Cleans up black outlines and alpha blending seams on 3D trees and leaves in *The Lost World: Jurassic Park*.
-  * *Note:* This is an experimental mode intended for dense snow, dust and fog; it cannot reproduce LOD cross-fades. Use Mode 0 or Mode 1 for scenes such as Daytona 2's waterfall.
-
-#### 4. CRT Filter Refinement & Evolution Roadmap
-* Beam-profile scanline integration eliminates moiré banding and brightness unevenness at 4K without requiring point-sampling approximations.
-* *Roadmap Goal:* The internal CRT shader pipeline will continue to be optimized, aiming to rival leading heavyweight modern retro shaders out of the box with near-zero performance cost.
+- **Up to 4.1× faster in CPU-bound scenes** — the PowerPC 603e now translates hot basic blocks to native x86-64, verified against the interpreter for 675 million blocks with pixel-identical output.
+- **A chase camera that behaves like a modern racing game** — spring-damper yaw stabilisation around the car's pivot, with full-screen 3D HUDs (speedometer, course map, turn arrows) staying perfectly still.
+- **Force feedback that finally reaches the wheel** — SDL3 haptics initialised correctly on Windows, raw direct-drive wheel bases recognised, single-axis constant force fixed, and a live wheel/pedal calibration lab.
+- **A soundtrack, not a stereo mix** — native 4.0 Quad and 5.1 Surround, a smart center/LFE upmixer, 4-tap Catmull-Rom SCSP voices, 32-bit float DSB decoding, a C¹ soft-clipper, and a lock-free multi-channel WAV/FLAC recorder.
+- **Save states that resume instead of stalling** — the 53C810 PCI base address and halt flag and the simulated network board are now part of the save, so VF3 and Scud Race pick up where they left off instead of spinning on the DMA chain.
+- **A front end that belongs in 2026** — frosted-glass panels, warm light / warm dark / classic themes, adaptive tables that work at any DPI, per-game audio balance, and a much richer diagnostic log.
+- **The platform work that makes it shippable** — AMD Windows Vulkan driver limits handled, Linux pinned to a Steam Deck-compatible glibc, macOS Retina 4K fixed, GNOME Wayland title bars restored.
 
 ---
 
-### 🖼️ Native HD Texture Pack Engine
+## ⚡ PowerPC 603e → x86-64 hybrid JIT
 
-* **Clean Sub-Texture Identification**: Real3D sub-textures are cleanly identified and dumped using a 64-bit coordinate and format hash `(page, x, y, w, h, format)`.
-* **Zero Seam Bleeding**: Automatic hardware Mipmap generation combined with `textureGrad` bypass prevents edge bleeding and mipmap shimmer across multi-quad models.
-* **Format Support**:
-  * Native `.png` (lossless masters)
-  * Native `.webp` (ultra-compact distribution sizes with full alpha channel support)
-  * Hardware-direct **`.dds` (BC7 direct VRAM streaming)** is actively in development.
-* **Modder-Centric Architecture**: Designed to be extensible for community upscalers and artists. Support for custom PBR material maps (normals, roughness, metallic) and emissive layers is planned based on community creator requests.
+`PowerPCMode = 1` is the new default. Hot PowerPC basic blocks are translated once into native
+x86-64 and then executed directly, with:
 
----
+- a 16 MB RWX code cache and `PPC_FAST_MEMORY` direct-memory windows;
+- self-modifying-code page tracking;
+- idle-loop skipping;
+- a lock-step verifier that runs every translated block against the interpreter.
 
-### 🔊 Audio Modernization & Sound Board Decoupling
+**Verification:** 675 million blocks compared across five games, zero mismatches; the same save
+state and frame is pixel-identical to the interpreter. In a CPU-bound scene the frame rate went
+from **55.2 Hz to 224.5 Hz — about 4.1×**.
 
-* **Dedicated Real-Time Audio Threading**:
-  * Decoupled Motorola 68000 CPU and SCSP/DSB sound emulation into an independent real-time audio thread.
-  * Window movements, resizing, asset streaming, or background GPU frame pacing fluctuations will no longer cause audio stutter, crackle, or dropouts.
-* **The "LegacySoundDSP" Mystery Solved**:
-  * Fixed an architectural flaw dating back to 2020 where address range `0x7C0–0x7FF` (a reserved hardware hole) was incorrectly mapped as a mirror of `MADRS`.
-  * Because *Fighting Vipers 2* uploads its DSP image sequentially with 32 zeros filling this hole, the emulator was inadvertently zeroing out the game's newly uploaded delay/offset table, causing an acoustic positive feedback runaway loop (cutting victory speech to "you wi…" followed by a 0dB screech).
-  * Discarded writes to the reserved hole, corrected effect return volume to `EFSDL << 13`, patched an unsigned underflow in `SCSP_w32`, and **officially retired the `LegacySoundDSP` switch**.
-  * Restores pristine, authentic audio to *Fighting Vipers 2*, *Virtua Fighter 3*, and *Sega Rally 2* out of the box with zero configuration hacks.
+The C interpreter remains one menu entry away (`PowerPCMode = 0`) for reference runs and A/B tests.
+The JIT lives only in the Vulkan build; the retired OpenGL build keeps the interpreter.
 
 ---
 
-### 💾 Modern Save State Management (`.zst`)
+## 🎥 Chase camera & steering feel
 
-* **16 Visual Slots per Game**:
-  * Fully accessible via right-click on the game list or directly through the in-game overlay menu (`Tab`).
-  * Each slot captures a high-resolution screenshot thumbnail for effortless visual identification.
-* **Zstandard (`.zst`) Compression**:
-  * Upgraded state serialization to use modern Zstd compression.
-  * Slashes save file size to **roughly 1/6th of legacy uncompressed `.st` files** (reducing 30–50MB+ dumps down to 4–7MB). Eliminates storage bloat and flash-memory write wear on handheld devices like the **Steam Deck**.
-* *Usage Pro-Tip:* For select titles with complex mid-stage memory transitions, restoring save states via the in-game quick menu (`Tab`) is recommended over desktop launcher cold-booting.
+The new **Chase Camera Stabilizer** (`ChaseCameraStabilizer`, Off / Light / Standard / Strong,
+default Strong) is a spring-damper filter applied to the camera's horizontal yaw around the player
+car's pivot in view space. It removes the “the whole city swings when I breathe on the stick”
+problem on a gamepad without touching the car's actual heading. Full-screen 3D HUD viewports are
+excluded, so Daytona USA 2's speedometer, route map and turn arrows stay nailed in place.
 
----
+Paired with it:
 
-### 🖥️ UI, Multi-Monitor & Display Pacing
-
-* **Intelligent Window Lifecycle & Dynamic DPI**:
-  * Window dimensions are preserved seamlessly between sessions.
-  * Moving the emulator window between primary and secondary monitors with differing screen resolutions or OS scaling factors (e.g., 4K 150% to 1080p 100%) dynamically updates without blurry text or cropped controls.
-* **Warm Eye-Care Themes**:
-  * Introduced three built-in visual styles (warm light, warm dark, and the original interface), with a custom **Warm Eye-Care Theme** active by default to filter blue-white glare during extended sessions.
-  * Public community theming API planned for future releases.
-* **Arcade-Exact 57.524 Hz Pacing (`CDisplayPacer`)**:
-  * Delivers exact 57.524 Hz arcade refresh rate on VRR/G-Sync monitors.
-  * Provides smooth, motion-interpolated presentation on 120Hz, 144Hz, and 240Hz high-refresh displays.
-* **SDL3 Ultra-Low Latency Input Foundation**:
-  * Fully migrated the Vulkan build to SDL3 input handling, retiring the legacy DirectInput and XInput backend split.
-  * SDL3 gamepad handling uses HIDAPI polling, and a dedicated RawInput path provides isolated per-device mouse tracking for dual light guns. Hot-plugging is automatic.
+- **Gamepad Steering Smoothing** (Off / Light / Medium / Strong, default Strong) and **Sensitivity**
+  (25–100%, default 66%) on the **FFB / Sensitivity** page and in the in-game `Tab` overlay.
+- Selecting **Off** resets sensitivity to **100%** automatically.
+- Binding steering to a physical racing wheel bypasses both filters completely, preserving 1:1
+  direct response.
 
 ---
 
-### 🛠️ Additional Fixes in This Build
+## 🏎️ Force feedback, pedal calibration & wheel lab
 
-* **Scud Race save states (`scudplus.zst1`)**: Loading a car-select save no longer hangs. The saved MPEG window is validated (the `0x80008000` "no track" sentinel is rejected), a stalled decoder exits with silence instead of spinning, and the sound board re-drives its interrupt line on load, so effects work after restoring a state. New saves also carry a companion MPEG block, so background music resumes from the saved position; states written by older builds return the music when the game issues its next track command.
-* **Quad-cabinet audio on stereo endpoints**: The mixer now reads the output device's real channel count. On a two-channel device the rear pair is folded into the front pair by the mixer itself, instead of SDL applying a different downmix while the statistics panel still reported four channels. This restores Scud Race's car-select effects and rear-channel sound effects on normal desktop speakers.
-* **Input system default**: The Vulkan build now defaults to **SDL Gamepad** (`sdlgamepad`); legacy `xinput` values are migrated in memory, and controller detection only suggests a backend that actually exists in this build.
-* **Low-resolution 3D rendering**: **Video → Picture scaling** now also offers **992×768 (2× native)** beside 496×384. The 3D scene renders at 992×768 and is upscaled onto the picture rectangle, while the 2D HUD keeps its own resolution. Takes effect next session.
+Force feedback in the SDL3 build was not merely tuned — it was fixed end to end:
 
----
+- **Correct haptic initialisation on Windows.** `SDL_INIT_HAPTIC` is now brought up before the
+  joystick/gamepad subsystems, so DirectInput wheel bases actually appear in SDL's haptic list.
+- **Raw joystick wheel bases are accepted.** The old `isGamepad` gate rejected SIMAGIC, MOZA,
+  Fanatec and similar direct-drive bases; they are now opened as haptic devices.
+- **Constant force sign and axis encoding fixed**, with the 20 ms attack envelope retained for a
+  smooth torque build-up instead of a staircase.
+- **Vibration routed through `SDL_HAPTIC_SINE`**, with a rumble fallback for devices that do not
+  expose a sine effect.
+- **Hardware autocenter is released**, so the game's own spring effect is in control.
 
-### ⚙️ Dual-Binary Deployment
+On the **FFB / Sensitivity** page there is now a live calibration lab:
 
-To ensure 100% hardware coverage, release archives provide two pre-compiled binaries:
+- centred bidirectional axes, full-travel pedals, deadzones and custom min/off/max ranges;
+- columns measured from the current font and DPI, stretching to fill a wide window and switching
+  to a horizontal scrollbar instead of clipping `-32768` when the window is narrow;
+- a one-click **“Release H-shifter to neutral (from gears 1–4)”** binding generator on the
+  **Controls** tab.
 
-1. **`Model3-Vulkan.exe` (Default)**:
-   * Pure Vulkan 1.3 / SDL3 modern pipeline.
-   * Optimized for modern dedicated GPUs (NVIDIA GeForce, AMD Radeon, Intel Arc) and Intel Iris Xe (Gen12+) integrated graphics. Older iGPUs such as Skylake and the HD 500 class should use the OpenGL fallback.
-2. **`Supermodel-LegacyOG.exe` (Fallback)**:
-   * Standalone SDL2 + OpenGL 4.1 legacy build.
-   * Preserves compatibility for legacy hardware lacking modern Vulkan drivers (such as Intel 4th Gen Haswell).
-
----
-
-### 🚀 Upcoming Milestones: Roadmap Preview
-
-#### Part 1: Modern Peripherals Overhaul
-* Plug-and-play DirectDrive and belt/gear Force Feedback telemetry for Fanatec, Moza, Simagic, Thrustmaster, and Logitech wheels.
-* Native dual-lightgun support with off-screen reload detection for **Sinden, Gun4IR, Aimtrak, and Wiimote** hardware.
-* Crowdsourced **Device Probe Tool** to capture community rig telemetry and generate native auto-mapping presets.
-
-#### Part 2: Netplay 2.0
-* Zero-config P2P online multiplayer via 6-digit room codes with automatic NAT punch-through.
-* Asynchronous Star-Mesh UDP architecture: local simulation remains locked at 57.524 Hz / 120 Hz+ regardless of network latency.
-* Drop-in / drop-out fault tolerance: disconnected racers safely coast to the roadside without crashing the active lobby.
+> Force Feedback is **off on a fresh install** by design: most players use a pad or keyboard, and
+> enabling the drive board would make supported pads rumble constantly. Wheel users: tick
+> **Force Feedback** on the FFB / Sensitivity page (or launch with `-force-feedback`) once.
 
 ---
 
-### 🔗 Links & Community
+## 🔊 Audio: from stereo fold-down to a real cabinet
 
-* **GitHub Repository:** [https://github.com/Igloo-Garage/Model-3-Vulkan](https://github.com/Igloo-Garage/Model-3-Vulkan)
-* **Subreddit:** [r/Model3Vulkan](https://www.reddit.com/r/Model3Vulkan/)
-* **Support the Project:** [Ko-fi](https://ko-fi.com/igloogarage)
+### Native 4.0 Quad and 5.1 Surround
+
+`NbSoundChannels` now supports **1 (Mono)**, **2 (Stereo)**, **4 (4.0 Quad `[FL, FR, RL, RR]`)**,
+and **6 (5.1 Surround `[FL, FR, FC, LFE, RL, RR]`)**. The default is **4.0 Quad**, which matches the
+arcade cabinet and behaves correctly on a stereo desktop endpoint.
+
+The optional **5.1 upmixer** (`SurroundUpmix51`) synthesises:
+
+- **Center (`FC`)** from the front/rear common-mode signal, lifting vocals, navigator calls and
+  lead melodies out of the left/right pair;
+- **LFE** through a pre-warped 120 Hz second-order Butterworth low-pass, extracting engine rumble
+  and collision weight.
+
+### Lossless multi-channel recorder
+
+`RecordWav` captures the finished 4.0/5.1 mix through a lock-free SPSC ring buffer and a dedicated
+disk-writer thread — no `fwrite`, no mutex, no blocking on the real-time audio callback.
+
+- **`wav_float32`** — WAV, 32-bit IEEE float
+- **`wav_pcm16`** — WAV, 16-bit PCM
+- **`flac_pcm24`** — FLAC, 24-bit PCM
+- **`flac_pcm16`** — FLAC, 16-bit PCM
+
+Files land in `Data/Recordings/Sound/<Game>_<date>_<time>_<N>ch.wav|flac`, with proper
+`WAVE_FORMAT_EXTENSIBLE` / `VORBIS_COMMENT` speaker masks for Premiere, DaVinci Resolve and
+Audacity. Recording keeps the full 4/6-channel mix even on a stereo endpoint, so the file is a true
+discrete surround capture rather than a fold-down.
+
+> Recording is **off by default**. Turn it on in the Sound page or with `-record-wav`.
+
+### SCSP and DSB fidelity
+
+- **4-tap Catmull-Rom cubic interpolation** on non-FM SCSP PCM voices, with FM carriers and
+  modulators kept bit-exact; this removes the mirror-image aliasing on pitch-shifted engine, tyre
+  and voice samples.
+- **Slave-SCSP FM ring-buffer cross-talk fixed**, Slots 16–17 `EFSDL`/`EFPAN` wired to
+  `DSP.EXTS[0..1]`, `LFORE` phase reset implemented, and dynamic `AR`/`D1R`/`D2R`/`RR`/`KRS`
+  envelope updates corrected.
+- **32-bit float DSB MPEG decoding** straight into the 64-tap polyphase resampler, with per-sample
+  gain ramping to remove 57.5 Hz zipper noise.
+- **C¹-continuous knee soft-clipper** on the master bus: bit-exact below -1.41 dBFS, smooth
+  saturation above it, no flat-topped hard clipping when `MusicVolume` is pushed past 100%.
+
+### Restored music and a hidden-egg fix
+
+- **Looped MPEG intros are back.** `MpegDec` now preserves valid negative pre-loop offsets, which
+  restores Daytona USA 2's 9.9-second attract intro and the 12.6-second race-theme intros.
+- **Daytona USA 2 no longer plays Track 8 on every course.** Single-button view cycling
+  (`VRCycle`) used to hold the default `VR3` button down on every frame from boot, which triggered
+  the arcade's “hold VR3 while a race loads” Easter egg. View cycling now emits a six-frame
+  momentary pulse only when you actually press the button.
+- **Per-game audio balance** (Scud Race, Daytona 2, Star Wars Trilogy, Spikeout) tames the
+  arcade's own effects/music divider; any explicit value in the ini or on the command line wins.
+
+---
+
+## 💾 Save states and the network board
+
+- **`53C810 PCI` state block.** The SCSI controller's `baseAddress` and halt flag are now part of
+  the save state. Loading at the first frame used to leave the `0xF9`/`0xC1` register windows
+  disabled until the game wrote its PCI configuration, which made VF3 and Scud Race spin on the DMA
+  chain. New saves load immediately; old saves fall back to `0xC0`.
+- **The simulated network board is saved.** `CSimNetBoard` state, shared RAM and buffer are part of
+  the save, with a synthesised single-machine ready state (and the `256 → 848` segment-size repair)
+  for older saves. Attract-mode saves no longer time out into the boot self-test or hang on
+  “Please Wait” at car select.
+
+Also in this release: the drive board's command queue (one command per frame to the Z80), the wheel
+servo gain and constant-force/vibration cache, a `WheelBoardServo` save block, and the `FFVibrate`
+effect-count fix.
+
+---
+
+## 🖼️ Graphics & presentation
+
+- **Per-pixel transparency sorting (`AlphaSortMode = 1`)** — a fixed-slot SoA A-Buffer, four
+  layers per pixel, resolved per priority. It fixes scenes the two-layer scheme cannot: more than
+  two translucent surfaces at one pixel, and translucent polygons submitted out of depth order.
+  At 4K + MSAA 4× it holds the same 120 Hz as the two-layer path; the old linked-list prototype
+  ran at 27–37 Hz and was discarded.
+- **Two-subpass on-chip composite** for the default path. 4K + 4× MSAA VF3 went from 226 to
+  240–241 Hz (about +6%), bit-identical at 1×.
+- **Hardware MSAA (2/4/8×)**, exact quad interpolation, derivative-based texture filtering with a
+  long-axis tap mode, and the arcade-exact checkerboard transparency mode as an opt-in experiment.
+- **HD texture packs** — PNG, WebP, DDS BC1/BC2/BC3/BC5/BC7, and `.dds.zst`, with bindless sampling,
+  async decode, chunked GPU upload and hot reload. `F4` toggles replacement/original, `F3` rescans.
+  Exported dumps now write alpha only where the material actually reads it, eliminating the white
+  dots and dashed lines caused by the arcade's 1-bit alpha dither.
+- **High-refresh presentation** — Original / Auto / Fixed modes, VRR 2×/3×/4×/8× phase stepping,
+  camera and instance interpolation, `F8` hot-switch, and a present-phase calibration that cut
+  about 4.6 ms of end-to-end latency on a Fixed 120 Hz setup.
+- **macOS Retina 4K** — the game window requests a high-density drawable and the render geometry is
+  computed in device pixels, so 4K panels render at native resolution instead of a 1080p upscale.
+
+---
+
+## 🎨 Interface
+
+- **The tab row stays put.** Common / Core / Video / Sound / Controls / FFB / Sensitivity / Network
+  are now a fixed header; scrolling a long page no longer takes the tabs with it, so switching pages
+  never means scrolling back to the top first.
+- **Frosted-glass panels** with a real dual Kawase blur of the game artwork behind them, 1px glass
+  highlight edges, and a 120 ms panel fade.
+- **Three complete themes** — warm eye-care light (default), warm dark, and the original flat
+  interface reproduced value for value.
+- **The game list** carries 63 WebP box arts, a cover preview, per-game descriptions, filters,
+  remembered selection/scroll position, and an optional “auto-launch on startup”.
+- **Adaptive tables** — the wheel/pedal calibration table measures columns at the current font and
+  DPI, stretches when there is room, and shows a horizontal scrollbar instead of clipping when
+  there is not.
+- **Single config file** — `Data/Config/Model3-Vulkan.ini`. Old `Supermodel.ini` files are migrated
+  or removed automatically; a stale `GameXMLFile` path is repaired at startup.
+- **Richer log** — `Data/Model3Vulkan.log` starts with the build timestamp, host memory and CPU
+  count, the audio DSP chain, and every non-default axis calibration value.
+- **Portable ROM folders** — a `rom`/`roms`/`romset`/`romsets` folder next to the executable is
+  detected automatically and stored as a relative path, so moving the whole folder keeps working.
+
+---
+
+## 🧩 Platform work
+
+- **Windows + AMD:** per-viewport uniforms moved out of push constants, shrinking `R3DPush` from
+  208 B to 96 B. AMD's Windows Vulkan driver reports a 128-byte limit, which used to make the
+  emulator exit silently after the splash screen.
+- **Linux:** release builds pinned to Ubuntu 24.04 + g++-14, with a CI guard that fails above
+  `GLIBC_2.39`; the 24.04 build itself needs at most `GLIBC_2.38`, so it loads on SteamOS 3.5 and
+  Ubuntu 24.04. The bundled `wqy-microhei` font has a Latin-glyph guard, `<exe>/Data/` is discovered
+  on Linux, and `libdecor` is included for GNOME Wayland title bars.
+- **macOS:** Retina/4K fix, non-Windows mouse/keyboard input in the in-game `Tab` overlay, and the
+  `.zst` HostCore module (macOS 14+; `.st` remains the fallback on macOS 13).
+- **SDL3 input:** per-device mice via RawInput, late input sampling just before the simulation step,
+  controller hot-plug, SDL haptics, and the Sinden light-gun border.
+- **Config/log cleanup:** the legacy `Supermodel-LegacyOG.exe` is retired from the release package;
+  `Model3-Vulkan.exe` is the product.
+
+---
+
+## 🧾 Upstream 0.4 sync (2026-11-07)
+
+The last round before this release pulls the low-risk fixes from upstream Supermodel 0.4:
+
+- `53C810` PCI base address and halt flag in save states;
+- thread-safety fixes in the DSB FIFO, SCSP MIDI FIFO and the audio mute flag;
+- drive-board command queue and wheel-servo state;
+- non-merged clone ROM sets (`srally2dx`, `swtrilgyp`);
+- Lost World light-gun reload / off-screen indicator (`lostwsgo` → `lostwsgp`);
+- VF3 startup viewports with subnormal matrices skipped;
+- Real3D config-register zero-initialisation;
+- the fourth force-feedback effect slot.
+
+---
+
+## ⚙️ Defaults on a clean install
+
+The release package ships **without an ini**, so a fresh install starts from these defaults. This
+is the list worth knowing before your first launch.
+
+**Off by default (opt in when you want them):**
+
+| Option | Key | Where |
+| --- | --- | --- |
+| Audio recording | `RecordWav` | Sound |
+| HD texture replacement | `LoadHDTextures` | Core |
+| HD texture dumping | `DumpHDTextures` | Core |
+| Raw memory / texture dumps | `DumpMemory`, `DumpTextures` | Network |
+| Statistics overlay | `ShowStatsOsd` | Video |
+| Crosshairs | `Crosshairs` | Video |
+| Sinden border | `SindenBorder` | Video |
+| Vulkan validation | `VkValidation` | Video |
+| Exclusive fullscreen / exclusive refresh | `ExclusiveFullscreen`, `ExclusiveRefreshRate` | Video |
+| Per-pixel OIT | `AlphaSortMode = 1` | Video |
+| Instance interpolation | `InstanceInterpolation` | no UI (internal A/B switch) |
+| MSAA / CRT / glow / FXAA | `MSAA = 0`, `PostCRT = 0`, `PostGlow = 0`, `PostFXAA = 0` | Video |
+| Integer scaling / widescreen stretch | `IntegerScale`, `WideScreen`, `WideBackground` | Video |
+| Force feedback | `ForceFeedback` | FFB / Sensitivity |
+
+**On by default, deliberately:**
+
+- **Hybrid JIT** (`PowerPCMode = 1`).
+- **4.0 Quad audio** (`NbSoundChannels = 4`). 5.1 is a deliberate choice; the upmixer only runs
+  when six channels are selected. On a stereo endpoint the 4-channel mix is folded by the emulator,
+  not by SDL.
+- **Auto refresh pacing + motion interpolation** (`RefreshRateMode = 1`, `MotionInterpolation = 1`).
+- **Chase camera stabilizer Strong** and **gamepad steering smoothing Strong** (both bypass a real
+  wheel).
+- **Warm light frosted-glass UI** (`UITheme = 0`, `UiFrostedGlass = 1`).
+- **Cabinet bezel backdrop** (`BezelMode = 1`) — turn it off in Video if you prefer black bars.
+- **Network self-link** (`Network = 1`, `SimulateNet = 1`, ports 1970/1970 on loopback), required
+  for the netboard games to boot.
+- **Async sound board thread** and **high process priority**.
+
+---
+
+## 🔄 Upgrading from v0.9.8.6a
+
+- Save states and NVRAM remain compatible: `SUPERMODEL_VERSION` is untouched.
+- `Supermodel.ini` is migrated to `Data/Config/Model3-Vulkan.ini` on first launch; if both exist,
+  the stale file is removed.
+- Existing `.st` saves still load; new saves prefer the `.zst` container. `Data/Saves/` is kept.
+- HD texture packs in `Data/Assets/HDTextures/<set>/` keep working; DDS and `.dds.zst` are new
+  options, not replacements.
+- The pipeline cache is rebuilt once after the upgrade; the first launch is slower than subsequent
+  ones.
+- If you extract into a fresh folder, copy `Data/Saves`, `Data/NVRAM`, `Data/Recordings`,
+  `Data/Assets/HDTextures` and your ROM folder across.
+
+---
+
+## ⚠️ Known issues
+
+- **Scud Race Deluxe (`scuddx`) HUD** — the grey CONDITION panel and some wrong-colored rank text
+  are a long-standing Model 3 emulation gap. Upstream Supermodel 0.4 still shows the same thing on
+  the same save state. The Twin/DX versions (`scud`, `scudau`, `scudplus`, `scudplusa`) display the
+  HUD correctly; use those if it bothers you.
+- **`.zst` on macOS 13** — the HostCore module needs macOS 14+. The emulator logs it once and falls
+  back to `.st`; saving and loading still work.
+- **Force feedback is opt-in** — see the note above. Without a wheel it stays off, which is why a
+  fresh install does not rumble a gamepad.
+- **5.1 on a stereo endpoint** — if you select 6 channels, SDL folds the stream to stereo with its
+  own coefficient table; the default 4.0 mode uses the emulator's fold and is the recommended
+  setting for stereo speakers.
+- **Recording changes the device stream** — with `RecordWav` on, the mixer keeps a 4/6-channel
+  stream even on a stereo endpoint. That is intentional (the file must be discrete), but it means
+  toggling recording can change the monitoring level slightly.
+
+---
+
+## 中文摘要
+
+**Model 3-Vulkan v0.9.9.6 是这条分支至今最大的一次更新，不是小修补。**
+
+- **混合 JIT**：PowerPC 603e 热代码块直接翻译成 x86-64，6.75 亿个块与解释器逐块对照零差异、
+  同帧像素一致；CPU 瓶颈场景从 55.2 Hz 提升到 224.5 Hz（约 4.1 倍）。
+- **极品飞车式追尾镜头**：围绕车身支点的弹簧阻尼水平偏航稳定器，手柄微操不再让整条地平线
+  左右甩；Daytona 2 的码表、路线图、转弯箭头保持不动。默认「强力」，可关/轻/标准/强力。
+- **真正的力反馈**：Windows 下 SDL3 触觉正确初始化，直驱方向盘（SIMAGIC / MOZA / Fanatec 等
+  raw joystick 底座）可被识别，恒力方向与单轴编码修正，振动走 `SDL_HAPTIC_SINE`；新增实时
+  方向盘/踏板死区与全行程校准、H 挡一键回空挡。力反馈总开关默认关闭，用方向盘时在
+  「力反馈 / 灵敏度」页打开即可。
+- **音频全面升级**：原生 4.0 四声道（默认）与 5.1 环绕，智能中置/120 Hz 低音炮上混；
+  SCSP 非 FM 通道 4-tap 三次样条插值；DSB MPEG 32-bit Float 直通 + 64-tap 重采样；
+  主总线 C¹ 软限幅；内置无锁多声道 WAV/FLAC 录音（默认关闭）。
+- **读档更可靠**：53C810 PCI 基址与 halt 标志、模拟网络板状态都进了存档，VF3 与 Scud Race
+  不会再卡在 DMA 链上。Daytona 2 的 9.9 秒前奏和 12.6 秒比赛曲前奏恢复；修掉了「所有赛道都
+  放 Track 8」的隐藏彩蛋误触发。
+- **画面与界面**：逐像素半透明排序、双 Subpass 片上合成、MSAA、精确四边形插值、DDS/`.dds.zst`
+  高清纹理包、毛玻璃三主题界面、4K/Retina、高刷插值与 VRR 倍频。
+- **平台**：AMD Windows 驱动 128 字节 push constant 限制、Linux 固定 Ubuntu 24.04 构建（CI 守
+  `GLIBC_2.39`，实际产物最高只要求 `GLIBC_2.38`）、GNOME Wayland 标题栏、macOS Retina、
+  非 Windows 游戏内面板输入全部处理。
+
+**默认不打开**：录音、高清纹理加载/导出、原始显存/贴图导出、统计浮层、准星、Sinden 白边、
+Vulkan 校验层、独占全屏/独占刷新率、逐像素 OIT、实例插值、MSAA/CRT/辉光/FXAA、点对点缩放/
+宽屏拉伸、力反馈。**默认打开**：混合 JIT、4.0 四声道、自动刷新节奏 + 运动插值、强力追尾镜头
+稳定与手柄转向平滑、暖色毛玻璃界面、机柜背景图、网络自连、异步声板线程。
+
+兼容性：`SUPERMODEL_VERSION` 未改，旧存档与 NVRAM 继续可用；旧 `Supermodel.ini` 会自动迁移为
+`Model3-Vulkan.ini`；旧 `.st` 存档仍可读取，新存档优先 `.zst`。
+
+---
+
+*Model 3-Vulkan is licensed under GPLv3. Upstream Supermodel attribution and third-party notices
+are preserved in `Data/NOTICE.md`, `Data/LICENSE-ADDITIONAL-TERMS.md` and `Data/TRADEMARK.md`.*

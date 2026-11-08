@@ -77,7 +77,7 @@ void main()
 	// the depth buffer has to agree with the surface that was actually rasterised,
 	// or a decal sitting on a surface would z-fight against the quad underneath it.
 	// The two agree exactly for planar quads and differ only inside a twisted one.
-	gl_FragDepth = pc.projection[3][2] * gl_FragCoord.w;
+	gl_FragDepth = ubo.projection[3][2] * gl_FragCoord.w;
 
 	// Same dispatch as New3D's WriteOutputs(): colour zeroes both transparency layers, each
 	// transparency layer writes only itself. The pipeline's colour write mask drops the others.

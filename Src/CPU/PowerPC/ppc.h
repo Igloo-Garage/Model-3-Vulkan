@@ -343,6 +343,43 @@ typedef struct
 
 } PPC_FETCH_REGION;
 
+/*
+ * Fast memory windows.
+ *
+ * CModel3 owns the buffers; the CPU core only needs the four base pointers its
+ * own fast paths index into. Publishing them here keeps the address decode in
+ * one place - CModel3's own read and write handlers - while letting a
+ * translated block turn the common cases into a single indexed load instead of
+ * a virtual call.
+ *
+ *   ram       0x00000000..0x007FFFFF, byte swapped inside each 32-bit word
+ *   ramWrite  the same buffer, for stores
+ *   crom      0xFF800000..0xFFFFFFFF, the fixed window
+ *   cromBank  0xFF000000..0xFF7FFFFF, the currently selected bank
+ */
+typedef struct
+{
+	const UINT8	*ram;
+	UINT8		*ramWrite;
+	const UINT8	*crom;
+	const UINT8	*cromBank;
+
+} PPC_FAST_MEMORY;
+
+/*
+ * PPC_JIT_X64:
+ *
+ * The hybrid baseline JIT is built for x86-64 desktop runs only. The debugger
+ * needs the interpreter's own per-instruction hook, PPC_VERIFY_FAST_MEMORY
+ * rewrites the memory macros, and the frozen OpenGL-only build does not take new
+ * features. See ppc_jit_x64.inl.
+ */
+#if (defined(_M_X64) || defined(__x86_64__)) && !defined(SUPERMODEL_OPENGL_ONLY) && \
+	!defined(PPC_VERIFY_FAST_MEMORY) && !defined(SUPERMODEL_DEBUGGER) && \
+	!defined(SUPERMODEL_DISABLE_PPC_JIT)
+#define PPC_JIT_X64
+#endif
+
 
 /******************************************************************************
  Functions
@@ -365,6 +402,46 @@ extern void ppc_set_timer_ratio(int ratio);
 extern void ppc_attach_bus(class IBus *BusPtr);		// must be called first!
 extern void ppc_save_state(class CBlockFile *SaveState);
 extern void ppc_load_state(class CBlockFile *SaveState);
+
+/*
+ * ppc_set_fast_memory(fast):
+ *
+ * Publishes the RAM and CROM windows the CPU fast paths - and any translated
+ * code - index directly. Called by CModel3 whenever the pointers change: after
+ * the memory pool is set up, after a ROM set is loaded and after a CROM bank
+ * switch. NULL withdraws them.
+ */
+extern void ppc_set_fast_memory(const PPC_FAST_MEMORY *fast);
+
+/*
+ * ppc_set_jit_enabled(enabled):
+ *
+ * Selects the PowerPC execution mode for the next machine that is built: the C
+ * interpreter (false, the reference path) or the hybrid JIT (true). A no-op in
+ * builds without a JIT. SM3D_PPC_JIT=0/1 always wins, so a test script can pin
+ * the mode without touching the configuration.
+ */
+extern void ppc_set_jit_enabled(bool enabled);
+
+/*
+ * ppc_set_idle_loop_skip(enabled):
+ *
+ * Arms the wait-loop skip (on by default): a backward branch that repeats with
+ * an unchanged register state cannot leave the current slice, so the remaining
+ * cycles are handed to the timebase and the decrementer. SM3D_IDLE_SKIP=0 turns
+ * it off for games that turn out to observe something it cannot see.
+ */
+extern void ppc_set_idle_loop_skip(bool enabled);
+
+/*
+ * ppc_log_jit_stats():
+ *
+ * Writes a summary of the translated-code statistics to the log. Called when a
+ * machine is torn down, so every session leaves a record of how much of the
+ * guest code the JIT covered. Silent when nothing was translated, and a no-op
+ * in builds without a JIT.
+ */
+extern void ppc_log_jit_stats(void);
 extern UINT32 ppc_get_gpr(unsigned num);
 extern double ppc_get_fpr(unsigned num);
 extern UINT32 ppc_get_lr(void);

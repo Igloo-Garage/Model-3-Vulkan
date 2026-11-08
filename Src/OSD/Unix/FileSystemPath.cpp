@@ -48,9 +48,68 @@ namespace FileSystemPath
         return 0;
     }
 
+    // Directory name for a path type, with the trailing separator. Log has none: the logger's own
+    // setting names the file, and GetPath(Log) only has to say which directory it belongs in.
+    static std::string SubPath(PathType pathType)
+    {
+        switch (pathType)
+        {
+        case Analysis:
+            return "Analysis/";
+        case Config:
+            return "Config/";
+        case Cache:
+            return "Cache/";
+        case Log:
+            return "";
+        case NVRAM:
+            return "NVRAM/";
+        case Saves:
+            return "Saves/";
+        case SavesLegacy:
+            return "Saves_Legacy/";
+        case Screenshots:
+            return "Screenshots/";
+        case RecordingsSound:
+            return "Recordings/Sound/";
+        case Assets:
+            return "Assets/";
+        }
+        return "";
+    }
+
     // Generates a path to be used by Supermodel files
     std::string GetPath(PathType pathType)
     {
+        /*
+         * The packaged layout keeps Config/, Assets/, NVRAM/, Saves/ and the log under Data/ next to
+         * the executable - the same shape build.bat assembles for Windows and the macOS port uses.
+         *
+         * Linux used to look only at the working directory and then at XDG paths, so the release
+         * tarball's Data/ directory was never read: Games.xml was not found (empty game list), the
+         * boxarts were missing, and the bundled interface font was invisible to the loader. A tree
+         * without Data/ (an in-tree development build, or a package made before this change) keeps
+         * the old behaviour, so nothing that works today starts reading a second, empty config.
+         */
+        const std::string base = GetBasePath();
+        if (!base.empty())
+        {
+            struct stat info;
+            if (stat((base + "Data").c_str(), &info) == 0 && S_ISDIR(info.st_mode))
+            {
+                const std::string root = base + "Data/";
+                (void)mkdir(root.c_str(), 0775);
+                if (pathType == Log)
+                    return root;
+
+                const std::string path = root + SubPath(pathType);
+                if (pathType == RecordingsSound)
+                    (void)mkdir((root + "Recordings/").c_str(), 0775);
+                (void)mkdir(path.c_str(), 0775);
+                return path;
+            }
+        }
+
         std::string finalPath;
         std::string homePath;
         std::string strPathType;
@@ -82,6 +141,9 @@ namespace FileSystemPath
             break;
         case Screenshots:
             strPathType = "Screenshots";
+            break;
+        case RecordingsSound:
+            strPathType = "Recordings/Sound";
             break;
         case Assets:
             strPathType = "Assets";
@@ -163,11 +225,20 @@ namespace FileSystemPath
         return finalPath;
     }
 
-    // Relative paths are left exactly as they were: there is no single installation directory here,
-    // so the historical working-directory behaviour is the correct one.
+    // Anchors a relative path to the directory holding the executable, the same convention the other
+    // platforms use. Without it the log - a relative "Data/Supermodel.log" in the configuration -
+    // landed in whatever directory the program happened to be started from, and when that directory
+    // had no Data/ the log was silently not written at all.
     std::string ResolvePath(const std::string& path)
     {
-        return path;
+        if (path.empty() || path[0] == '/')
+            return path;
+
+        const std::string base = GetBasePath();
+        if (base.empty())
+            return path;
+
+        return base + path;
     }
 
     std::string GetBasePath()

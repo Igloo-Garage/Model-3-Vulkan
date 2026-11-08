@@ -119,6 +119,17 @@ layout(set = 0, binding = 1) uniform ViewportUBO
 	// x = quad interpolation: 1 = exact four-corner solve (default), 0 = the fast
 	// hardware-triangle path. yzw unused. See ShadeFragment.
 	vec4 renderOptions;
+	// Per-viewport scene state. These were push constants until the block had to shrink to fit the
+	// 128 bytes AMD's Windows driver reports (see R3DPush in VulkanCommon.h); a viewport already
+	// rewrites this block, so nothing here costs an extra upload.
+	//   projection  - world-to-clip, Y flipped by the host
+	//   lightDir    - xyz = sun direction, w = intensity
+	//   lightParams - x = lighting param, y = sun clamp, z = intensity clamp, w = hardware step
+	//   fogColour   - rgb = fog colour, a = fog density
+	mat4 projection;
+	vec4 lightDir;
+	vec4 lightParams;
+	vec4 fogColour;
 } ubo;
 layout(std430, set = 0, binding = 2) readonly buffer Materials
 {
@@ -146,10 +157,6 @@ layout(set = 2, binding = 0) uniform sampler2D u_hdTextures[];
 layout(push_constant) uniform PushConstants
 {
 	mat4 modelView;
-	mat4 projection;
-	vec4 lightDir;
-	vec4 lightParams;
-	vec4 fogColour;
 	vec4 fogParams;
 	vec4 extra;
 } pc;
@@ -973,11 +980,11 @@ vec4 ShadeFragment()
 		baseColour.rgb *= 16.0;
 	vec4 colour = tex * baseColour;
 
-	int hardwareStep = int(pc.lightParams.w + 0.5);
+	int hardwareStep = int(ubo.lightParams.w + 0.5);
 	if (hardwareStep == 0x15 && (mat.flags & kLighting) == 0u)
 	{
 		if ((mat.flags & kFixedShade) != 0u)
-			colour.rgb *= 1.0 + uvShade.z + pc.lightParams.x;
+			colour.rgb *= 1.0 + uvShade.z + ubo.lightParams.x;
 		else
 			colour.rgb *= 1.5;
 	}
@@ -1003,14 +1010,14 @@ vec4 ShadeFragment()
 
 	if ((mat.flags & kLighting) != 0u)
 	{
-		float sunFactor = (mat.flags & kFixedShade) != 0u ? uvShade.z : dot(pc.lightDir.xyz, normalize(normal));
+		float sunFactor = (mat.flags & kFixedShade) != 0u ? uvShade.z : dot(ubo.lightDir.xyz, normalize(normal));
 		sunFactor = clamp(sunFactor, -1.0, 1.0);
-		if (pc.lightParams.y > 0.5 || colour.a < 0.999)
+		if (ubo.lightParams.y > 0.5 || colour.a < 0.999)
 			sunFactor = max(sunFactor, 0.0);
 
-		vec3 light = vec3(sunFactor * pc.lightDir.w + pc.lightParams.x);
+		vec3 light = vec3(sunFactor * ubo.lightDir.w + ubo.lightParams.x);
 		light += ubo.spotColor.rgb * lobe;
-		if (pc.lightParams.z > 0.5)
+		if (ubo.lightParams.z > 0.5)
 			light = min(light, vec3(1.0));
 		colour.rgb *= light;
 
@@ -1026,10 +1033,10 @@ vec4 ShadeFragment()
 			}
 			else
 			{
-				vec3 R = reflect(-pc.lightDir.xyz, normalize(normal));
+				vec3 R = reflect(-ubo.lightDir.xyz, normalize(normal));
 				spec = max(R.z, 0.0);
 			}
-			spec *= mat.specularValue * pc.lightDir.w;
+			spec *= mat.specularValue * ubo.lightDir.w;
 			if (vertexColour.a < 1.0)
 				colour.a = max(colour.a, spec);
 			colour.rgb += spec;
@@ -1038,9 +1045,9 @@ vec4 ShadeFragment()
 
 	colour.rgb = min(colour.rgb, vec3(1.0));
 
-	float fog = mat.fogIntensity * clamp(pc.fogParams.x + (-viewPos.z) * pc.fogColour.a, 0.0, 1.0);
-	vec3 fogRgb = pc.fogColour.rgb * pc.fogParams.z;
-	fogRgb += ubo.spotFogColor.rgb * pc.fogParams.y * pc.fogColour.rgb * lobeFog;
+	float fog = mat.fogIntensity * clamp(pc.fogParams.x + (-viewPos.z) * ubo.fogColour.a, 0.0, 1.0);
+	vec3 fogRgb = ubo.fogColour.rgb * pc.fogParams.z;
+	fogRgb += ubo.spotFogColor.rgb * pc.fogParams.y * ubo.fogColour.rgb * lobeFog;
 	colour.rgb = mix(colour.rgb, fogRgb, fog);
 
 	/*

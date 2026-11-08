@@ -10,16 +10,23 @@ in the load/render path.
 Usage:
     python Scripts/render_tilegen_state.py <state.st> [out.png]
 
-<state.st> may be a raw block file (the .vktmp.st inside a .zst container) or the container
-itself.  Only the tile-generator block is read, same layout as CTileGen::SaveState():
+<state.st> may be a save state (.zst), a raw block file, or a zlib-compressed one.
+Only the tile-generator block is read, same layout as CTileGen::SaveState():
 0x120000 bytes of VRAM followed by 64 little-endian registers.
 """
 
+import io
 import struct
 import sys
+import zipfile
 import zlib
 
 from PIL import Image
+
+try:  # Python 3.14+ ships zstd in the standard library, older ones need a raw state.
+    from compression import zstd
+except ImportError:
+    zstd = None
 
 VRAM_SIZE = 0x120000
 REG_COUNT = 64
@@ -51,6 +58,14 @@ def decompress_container(path):
         return data
     except SystemExit:
         pass
+    # A .zst container is a zip archive (meta.json / core.zst / thumb.png).
+    if data[:2] == b"PK":
+        if zstd is None:
+            raise SystemExit(f"{path}: .zst containers need Python 3.14+; pass a raw .st instead")
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            return zstd.decompress(archive.read("core.zst"))
+    if zstd is not None and data[:4] == b"\x28\xb5\x2f\xfd":
+        return zstd.decompress(data)
     for wbits in (15, 31, 47):
         try:
             return zlib.decompress(data, wbits)
@@ -150,6 +165,10 @@ class TileGen:
                     tile_data = self.tile_data(index, tile_pair)
                     target = surfaces[self.above_3d(index)]
                     self.draw_tile_pair(target, y, x, tile_data, h_start, h_end, v_fine, index, layer)
+                    if h_end <= h_start:
+                        # C++ leaves x untouched here, which would spin forever; a debug
+                        # renderer is better off abandoning the rest of the line.
+                        break
                     x += h_end - h_start
                 else:
                     x += 32 - ((x + 0) & 15)
@@ -170,8 +189,11 @@ class TileGen:
                 pattern = patterns[i // 8]
                 p = (pattern >> ((7 - (i % 8)) * 4)) & 0xF
                 colour = table[palette_index[i // 8] | p]
-                if colour[3]:
-                    target[y][x + i - h_start] = colour
+                # The C++ line buffer is 512 pixels wide (TileGenBuffer.h), so a run that
+                # starts near x=488 spills into the per-row padding; drop those pixels.
+                px = x + i - h_start
+                if colour[3] and px < SCREEN_W:
+                    target[y][px] = colour
         else:
             offsets = [
                 ((tile_data >> 16) & 0x3FFF) * 16,
@@ -187,8 +209,9 @@ class TileGen:
                 pattern = patterns[i // 4]
                 p = (pattern >> ((3 - (i % 4)) * 8)) & 0xFF
                 colour = table[palette_index[i // 8] | p]
-                if colour[3]:
-                    target[y][x + i - h_start] = colour
+                px = x + i - h_start
+                if colour[3] and px < SCREEN_W:
+                    target[y][px] = colour
 
 
 def render(block, out_path):

@@ -158,6 +158,7 @@ void CDSBResampler::Reset(void)
 {
 	m_inPos = 0;
 	m_phase = 0;
+	m_gainRamper.Reset();
 	for (int i = 0; i < k_half; ++i)
 	{
 		m_histL[i] = 0.0f;
@@ -226,17 +227,23 @@ void CDSBResampler::Prepare(int outRate, int inRate)
 	}
 }
 
-int CDSBResampler::UpSampleAndMix(float *outL, float *outR, INT16 *inL, INT16 *inR, UINT8 volumeL, UINT8 volumeR, int sizeOut, int sizeIn, int outRate, int inRate)
+int CDSBResampler::UpSampleAndMix(float *outL, float *outR, float *inL, float *inR, UINT8 volumeL, UINT8 volumeR, int sizeOut, int sizeIn, int outRate, int inRate)
 {
 	Prepare(outRate, inRate);
 
-	// Obtain program volume settings
+	// Obtain program volume settings and compute per-sample linear gain ramp across the frame
 	const float musicVol = (float)std::max(0, std::min(200, m_config["MusicVolume"].ValueAs<int>())) * (1.0f / 100.0f);
-	const float gainL = musicVol * (float)volumeL * (1.0f / 255.0f);
-	const float gainR = musicVol * (float)volumeR * (1.0f / 255.0f);
+	const float targetGainL = musicVol * (float)volumeL * (1.0f / 255.0f);
+	const float targetGainR = musicVol * (float)volumeR * (1.0f / 255.0f);
 
 	if (sizeOut <= 0 || sizeIn <= 0)
+	{
+		m_gainRamper.SnapTo(targetGainL, targetGainR);
 		return sizeIn > 0 ? sizeIn : 0;
+	}
+
+	float curGainL = 0.0f, curGainR = 0.0f, stepGainL = 0.0f, stepGainR = 0.0f;
+	m_gainRamper.BeginBlock(targetGainL, targetGainR, sizeOut, curGainL, curGainR, stepGainL, stepGainR);
 
 	for (int outIdx = 0; outIdx < sizeOut; ++outIdx)
 	{
@@ -246,12 +253,12 @@ int CDSBResampler::UpSampleAndMix(float *outL, float *outR, INT16 *inL, INT16 *i
 
 		if (base >= 0 && base + k_taps <= sizeIn)
 		{
-			const INT16 *srcL = inL + base;
-			const INT16 *srcR = inR + base;
+			const float *srcL = inL + base;
+			const float *srcR = inR + base;
 			for (int k = 0; k < k_taps; ++k)
 			{
-				left += h[k] * (float)srcL[k];
-				right += h[k] * (float)srcR[k];
+				left += h[k] * srcL[k];
+				right += h[k] * srcR[k];
 			}
 		}
 		else
@@ -271,13 +278,13 @@ int CDSBResampler::UpSampleAndMix(float *outL, float *outR, INT16 *inL, INT16 *i
 				{
 					// Only reachable if a caller under-feeds the block; MpegSamplesForFrame()
 					// guarantees the look-ahead. Hold the last sample rather than read past the end.
-					sampleL = (float)inL[sizeIn - 1];
-					sampleR = (float)inR[sizeIn - 1];
+					sampleL = inL[sizeIn - 1];
+					sampleR = inR[sizeIn - 1];
 				}
 				else
 				{
-					sampleL = (float)inL[idx];
-					sampleR = (float)inR[idx];
+					sampleL = inL[idx];
+					sampleR = inR[idx];
 				}
 
 				left += h[k] * sampleL;
@@ -285,8 +292,10 @@ int CDSBResampler::UpSampleAndMix(float *outL, float *outR, INT16 *inL, INT16 *i
 			}
 		}
 
-		outL[outIdx] += left * gainL;
-		outR[outIdx] += right * gainR;
+		curGainL += stepGainL;
+		curGainR += stepGainR;
+		outL[outIdx] += left * curGainL;
+		outR[outIdx] += right * curGainR;
 
 		// Advance exactly inRate/outRate input samples, without a floating point position.
 		m_phase += m_step;
@@ -297,6 +306,7 @@ int CDSBResampler::UpSampleAndMix(float *outL, float *outR, INT16 *inL, INT16 *i
 		}
 	}
 
+	// Copy the unconsumed tail of the block to the front for the next frame, and remember the last
 	// Everything before keepFrom has been consumed; everything from there on is needed by the next
 	// output, including the right half of its filter.
 	int keepFrom = m_inPos - k_half + 1;
@@ -318,8 +328,8 @@ int CDSBResampler::UpSampleAndMix(float *outL, float *outR, INT16 *inL, INT16 *i
 		}
 		else
 		{
-			newHistL[k] = (float)inL[idx];
-			newHistR[k] = (float)inR[idx];
+			newHistL[k] = inL[idx];
+			newHistR[k] = inR[idx];
 		}
 	}
 	for (int k = 0; k < k_half; ++k)
@@ -508,15 +518,17 @@ UINT8 CDSB1::IORead8(UINT32 addr)
 		return progress&0xFF;
 
 	case 0xF0:	// Latch
+	{
 		UINT8 d;
+		const int idxW = fifoIdxW.load(std::memory_order_acquire);
 		d = fifo[fifoIdxR];	// retrieve next command byte
-		if (fifoIdxR != fifoIdxW)	// if these are equal, nothing has been written yet (don't advance)
+		if (fifoIdxR != idxW)	// if these are equal, nothing has been written yet (don't advance)
 		{
 			fifoIdxR++;
 			fifoIdxR &= FIFO_STACK_SIZE_MASK;
 		}
 
-		if (fifoIdxR == fifoIdxW)	// FIFO empty?
+		if (fifoIdxR == idxW)	// FIFO empty?
 			status &= ~2;			// yes, indicate no commands left
 		else
 			status |= 2;
@@ -524,6 +536,7 @@ UINT8 CDSB1::IORead8(UINT32 addr)
 		Z80.SetINT(false);	// clear IRQ
 		//printf("Z80: INT cleared, read from FIFO\n");
 		return d;
+	}
 
 	case 0xF1:	// Status
 		/*
@@ -551,13 +564,15 @@ void CDSB1::SendCommand(UINT8 data)
 	 * up with the other CPUs and must process all commands it has received
 	 * over the course of a frame at once.
 	 */
-	fifo[fifoIdxW++] = data;
-	fifoIdxW &= FIFO_STACK_SIZE_MASK;
+	// Sound thread reads the FIFO: publish the index after the data
+	const int write = fifoIdxW.load(std::memory_order_relaxed);
+	fifo[write] = data;
+	fifoIdxW.store((write + 1) & FIFO_STACK_SIZE_MASK, std::memory_order_release);
 	//printf("Write FIFO: %02X\n", data);
 
 	// Have we caught up to the read pointer?
 #ifdef DEBUG
-	if (fifoIdxW == fifoIdxR)
+	if (fifoIdxW.load(std::memory_order_relaxed) == fifoIdxR)
 		printf("DSB1 FIFO overflow!\n");
 #endif
 }
@@ -569,8 +584,8 @@ void CDSB1::RunFrame(float *audioL, float *audioR, int numSamples)
 	if (!m_config["EmulateDSB"].ValueAs<bool>())
 	{
 		// DSB code applies SCSP volume, too, so we must still mix
-		memset(mpegL, 0, mpegSamples*sizeof(INT16));
-		memset(mpegR, 0, mpegSamples*sizeof(INT16));
+		memset(mpegL, 0, mpegSamples*sizeof(float));
+		memset(mpegR, 0, mpegSamples*sizeof(float));
 		retainedSamples = Resampler.UpSampleAndMix(audioL, audioR, mpegL, mpegR, 0, 0, numSamples, mpegSamples, 44100, 32000);
 		return;
 	}
@@ -582,7 +597,7 @@ void CDSB1::RunFrame(float *audioL, float *audioR, int numSamples)
 	// 68K about 4.1% short of its real work.
 	const int framePeriod = (int)((4000000.0 * (double)numSamples) / 44100.0);
 	// While FIFO not empty, fire interrupts, run for up to one frame
-	for (cycles = framePeriod; (cycles > 0) && (fifoIdxR != fifoIdxW);  )
+	for (cycles = framePeriod; (cycles > 0) && (fifoIdxR != fifoIdxW.load(std::memory_order_acquire));  )
 	{
 		Z80.SetINT(true);	// fire an IRQ to indicate pending command
 		//printf("Z80 INT fired\n");
@@ -597,8 +612,8 @@ void CDSB1::RunFrame(float *audioL, float *audioR, int numSamples)
 	// Convert volume from 0x00-0x7F -> 0x00-0xFF
 	UINT8 v = (UINT8) ((float) volume * (float)(255.0/127.0));
 
-	// Decode MPEG for this frame
-	MpegDec::DecodeAudio(&mpegL[retainedSamples], &mpegR[retainedSamples], mpegSamples - retainedSamples);
+	// Decode MPEG for this frame directly in 32-bit float
+	MpegDec::DecodeAudioFloat(&mpegL[retainedSamples], &mpegR[retainedSamples], mpegSamples - retainedSamples);
 	retainedSamples = Resampler.UpSampleAndMix(audioL, audioR, mpegL, mpegR, v, v, numSamples, mpegSamples, 44100, 32000);
 }
 
@@ -610,7 +625,8 @@ void CDSB1::Reset(void)
 	mpegFrameCarry = 0.0;
 
 	memset(fifo, 0, sizeof(fifo));
-	fifoIdxW = fifoIdxR = 0;
+	fifoIdxW.store(0, std::memory_order_relaxed);
+	fifoIdxR = 0;
 
 	status = 1;
 	mpegState = 0;	// why doesn't RB ever init this?
@@ -651,7 +667,10 @@ void CDSB1::SaveState(CBlockFile *StateFile)
 	StateFile->Write(ram, 0x8000);
 	StateFile->Write(fifo, sizeof(fifo));
 	StateFile->Write(&fifoIdxR, sizeof(fifoIdxR));
-	StateFile->Write(&fifoIdxW, sizeof(fifoIdxW));
+	{
+		const int write = fifoIdxW.load(std::memory_order_relaxed);
+		StateFile->Write(&write, sizeof(write));
+	}
 	StateFile->Write(&mpegStart, sizeof(mpegStart));
 	StateFile->Write(&mpegEnd, sizeof(mpegEnd));
 	StateFile->Write(&mpegState, sizeof(mpegState));
@@ -690,7 +709,11 @@ void CDSB1::LoadState(CBlockFile *StateFile)
 	StateFile->Read(ram, 0x8000);
 	StateFile->Read(fifo, sizeof(fifo));
 	StateFile->Read(&fifoIdxR, sizeof(fifoIdxR));
-	StateFile->Read(&fifoIdxW, sizeof(fifoIdxW));
+	{
+		int write;
+		StateFile->Read(&write, sizeof(write));
+		fifoIdxW.store(write, std::memory_order_relaxed);
+	}
 	StateFile->Read(&mpegStart, sizeof(mpegStart));
 	StateFile->Read(&mpegEnd, sizeof(mpegEnd));
 	StateFile->Read(&mpegState, sizeof(mpegState));
@@ -740,18 +763,15 @@ void CDSB1::LoadState(CBlockFile *StateFile)
 		if (loopRangeValid)
 			MpegDec::UpdateMemory(mpegROM, (int)usingLoopStart, (int)usingLoopEnd, true);
 
-		const unsigned activeSize = loopRangeValid ? usingLoopEnd : (usingMPEGEnd - usingMPEGStart);
-		if (playOffset >= activeSize)
-			playOffset = 0;
 		MpegDec::SetPosition((int)playOffset);
 	}
 }
 
 // Offsets of memory regions within DSB1's pool
 #define DSB1_OFFSET_RAM			0		// 32KB Z80 RAM
-#define DSB1_OFFSET_MPEG_LEFT	0x8000	// 1604 bytes (48 KHz max., 1/60th second, 2 extra = 2*(48000/60+2)) left MPEG buffer
-#define DSB1_OFFSET_MPEG_RIGHT	0x8644	// 1604 bytes right MPEG buffer
-#define DSB1_MEMORY_POOL_SIZE	(0x8000 + 0x644 + 0x644)
+#define DSB1_OFFSET_MPEG_LEFT	0x8000	// 3208 bytes (802 floats) left MPEG float buffer
+#define DSB1_OFFSET_MPEG_RIGHT	0x8C88	// 3208 bytes (802 floats) right MPEG float buffer
+#define DSB1_MEMORY_POOL_SIZE	(0x8000 + 0xC88 + 0xC88)
 
 Result CDSB1::Init(const UINT8 *progROMPtr, const UINT8 *mpegROMPtr)
 {
@@ -769,8 +789,8 @@ Result CDSB1::Init(const UINT8 *progROMPtr, const UINT8 *mpegROMPtr)
 
 	// Set up memory pointers
 	ram = &memoryPool[DSB1_OFFSET_RAM];
-	mpegL = (INT16 *) &memoryPool[DSB1_OFFSET_MPEG_LEFT];
-	mpegR = (INT16 *) &memoryPool[DSB1_OFFSET_MPEG_RIGHT];
+	mpegL = (float *) &memoryPool[DSB1_OFFSET_MPEG_LEFT];
+	mpegR = (float *) &memoryPool[DSB1_OFFSET_MPEG_RIGHT];
 
 	// Initialize Z80 CPU
 	Z80.Init(this, Z80IRQCallback);
@@ -1164,13 +1184,15 @@ void CDSB2::SendCommand(UINT8 data)
 	 * up with the other CPUs and must process all commands it has received
 	 * over the course of a frame at once.
 	 */
-	fifo[fifoIdxW++] = data;
-	fifoIdxW &= FIFO_STACK_SIZE_MASK;
+	// Sound thread reads the FIFO: publish the index after the data
+	const int write = fifoIdxW.load(std::memory_order_relaxed);
+	fifo[write] = data;
+	fifoIdxW.store((write + 1) & FIFO_STACK_SIZE_MASK, std::memory_order_release);
 	//printf("Write FIFO: %02X\n", data);
 
 	// Have we caught up to the read pointer?
 #ifdef DEBUG
-	if (fifoIdxW == fifoIdxR)
+	if (fifoIdxW.load(std::memory_order_relaxed) == fifoIdxR)
 		printf("DSB2 FIFO overflow!\n");
 #endif
 }
@@ -1189,8 +1211,8 @@ void CDSB2::RunFrame(float *audioL, float *audioR, int numSamples)
   if (!m_config["EmulateDSB"].ValueAs<bool>())
   {
     // DSB code applies SCSP volume, too, so we must still mix
-    memset(mpegL, 0, mpegSamples * sizeof(INT16));
-    memset(mpegR, 0, mpegSamples * sizeof(INT16));
+    memset(mpegL, 0, mpegSamples * sizeof(float));
+    memset(mpegR, 0, mpegSamples * sizeof(float));
     retainedSamples = Resampler.UpSampleAndMix(audioL, audioR, mpegL, mpegR, 0, 0, numSamples, mpegSamples, 44100, 32000);
     return;
   }
@@ -1199,7 +1221,7 @@ void CDSB2::RunFrame(float *audioL, float *audioR, int numSamples)
   //printf("DSB2 run frame PC=%06X\n", M68KGetPC());
 
   // While FIFO not empty...
-  while (fifoIdxR != fifoIdxW)
+  while (fifoIdxR != fifoIdxW.load(std::memory_order_acquire))
   {
     cmdLatch = fifo[fifoIdxR];	// retrieve next command byte
     fifoIdxR++;
@@ -1232,11 +1254,11 @@ void CDSB2::RunFrame(float *audioL, float *audioR, int numSamples)
 
   M68KGetContext(&M68K);
 
-  // Decode MPEG for this frame
-  MpegDec::DecodeAudio(&mpegL[retainedSamples], &mpegR[retainedSamples], mpegSamples - retainedSamples);
+  // Decode MPEG for this frame directly in 32-bit float
+  MpegDec::DecodeAudioFloat(&mpegL[retainedSamples], &mpegR[retainedSamples], mpegSamples - retainedSamples);
 
-  INT16 *leftChannelSource = nullptr;
-  INT16 *rightChannelSource = nullptr;
+  float *leftChannelSource = nullptr;
+  float *rightChannelSource = nullptr;
   UINT8 volL = 0, volR = 0;
 
   switch (stereo)
@@ -1275,7 +1297,8 @@ void CDSB2::Reset(void)
 	mpegFrameCarry = 0.0;
 
 	memset(fifo, 0, sizeof(fifo));
-	fifoIdxW = fifoIdxR = 0;
+	fifoIdxW.store(0, std::memory_order_relaxed);
+	fifoIdxR = 0;
 
 	mpegState = ST_IDLE;
 	mpegStart = 0;
@@ -1324,7 +1347,10 @@ void CDSB2::SaveState(CBlockFile *StateFile)
 	StateFile->Write(ram, 0x20000);
 	StateFile->Write(fifo, sizeof(fifo));
 	StateFile->Write(&fifoIdxR, sizeof(fifoIdxR));
-	StateFile->Write(&fifoIdxW, sizeof(fifoIdxW));
+	{
+		const int write = fifoIdxW.load(std::memory_order_relaxed);
+		StateFile->Write(&write, sizeof(write));
+	}
 	StateFile->Write(&cmdLatch, sizeof(cmdLatch));
 	StateFile->Write(&mpegState, sizeof(mpegState));
 	StateFile->Write(&mpegStart, sizeof(mpegStart));
@@ -1369,7 +1395,11 @@ void CDSB2::LoadState(CBlockFile *StateFile)
 	StateFile->Read(ram, 0x20000);
 	StateFile->Read(fifo, sizeof(fifo));
 	StateFile->Read(&fifoIdxR, sizeof(fifoIdxR));
-	StateFile->Read(&fifoIdxW, sizeof(fifoIdxW));
+	{
+		int write;
+		StateFile->Read(&write, sizeof(write));
+		fifoIdxW.store(write, std::memory_order_relaxed);
+	}
 	StateFile->Read(&cmdLatch, sizeof(cmdLatch));
 	StateFile->Read(&mpegState, sizeof(mpegState));
 	StateFile->Read(&mpegStart, sizeof(mpegStart));
@@ -1413,9 +1443,6 @@ void CDSB2::LoadState(CBlockFile *StateFile)
 		if (loopRangeValid)
 			MpegDec::UpdateMemory(mpegROM, (int)usingLoopStart, (int)usingLoopEnd, true);
 
-		const unsigned activeSize = loopRangeValid ? usingLoopEnd : (usingMPEGEnd - usingMPEGStart);
-		if (playOffset >= activeSize)
-			playOffset = 0;
 		MpegDec::SetPosition((int)playOffset);
 	}
 
@@ -1429,9 +1456,9 @@ void CDSB2::LoadState(CBlockFile *StateFile)
 
 // Offsets of memory regions within DSB2's pool
 #define DSB2_OFFSET_RAM			0		// 128KB 68K RAM
-#define DSB2_OFFSET_MPEG_LEFT	0x20000	// 1604 bytes (48 KHz max., 1/60th second, 2 extra = 2*(48000/60+2)) left MPEG buffer
-#define DSB2_OFFSET_MPEG_RIGHT	0x20644	// 1604 bytes right MPEG buffer
-#define DSB2_MEMORY_POOL_SIZE	(0x20000 + 0x644 + 0x644)
+#define DSB2_OFFSET_MPEG_LEFT	0x20000	// 3208 bytes (802 floats) left MPEG float buffer
+#define DSB2_OFFSET_MPEG_RIGHT	0x20C88	// 3208 bytes (802 floats) right MPEG float buffer
+#define DSB2_MEMORY_POOL_SIZE	(0x20000 + 0xC88 + 0xC88)
 
 Result CDSB2::Init(const UINT8 *progROMPtr, const UINT8 *mpegROMPtr)
 {
@@ -1449,8 +1476,8 @@ Result CDSB2::Init(const UINT8 *progROMPtr, const UINT8 *mpegROMPtr)
 
 	// Set up memory pointers
 	ram = &memoryPool[DSB2_OFFSET_RAM];
-	mpegL = (INT16 *) &memoryPool[DSB2_OFFSET_MPEG_LEFT];
-	mpegR = (INT16 *) &memoryPool[DSB2_OFFSET_MPEG_RIGHT];
+	mpegL = (float *) &memoryPool[DSB2_OFFSET_MPEG_LEFT];
+	mpegR = (float *) &memoryPool[DSB2_OFFSET_MPEG_RIGHT];
 
 	// Initialize 68K CPU
 	M68KSetContext(&M68K);
@@ -1491,7 +1518,8 @@ CDSB2::CDSB2(const Util::Config::Node &config)
 	mpegFrameCarry = 0.0;
 
 	memset(fifo, 0, sizeof(fifo));
-	fifoIdxW = fifoIdxR = 0;
+	fifoIdxW.store(0, std::memory_order_relaxed);
+	fifoIdxR = 0;
 	volume[0] = 0xFF;	// set to max volume in case we miss the volume commands
 	volume[1] = 0xFF;
 	stereo = StereoMode::Stereo;

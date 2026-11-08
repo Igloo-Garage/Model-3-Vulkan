@@ -32,7 +32,9 @@
 // headers above, so this was missing without ever being noticed; gcc does not, and the whole file
 // failed with "'uint32_t' does not name a type" on the first line that used it.
 #include <cstdint>
+#include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Vulkan3D {
@@ -43,6 +45,8 @@ public:
 	void AttachMemory(const uint32_t* cullingLo, const uint32_t* cullingHi, const uint32_t* polyRam, const uint32_t* vrom);
 	void SetStepping(int stepping);
 	void SetViewport(unsigned xOff, unsigned yOff, unsigned xRes, unsigned yRes, unsigned totalX, unsigned totalY, bool wideScreen);
+	void SetCullRadiusScale(float scale) { m_cullRadiusScale = scale; }
+	void SetCullAngleMargin(float sinAngle) { m_cullAngleSin = sinAngle; }
 	void BeginFrame();
 	void Build();
 	void ResetInterpolation();
@@ -76,6 +80,7 @@ private:
 	bool IsDynamicModel(uint32_t* data) const;
 	bool IsVROMModel(uint32_t modelAddr) const;
 	void CalcViewport(New3D::Viewport* vp);
+	void DumpHudViewport(const New3D::Viewport& vp);
 	static uint64_t MixKey(uint64_t hash, uint64_t value);
 
 	int m_step = 0x10;
@@ -93,6 +98,8 @@ private:
 	unsigned m_xRes = 496, m_yRes = 384;
 	unsigned m_totalXRes = 496, m_totalYRes = 384;
 	bool m_wideScreen = false;
+	float m_cullRadiusScale = 1.0f;
+	float m_cullAngleSin = 0.0f;
 
 	const float* m_matrixBasePtr = nullptr;
 	uint32_t m_matrixBaseAddr = 0;
@@ -104,6 +111,7 @@ private:
 	New3D::Mat4 m_modelMat;
 	New3D::Mat4 m_localMat;
 	New3D::Mat4 m_baseMat;
+	uint32_t m_vpRootAddr = 0;
 	New3D::Vertex m_prev[4] = {};
 	uint16_t m_prevTexCoords[4][2] = {};
 
@@ -111,9 +119,18 @@ private:
 	std::vector<New3D::Node> m_nodesPrev;    // previous simulation frame
 	bool m_currValid = false;
 	bool m_prevValid = false;
+	// SM3D_HUD_DEBUG: dump the polygon states of HUD viewports (scuddx grey HUD diagnosis).
+	bool m_hudDebug = false;
+	bool m_dbgInHudVp = false;
+	char m_dbgVpTag[96] = {};
+	std::unordered_set<std::string> m_hudVpsLogged;
+	std::unordered_set<std::string> m_hudLogged;
 	std::vector<New3D::FVertex> m_polyBufferRam;
 	std::vector<New3D::FVertex> m_polyBufferRom;
 	std::unordered_map<uint32_t, std::shared_ptr<std::vector<New3D::Mesh>>> m_romMap;
+	// ROM models whose polygons the game writes to: remembered so IsDynamicModel()'s
+	// per-model polygon walk does not have to run again for every draw of the model.
+	std::unordered_set<uint32_t> m_dynamicRomModels;
 	bool m_romReset = false;
 
 	struct

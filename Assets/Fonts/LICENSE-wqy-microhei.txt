@@ -1,0 +1,39 @@
+WenQuanYi Micro Hei (文泉驿微米黑) 0.2.0-beta
+=============================================
+
+This font is shipped with Model 3-Vulkan so that the interface does not
+depend on the host system having a CJK-capable font installed. It is used as
+the settings-window and in-game-panel typeface.
+
+Upstream:  https://sourceforge.net/projects/wqy/files/wqy-microhei/
+Package:   wqy-microhei.ttc (first face of the collection)
+
+Copyright
+---------
+  2008-2009, The WenQuanYi Project Board of Trustees
+  2008-2009, Qianqian Fang [FangQ] (fangq #nmr _mgh _harvard _edu)
+  2008-2009, mozbug (mozbugbox #yahoo _com _au)
+
+  Based on the Google Droid font family shipped in the Android SDK (1.0),
+  including Droid Sans Fallback, Droid Sans and Droid Sans Mono:
+  2006-2008, Google Corporation
+  2006-2008, Steve Matteson, Ascender Corp.
+
+  Some CJK punctuation was imported from Ume-Font:
+  2003-2004, Electronic Font Open Laboratory (/efont/)
+  1990-2003, Wada Laboratory, the University of Tokyo
+
+License
+-------
+This font is distributed under the Apache License, Version 2.0, or the GNU
+General Public License, version 3 or later, with the Font exception. Model
+3-Vulkan redistributes it unmodified under the Apache License, Version 2.0.
+
+  Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0
+
+  GPL-3 or later with Font exception: the exception states that embedding
+  this font, or unaltered portions of it, into a document does not by itself
+  make that document subject to the GPL.
+
+The font file is unmodified. See NOTICE.md in the release's Data folder for
+the full third-party attribution list.

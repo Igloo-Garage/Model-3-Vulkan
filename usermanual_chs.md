@@ -1,11 +1,13 @@
 # Model 3-Vulkan 用户手册（中文精简版）
 
-> 对应 **v0.9.8.6**。完整说明见英文版 [`usermanual.md`](usermanual.md)，
+> 对应 **v0.9.9.6**。完整说明见英文版 [`usermanual.md`](usermanual.md)，
 > 实测数据见 `sdl3_reports/`，改动记录见 `devdocs/CHANGELOG.md`。
 
 ---
 
 ## 1. 两个 exe，选哪个
+
+源码树可以构建两个 exe。发行包（Windows zip）**只包含 `Model3-Vulkan.exe`**；`Supermodel-LegacyOG.exe` 仍可从源码构建，但不再随包分发。
 
 | | `Model3-Vulkan.exe` | `Supermodel-LegacyOG.exe` |
 | --- | --- | --- |
@@ -15,10 +17,11 @@
 | 建议 | **默认用它** | 显卡不支持 Vulkan 1.3，或想用 OpenGL |
 
 两者共用 `Data/Config`、`Data/NVRAM`、`Data/Assets`，**存档目录分开**。
-Vulkan 要求不满足时会弹窗说明，此时改用 LegacyOG；OpenGL 版可用「导入旧版 .st」把旧档转过来。
+Vulkan 要求不满足时会弹窗说明；本发行包不含 OpenGL 版，请先更新驱动（OpenGL 目标仍可从源码构建）。
+OpenGL 版可用「导入旧版 .st」把旧档转过来。
 
-标题栏也区分：Vulkan 版是 `Model 3-Vulkan v0.9.8.6 - 游戏名`，
-OpenGL 版是 `Supermodel-OpenGL v0.9.8.6 - 游戏名`。
+标题栏也区分：Vulkan 版是 `Model 3-Vulkan v0.9.9.6 - 游戏名`，
+OpenGL 版是 `Supermodel-OpenGL v0.9.9.6 - 游戏名`。
 
 ## 2. 快速开始
 
@@ -41,12 +44,13 @@ ROM 按 zip **内容**识别，文件名和实际版本不一致也能显示正�
 `Scripts\` 里只有显示模式辅助脚本：`ArcadeDisplay.bat`（英文）/ `ArcadeDisplay-zh.bat`（中文）。
 无参数双击会列出显示器所有分辨率与刷新率，并标出能跑 57.524Hz 的档位；
 `-Action Run -Game "<zip 路径>"` 会先保存桌面显示设置、启动游戏、退出后恢复。
-默认用 `Model3-Vulkan.exe`，要 OpenGL 版加 `-SupermodelExe Supermodel-LegacyOG.exe`。
+默认用 `Model3-Vulkan.exe`，要 OpenGL 版（需从源码构建）加 `-SupermodelExe Supermodel-LegacyOG.exe`。
 显示器支持 VRR 时不需要它（用「跟随显示器」即可）。细节见英文版 §7.1。
 
 Linux/macOS 的 Vulkan 版用 CMake 构建；`.zst` 存档需要在目标系统执行
 `cmake --build build-cmake --target hostcore`（需要 .NET 11 SDK，以及 clang 或 Xcode 命令行工具），
-否则模拟器能运行，但不能读写 `.zst` 容器。
+否则模拟器能运行，但不能读写 `.zst` 容器。官方发布的 Linux/macOS 压缩包已经内置该模块，
+下载版不需要装 .NET，开箱即可使用 `.zst` 存档。
 
 封面是 WebP，优先用 Windows 自己的解码器（WIC）；机器上没装 Microsoft Store 的「Webp Image
 Extensions」时，自动回落到 EXE 内置的 libwebp 解码器，所以缺包也不会没封面。
@@ -67,13 +71,27 @@ Extensions」时，自动回落到 EXE 内置的 libwebp 解码器，所以缺�
   FXAA、整数倍缩放、贴图过滤三档。
 - **超低配极速预设**：「常用」→「硬件预设」；原生 496×384 + 整数倍缩放，关闭插值/FXAA/CRT/辉光，
   并启用 Vulkan 快速四边形插值，适合 HD 530 / UHD 620 这类核显。
-- **声音**：SCSP DSP 只保留一条路径（FV2 爆音修复）、DSB 320:441 多相重采样、
+- **声音**：SCSP DSP 统一路径（FV2 爆音修复）、SCSP 纯 PCM 通道 4-tap Catmull-Rom 立方插值、
+  DSB 32-bit Float 解码 + 320:441 多相重采样与逐样本音量平滑、原生 4.0 / 5.1 环绕输出与智能 5.1 上混器
+  （共模中置 + 120Hz 巴特沃斯低通 LFE）、内置无锁多声道 WAV/FLAC 录音器（保存至 `Data/Recordings/Sound/`）、
   每游戏默认音量、音频缓冲默认 400ms。
 - **输入**：SDL3 手柄、方向盘力反馈、手柄转向平滑、双光枪、Sinden 白边、每游戏按键表。
   其中**力反馈、双光枪、Sinden 白边、双机联机没有在真实硬件上实测**（开发机只有普通手柄，
   没有方向盘/光枪/第二台机器），请当作“应该能用”而不是“已验证”。
 - **存档**：`.zst` 容器 + 缩略图卡片，可改名/删除；「导入旧版 .st」；
   「管理存档 → 读取」会等游戏启动完成（约 3 秒）再装状态，期间用整屏启动图遮盖。
+- **PowerPC 执行模式**：`核心` 页的「PowerPC 执行模式」可选 **JIT 混合模式（默认）** 或
+  **C 纯解释器（对照基准）**，下一局生效。
+  - **JIT 混合模式**：把占大头的指令（整数算术/逻辑/移位、比较、分支、字节反转访存、
+    单双精度浮点访存、寄存器搬移）编译成 x86-64 原生代码，其余仍调用解释器自己的处理函数，
+    两条路径逐位等价。代码缓存在 16 MB 可执行内存里，写入含已翻译代码的内存页会作废对应块。
+  - **C 纯解释器**：原来的逐条解释执行。慢，但它是 JIT 的校验基准，出问题或想做画面 A/B 时用它。
+  - 实测（Daytona 2 赛道中，原生 496×384、无垂直同步、不锁帧）JIT 224.5 Hz / 4.45 ms，
+    解释器 55.2 Hz / 18.12 ms（解释器连 57.5 Hz 的逻辑帧都跑不满）；4K + MSAA 时瓶颈在显卡，
+    两者没有可测差别。
+  - 排错用：`SM3D_PPC_JIT=0/1` 单次强制模式（覆盖设置），`SM3D_PPC_JIT_VERIFY=1`
+    逐块重跑解释器并比对（不一致直接中止），`SM3D_PPC_JIT_DUMP=1` 把活动块反汇编写进日志。
+    每局结束时日志会有一行 `PPC: x64 hybrid JIT: ...`（翻译块数、原生指令占比、缓存占用）。
 - **界面**：中英实时切换、每项都有说明、游戏列表带封面与简介、窗口位置记忆、
   跨 DPI 自动缩放、统计面板（`` ` ``，含 CPU/GPU 型号、CPU 平均与单核最高频率、
   音频缓冲水位区间与声板 L/R 峰值）；游戏列表右键可设为启动时自动运行（行首显示 `★`），
@@ -96,6 +114,17 @@ Extensions」时，自动回落到 EXE 内置的 libwebp 解码器，所以缺�
   - **导出当前游戏纹理**：把游戏实际引用的每块子贴图解码成 RGBA8 PNG，写到
     `Data/Assets/DumpTextures/<set>/`，文件名带内容哈希；同一内容只写一次。
     超分后保持文件名放进 HDTextures 就能替换。
+  - **导出图上的白点/虚线是什么**：原机没有平滑 alpha（T1RGB5 用 bit 15，4-bit 格式用
+    alpha nibble），游戏拿这一位做**抖动**来表示半透明。看图软件和 GitHub 会把透明区
+    合成到白色上，于是一张好照片看上去像盖了白网格。导出现在只在「确实有材质读 alpha」
+    时才保留这一位，其它一律写全不透明（与渲染器一致）。要确认某个目录的情况：
+    `python Tools/inspect-texturedump.py Data/Assets/DumpTextures/<set>`，
+    加 `--sheet review` 会同时输出画面与 alpha 两张对照图。
+  - **超分时只让模型处理颜色**：神经网络是按照片训练的，不理解 1-bit 抖动掩码；把 alpha 也交给它，
+    网点会被抹成平滑渐变，材质就会在原机本该丢弃的地方做混合，两趟 alpha 的物件边缘还会重影。
+    正确做法是用模型超分 RGB，alpha 用**最近邻**放大（或放大后再二值化成 0/255）。
+    工具里的「separate alpha」只表示「模型不碰 alpha」，缩放滤波仍会把它抹开——用
+    `inspect-texturedump.py` 看直方图，应该是两根尖峰而不是一条曲线。
   - **F4** 在替换贴图与原版之间即时切换（不重扫、已加载的图保留，适合 A/B）；
     **F3**（或 **Shift+F4**）或面板里的「重新加载高清纹理」重扫目录，边玩边换图不用重启；
     面板打开时模拟器暂停，所以按钮的重扫在关闭面板、恢复仿真后完成。
@@ -273,8 +302,8 @@ InputUIToggleOverlay = "KEY_TAB"
 | 游戏列表为空 / 全是灰色 | `Data/Config/Games.xml` 丢了，必须和 exe 一起保留；请整包解压 |
 | 提示缺少 `api-ms-win-*.dll` | 需要 64 位 Windows 10 或更高版本 |
 | Linux 启动即退出 / 中文变方块 | 系统 CJK 字体如果是可变字体（`-VF.otf`，CFF2）就会这样。现在会自动跳过并在日志写 `GUI: skipping font ...`；装 `fonts-wqy-microhei`（Debian/Ubuntu）或 `wqy-microhei-fonts`（openSUSE/Fedora）。日志里的 `GUI: interface font '<路径>'` 是实际用的字体 |
-| 弹窗提示 Vulkan 1.3 不足 | 更新驱动；仍不行用 `Supermodel-LegacyOG.exe` |
-| 「Vulkan 校验层」是什么 | Vulkan SDK 自带的检查器：逐帧核对绘制调用/描述符/同步，问题写进 `Data/Supermodel.log`（`Vulkan:` / `Vulkan warning:` 行，超过 1000 条后停止）。它是诊断开关，正常游玩请关闭（会明显变慢）。排查花屏/闪烁/崩溃：打开 → 进游戏复现 → 退出 → 发日志。对之后新开的游戏生效；设置窗口自己的实例要重启程序才换。没装 Vulkan SDK/校验层时日志会写 `validation layer unavailable, retrying without it`，游戏照常运行 |
+| 弹窗提示 Vulkan 1.3 不足 | 更新驱动；本发行包不含 OpenGL 版，OpenGL 目标需从源码构建 |
+| 「Vulkan 校验层」是什么 | Vulkan SDK 自带的检查器：逐帧核对绘制调用/描述符/同步，问题写进 `Data/Model3Vulkan.log`（`Vulkan:` / `Vulkan warning:` 行，超过 1000 条后停止）。它是诊断开关，正常游玩请关闭（会明显变慢）。排查花屏/闪烁/崩溃：打开 → 进游戏复现 → 退出 → 发日志。对之后新开的游戏生效；设置窗口自己的实例要重启程序才换。没装 Vulkan SDK/校验层时日志会写 `validation layer unavailable, retrying without it`，游戏照常运行 |
 
 ## 8. 已知限制
 
@@ -285,7 +314,9 @@ InputUIToggleOverlay = "KEY_TAB"
   蓝块（瀑布区蓝色像素 20.1%，原版 4.9%）；这类游戏用「原版」或「逐像素排序」。
 - 超采样只属于 OpenGL 版，Vulkan 后端强制 1x。
 - 部分 ROM set 缺 drive board 程序（如 `vf3tb` 缺 `epr-18022.ic2`），没有力反馈。
-- `scuddx` 的 HUD 视图口位置仍有已知偏差，待修。
+- `scuddx`（Scud Race Deluxe）的仪表盘是灰板：ROM 没坏，OpenGL 版同一存档也是同样的灰板，这个面板
+  从 MAME 时代起就没被正确模拟。请改玩 Twin/DX 版本（`scud` / `scudau` / `scudplus` /
+  `scudplusa`）。
 - 封面/游戏列表的改动需要重启程序才可见。
 - **力反馈 / 双光枪 / Sinden 白边 / 双机联机未在真实硬件上实测**：代码路径已实现，
   但开发环境只有普通手柄与单机，需要真实设备或第二台机器确认。

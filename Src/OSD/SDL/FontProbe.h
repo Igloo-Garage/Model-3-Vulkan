@@ -42,6 +42,10 @@
  *
  * It is a format/compatibility check, not a security boundary. stb_truetype does no range checking
  * on a hostile file, and neither does this; both are asked to read fonts the user installed.
+ *
+ * A font with no Basic Latin glyphs is rejected as well. Parsing is not the only way to be the wrong
+ * font: Droid Sans Fallback is a valid, CJK-only face that several distributions install, and using
+ * it leaves every label in the interface invisible while all the widgets still draw.
  */
 struct FontProbeResult
 {

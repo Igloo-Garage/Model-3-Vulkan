@@ -29,7 +29,7 @@ if (-not ("Kb2" -as [type])) { Add-Type -TypeDefinition $sig }
 
 $root = Split-Path -Parent $PSScriptRoot
 $exe = Join-Path $root "build-cmake\bin\Model3-Vulkan.exe"
-$log = Join-Path $root "build-cmake\bin\Data\Supermodel.log"
+$log = Join-Path $root "build-cmake\bin\Data\Model3Vulkan.log"
 $dir = Join-Path $root "build-cmake\bin\Data\Screenshots"
 if (Test-Path $log) { Remove-Item $log -Force }
 if (Test-Path $dir) { Get-ChildItem $dir -Filter *.png | Remove-Item -Force }

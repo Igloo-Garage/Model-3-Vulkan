@@ -49,7 +49,7 @@
    "; All settings are case sensitive.  Numbers must be integers.  Check your\n" \
    "; spelling carefully because invalid settings are silently ignored.  To verify\n" \
    "; that your settings are being parsed correctly, check the contents of\n" \
-   "; Supermodel.log.\n" \
+   "; Model3Vulkan.log.\n" \
    ";\n" \
    "; Global options apply to all games.  To create configuration profiles for\n" \
    "; individual games, place settings under sections with the same name as the\n" \
@@ -223,6 +223,9 @@ static const char s_defaultConfigFileSettings[] =
    "InputSteeringLeft = \"KEY_LEFT,JOY1_POV1_LEFT\"   ; digital, turn wheel left\n"
    "InputSteeringRight = \"KEY_RIGHT,JOY1_POV1_RIGHT\" ; digital, turn wheel right\n"
    "InputSteering = \"JOY1_XAXIS\"        ; analog, full steering range\n"
+   "GamepadSteeringSmoothing = 3\n"
+   "GamepadSteeringSensitivity = 66\n"
+   "ChaseCameraStabilizer = 3\n"
    "\n"
    "; Pedals. The accelerator is a face button - the X position, index 2 - so it behaves\n"
    "; the same on every input system. The brake is the right analogue trigger: XInput and\n"

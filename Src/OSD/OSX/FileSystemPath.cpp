@@ -50,6 +50,8 @@ namespace FileSystemPath
         case SavesLegacy: return "Saves_Legacy/";
         case Screenshots:
             return "Screenshots/";
+        case RecordingsSound:
+            return "Recordings/Sound/";
         case Assets:
             return "Assets/";
         }
@@ -93,6 +95,8 @@ namespace FileSystemPath
             return root;
 
         const std::string path = root + SubPath(pathType);
+        if (pathType == RecordingsSound)
+            (void)mkdir((root + "Recordings/").c_str(), 0775);
         (void)mkdir(path.c_str(), 0775);
         return path;
     }

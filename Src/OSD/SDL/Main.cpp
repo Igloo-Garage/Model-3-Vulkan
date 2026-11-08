@@ -252,7 +252,7 @@ static const std::string s_analysisPath = Util::Format() << FileSystemPath::GetP
 // InitializeSDL3Startup() fills this before anything can read it.
 static std::string s_configFilePath;
 #else
-static const std::string s_configFilePath = Util::Format() << FileSystemPath::GetPath(FileSystemPath::Config) << "Supermodel.ini";
+static const std::string s_configFilePath = Util::Format() << FileSystemPath::GetPath(FileSystemPath::Config) << "Model3-Vulkan.ini";
 #endif
 static const std::string s_gameXMLFilePath = Util::Format() << FileSystemPath::GetPath(FileSystemPath::Config) << "Games.xml";
 static const std::string s_musicXMLFilePath = Util::Format() << FileSystemPath::GetPath(FileSystemPath::Config) << "Music.xml";
@@ -266,11 +266,11 @@ static const std::string s_musicXMLFilePath = Util::Format() << FileSystemPath::
 // executable instead. Without this the default resolved to <exe>/Data/Supermodel.log, a directory
 // that does not exist, and the log was silently not written.
 #ifdef SUPERMODEL_OSX
-static const std::string s_logOutputSetting = "Supermodel.log";
+static const std::string s_logOutputSetting = "Model3Vulkan.log";
 #else
-static const std::string s_logOutputSetting = "Data/Supermodel.log";
+static const std::string s_logOutputSetting = "Data/Model3Vulkan.log";
 #endif
-static const std::string s_logFilePath = Util::Format() << FileSystemPath::GetPath(FileSystemPath::Log) << "Supermodel.log";
+static const std::string s_logFilePath = Util::Format() << FileSystemPath::GetPath(FileSystemPath::Log) << "Model3Vulkan.log";
 
 std::string ResolveDataFileSetting(const std::string& configuredPath, const std::string& fileName)
 {
@@ -626,7 +626,7 @@ static void SetModalLoopHook(IEmulator* emulator, bool* pausedFlag)
  *   - -show-console / ShowConsole = 1: allocate a console of our own, for when the output is wanted
  *     but the program was started from Explorer.
  *
- * Logging to Data\Supermodel.log is unaffected either way, which is the path that matters.
+ * Logging to Data\Model3Vulkan.log is unaffected either way, which is the path that matters.
  */
 static bool s_consoleIsOurs = false;    // true only for a console this process allocated itself
 
@@ -730,11 +730,110 @@ static bool LowResolutionRenderingEnabled()
 #endif
 }
 
+/*
+ * The size the renderers draw into, in device pixels.
+ *
+ * The window is measured in points on macOS, and the drawable behind it is a whole multiple of that
+ * (2x on every Retina Mac) - while the swapchain, the picture rectangle, the bezel, the crosshair and
+ * the scene viewport are all in device pixels. Reading the window size here left a 4K panel running the
+ * game at its "looks like 1080p" size and letting the compositor do the scaling, so asking for 3840x2160
+ * changed nothing unless the desktop itself was switched to a non-Retina resolution (issue from gamerg_,
+ * 2026-11-01).
+ *
+ * The game window is created hidden and only shown after the first frame is presented, so the drawable
+ * can still report 1x at this point: Cocoa recomputes a content view's backing scale once the window is
+ * on screen. The display mode knows the ratio regardless (pixel_density is 2.0 for every Retina mode),
+ * so the larger of the two answers wins. It cannot pick a wrong number: where the two spaces coincide
+ * the mode says 1.0 and the drawable is used unchanged.
+ */
+static void GetRenderSize(int &width, int &height)
+{
+  width = 0;
+  height = 0;
+  OSD::Platform::GetWindowPixelSize(s_platformWindow, &width, &height);
+
+  int windowWidth = 0;
+  int windowHeight = 0;
+  OSD::Platform::GetWindowSize(s_platformWindow, &windowWidth, &windowHeight);
+
+  OSD::Platform::DisplayMode mode{};
+  if (OSD::Platform::GetDesktopDisplayMode(OSD::Platform::GetWindowDisplay(s_platformWindow), &mode) &&
+      mode.pixelDensity > 1.0f && windowWidth > 0 && windowHeight > 0)
+  {
+    const int denseWidth = (int)std::lround(windowWidth * mode.pixelDensity);
+    const int denseHeight = (int)std::lround(windowHeight * mode.pixelDensity);
+    if (denseWidth > width || denseHeight > height)
+    {
+      width = denseWidth;
+      height = denseHeight;
+    }
+  }
+
+  if (width < 16 || height < 16)
+  {
+    width = windowWidth;
+    height = windowHeight;
+  }
+}
+
+/*
+ * Device pixels per window coordinate unit.
+ *
+ * Only ever differs from 1.0 on a Retina Mac, where the picture rectangle is in the drawable's space
+ * but the pointer, the window and everything the input system scales is in points.
+ */
+static float WindowPixelDensity()
+{
+  int windowWidth = 0;
+  int windowHeight = 0;
+  int pixelWidth = 0;
+  int pixelHeight = 0;
+  OSD::Platform::GetWindowSize(s_platformWindow, &windowWidth, &windowHeight);
+  GetRenderSize(pixelWidth, pixelHeight);
+  if (windowWidth <= 0 || windowHeight <= 0 || pixelWidth <= 0)
+    return 1.0f;
+  return (float)pixelWidth / (float)windowWidth;
+}
+
+/*
+ * The picture rectangle in window coordinates, for the input system and the configure-inputs dialog.
+ *
+ * CInputSystem scales the mouse into the display area it is handed, and mouse positions arrive in
+ * window coordinates - so it has to be given the rectangle in the same space. Everything else that
+ * consumes xOffset/xRes (the renderers, the bezel, the crosshair) wants device pixels.
+ */
+static void WindowSpacePictureRect(unsigned &x, unsigned &y, unsigned &w, unsigned &h)
+{
+  const float density = WindowPixelDensity();
+  x = (unsigned)std::lround((float)xOffset / density);
+  y = (unsigned)std::lround((float)yOffset / density);
+  w = (unsigned)std::lround((float)xRes / density);
+  h = (unsigned)std::lround((float)yRes / density);
+}
+
 static void CalcScreenGeometry(unsigned *xOffsetPtr, unsigned *yOffsetPtr, unsigned *xResPtr, unsigned *yResPtr, unsigned *totalXResPtr, unsigned *totalYResPtr, bool keepAspectRatio)
 {
   int actualWidth = 0;
   int actualHeight = 0;
-  OSD::Platform::GetWindowSize(s_platformWindow, &actualWidth, &actualHeight);
+  GetRenderSize(actualWidth, actualHeight);
+
+  /*
+   * A window that has not been sized yet - or whose resize the compositor has not confirmed - reads
+   * as 0 or 1 pixels. Clamping the picture to that produced a 1x1 game area and a black screen. The
+   * requested resolution is the best answer available here; the swapchain is recreated from the real
+   * window size immediately afterwards.
+   */
+  if (actualWidth < 16 || actualHeight < 16)
+  {
+    const int requestedWidth = (int)*xResPtr;
+    const int requestedHeight = (int)*yResPtr;
+    if (requestedWidth >= 16 && requestedHeight >= 16)
+    {
+      actualWidth = requestedWidth;
+      actualHeight = requestedHeight;
+    }
+  }
+
   *totalXResPtr = (unsigned)actualWidth;
   *totalYResPtr = (unsigned)actualHeight;
 
@@ -754,8 +853,9 @@ static void CalcScreenGeometry(unsigned *xOffsetPtr, unsigned *yOffsetPtr, unsig
    * so the picture fills 95% of the screen instead of 71%, which looks better, while the texels it was
    * supposed to align are not aligned at all. The option was quietly doing the opposite of its name.
    *
-   * Falls back to the window size where the panel's own mode could not be read, which is the previous
-   * behaviour and the best available answer when nothing better is known.
+   * Falls back to the drawable's size where the panel's own mode could not be read, which is the best
+   * available answer when nothing better is known. On macOS there is no EDID path, but the drawable is
+   * already in the panel's pixels (see GetRenderSize), so the multiple it produces is the right one.
    */
   int panelWidth = actualWidth;
   int panelHeight = actualHeight;
@@ -1262,7 +1362,10 @@ const std::vector<DisplayInfo>& GetDisplays()
 
         OSD::Platform::DisplayMode desktop{};
         if (OSD::Platform::GetDesktopDisplayMode(platform.id, &desktop))
+        {
             info.desktopHz = (int)(desktop.refreshHz + 0.5f);
+            info.pixelDensity = desktop.pixelDensity > 0.0f ? desktop.pixelDensity : 1.0f;
+        }
 
         OSD::Platform::DisplayMode arcade{};
         info.hasArcadeMode = FindArcadeDisplayModeImpl(seekRateHz, i, arcade, true);
@@ -1305,6 +1408,7 @@ const std::vector<DisplayInfo>& GetDisplays()
         signature += Util::Format() << display.number << '|' << display.name << '|'
                                     << display.width << 'x' << display.height << '|'
                                     << display.panelWidth << 'x' << display.panelHeight << '|'
+                                    << display.pixelDensity << '|'
                                     << display.desktopHz << '|' << (display.primary ? 1 : 0) << '|'
                                     << (display.hasArcadeMode ? 1 : 0) << '\n';
     }
@@ -1333,6 +1437,19 @@ const std::vector<DisplayInfo>& GetDisplays()
                     display.number, display.name.c_str(),
                     display.panelWidth, display.panelHeight, display.desktopHz,
                     display.width, display.height,
+                    display.primary ? "  [primary]" : "",
+                    display.hasArcadeMode ? "  [57/58 Hz mode available]" : "");
+            }
+            else if (display.pixelDensity > 1.0f)
+            {
+                // macOS: SDL reports the mode in points and the drawable is a multiple of that. Both
+                // numbers are printed for the same reason the Windows pair is - a log from a 4K Mac
+                // must say "this panel is really 3840x2160", not "looks like 1920x1080".
+                InfoLog("Display %d: %s  %dx%d @%d Hz  (%.0fx: %dx%d pixels)%s%s",
+                    display.number, display.name.c_str(),
+                    display.width, display.height, display.desktopHz, display.pixelDensity,
+                    (int)std::lround(display.width * display.pixelDensity),
+                    (int)std::lround(display.height * display.pixelDensity),
                     display.primary ? "  [primary]" : "",
                     display.hasArcadeMode ? "  [57/58 Hz mode available]" : "");
             }
@@ -1429,8 +1546,9 @@ IntegerScaleInfo GetIntegerScaleInfo()
 
     /*
      * The same panel override CalcScreenGeometry applies, in the same order, so that what is reported
-     * here is what the geometry code actually used rather than an independent guess. The window size
-     * is the fallback in both places, which is why it is read the same way.
+     * here is what the geometry code actually used rather than an independent guess. Both fall back to
+     * the panel's device pixels when no EDID override is known, which is what the session measures
+     * against - on a Retina Mac the desktop mode's coordinate size times its pixel density.
      */
     const int displayIndex = GetConfiguredDisplaySdlIndex();
     int panelWidth = 0;
@@ -1448,10 +1566,21 @@ IntegerScaleInfo GetIntegerScaleInfo()
 
     if (panelWidth <= 0 || panelHeight <= 0)
     {
-        // No panel mode: fall back to the size a fullscreen window would be, which is what the
-        // geometry code ends up measuring against in this case.
-        if (!GetConfiguredFullscreenSize(panelWidth, panelHeight))
+        /*
+         * No EDID override. The session uses its drawable, which is the desktop mode in points times
+         * the mode's pixel density - so that is what predicts the same multiple here.
+         */
+        OSD::Platform::DisplayMode desktop{};
+        if (OSD::Platform::GetDesktopDisplayMode(OSD::Platform::GetDisplayIdForIndex(displayIndex), &desktop) &&
+            desktop.width > 0 && desktop.height > 0)
+        {
+            panelWidth = (int)std::lround(desktop.width * desktop.pixelDensity);
+            panelHeight = (int)std::lround(desktop.height * desktop.pixelDensity);
+        }
+        else if (!GetConfiguredFullscreenSize(panelWidth, panelHeight))
+        {
             return info;
+        }
     }
 
     if (panelWidth <= 0 || panelHeight <= 0)
@@ -1974,6 +2103,11 @@ static Result CreateGLScreen(bool coreContext, const std::string &caption, bool 
   desc.fullscreenDesktop = fullScreen;
   // Hidden until the first frame; see the note on s_windowRevealPending.
   desc.flags = OSD::Platform::WindowFlag_OpenGL | OSD::Platform::WindowFlag_Hidden;
+#if defined(__APPLE__)
+  // A Retina drawable at the panel's own resolution rather than at the window's point size. The
+  // geometry is computed in device pixels (see GetRenderSize), so the picture still fills the window.
+  desc.flags |= OSD::Platform::WindowFlag_HighDPI;
+#endif
 
   s_platformWindow = OSD::Platform::CreatePlatformWindow(desc);
   if (nullptr == s_platformWindow)
@@ -2099,6 +2233,12 @@ static Result CreateVulkanScreen(const std::string &caption, bool focusWindow, u
   desc.fullscreenDesktop = fullScreen;
   // Hidden until the first frame; see the note on s_windowRevealPending.
   desc.flags = OSD::Platform::WindowFlag_Vulkan | OSD::Platform::WindowFlag_Hidden;
+#if defined(__APPLE__)
+  // Without this a Retina Mac creates the drawable at 1x, so a 4K panel renders the game at the
+  // desktop's "looks like 1080p" size and the compositor scales it up. The picture geometry is in
+  // device pixels (see GetRenderSize), so the swapchain and the rectangle still agree.
+  desc.flags |= OSD::Platform::WindowFlag_HighDPI;
+#endif
 
   s_platformWindow = OSD::Platform::CreatePlatformWindow(desc);
   if (nullptr == s_platformWindow)
@@ -2378,7 +2518,14 @@ static void LogWindowSize(const char *backend)
   int width = 0;
   int height = 0;
   OSD::Platform::GetWindowSize(s_platformWindow, &width, &height);
-  InfoLog("%s: window size %dx%d.", backend, width, height);
+  int pixelWidth = 0;
+  int pixelHeight = 0;
+  GetRenderSize(pixelWidth, pixelHeight);
+  if (pixelWidth != width || pixelHeight != height)
+    InfoLog("%s: window size %dx%d (drawable %dx%d, %.0f%% scale).", backend, width, height,
+      pixelWidth, pixelHeight, width > 0 ? 100.0 * pixelWidth / width : 100.0);
+  else
+    InfoLog("%s: window size %dx%d.", backend, width, height);
 }
 
 static void ReportRenderInfo(uint32_t aaFactor, unsigned xRes, unsigned yRes, unsigned totalXRes, unsigned totalYRes)
@@ -3932,6 +4079,7 @@ static void SaveOverlaySettings()
     "PostFXAA", "PostCRT", "PostScanlines", "PostScanlineIntensity",
     "PostMaskType", "PostMaskScale", "PostMaskIntensity",
     "PostGlow", "PostGlowLevels", "PostGlowThreshold", "PostGain",
+    "GamepadSteeringSmoothing", "GamepadSteeringSensitivity", "ChaseCameraStabilizer",
     // Written when the readout is toggled in play, so the setting survives the session.
     "ShowStatsOsd"
   };
@@ -4250,8 +4398,60 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
 
   // Initialize audio system
   SetAudioType(game.audio);
+  SetAudioGameTitle(!game.title.empty() ? game.title : game.name);
   if (Result::OKAY != OpenAudio(s_runtime_config))
     return 1;
+
+  InfoLog("Audio DSP pipeline: SCSP 4-tap Catmull-Rom cubic PCM + 128-step DSP, DSB 32-bit float + 64-tap sinc (320:441), master C1 soft-clipper (knee 0.85), channels=%d, 5.1 upmixer=%s, recorder=%s (%s).",
+    s_runtime_config["NbSoundChannels"].ValueAsDefault<int>(4),
+    s_runtime_config["SurroundUpmix51"].ValueAsDefault<bool>(true) ? "on" : "off",
+    s_runtime_config["RecordWav"].ValueAsDefault<bool>(false) ? "ACTIVE" : "off",
+    s_runtime_config["RecordWavFormat"].ValueAsDefault<std::string>("wav_float32").c_str());
+
+  // Log per-device wheel classification and any non-default axis calibration (deadzone, saturation,
+  // or full-travel pedal Off=-32768/+32767) so user logs immediately show peripheral calibration state.
+  if (Inputs != nullptr && Inputs->GetInputSystem() != nullptr)
+  {
+    static const char* const kAxisConfigNames[NUM_JOY_AXES] = {
+      "X", "Y", "Z", "RX", "RY", "RZ", "S1", "S2"
+    };
+    auto inputSys = Inputs->GetInputSystem();
+    const int numJoys = inputSys->GetNumJoysticks();
+    for (int j = 0; j < numJoys; ++j)
+    {
+      const JoyDetails* details = inputSys->GetJoyDetails(j);
+      if (details == nullptr)
+        continue;
+      for (int a = 0; a < NUM_JOY_AXES; ++a)
+      {
+        if (!details->hasAxis[a])
+          continue;
+        const std::string baseKey = "InputJoy" + std::to_string(j + 1) + kAxisConfigNames[a];
+        const int minVal = s_runtime_config.TryGet(baseKey + "MinVal")
+          ? s_runtime_config[baseKey + "MinVal"].ValueAsDefault<int>(DEFAULT_JOY_AXISMINVAL)
+          : DEFAULT_JOY_AXISMINVAL;
+        const int offVal = s_runtime_config.TryGet(baseKey + "OffVal")
+          ? s_runtime_config[baseKey + "OffVal"].ValueAsDefault<int>(DEFAULT_JOY_AXISOFFVAL)
+          : DEFAULT_JOY_AXISOFFVAL;
+        const int maxVal = s_runtime_config.TryGet(baseKey + "MaxVal")
+          ? s_runtime_config[baseKey + "MaxVal"].ValueAsDefault<int>(DEFAULT_JOY_AXISMAXVAL)
+          : DEFAULT_JOY_AXISMAXVAL;
+        const unsigned dz = s_runtime_config.TryGet(baseKey + "DeadZone")
+          ? s_runtime_config[baseKey + "DeadZone"].ValueAsDefault<unsigned>(DEFAULT_JOY_DEADZONE)
+          : DEFAULT_JOY_DEADZONE;
+        const unsigned sat = s_runtime_config.TryGet(baseKey + "Saturation")
+          ? s_runtime_config[baseKey + "Saturation"].ValueAsDefault<unsigned>(DEFAULT_JOY_SATURATION)
+          : DEFAULT_JOY_SATURATION;
+        if (minVal != DEFAULT_JOY_AXISMINVAL || offVal != DEFAULT_JOY_AXISOFFVAL ||
+            maxVal != DEFAULT_JOY_AXISMAXVAL || dz != DEFAULT_JOY_DEADZONE || sat != DEFAULT_JOY_SATURATION)
+        {
+          InfoLog("Input calibration: joy %d ('%s', %s) axis %s: min=%d off=%d max=%d deadzone=%u%% saturation=%u%%.",
+            j + 1, details->name, details->isWheel ? "wheel" : "gamepad",
+            details->axisName[a], minVal, offVal, maxVal, dz, sat);
+        }
+      }
+    }
+  }
 
   // Hide mouse if fullscreen, enable crosshairs for gun games
   Inputs->GetInputSystem()->SetMouseVisibility(!s_runtime_config["FullScreen"].ValueAs<bool>());
@@ -4829,10 +5029,20 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
       }
 #endif
 
+      /*
+       * Keep the unpacked state when a tool asked for it.
+       *
+       * Tools\Capture-Frame.ps1 -RawState compares the two renderers against one raw .st: the
+       * Vulkan build unpacks the container to .vktmp.st and the script copies that file while the
+       * session is still running. This deferred path used to delete it unconditionally, so the
+       * copy fell back to the container itself and LegacyOG rejected it ("not a valid save state
+       * file"). The immediate path in LoadState already honours the same variable.
+       */
       std::error_code removeError;
       const std::string deferredTemp =
         Util::Format() << FileSystemPath::GetPath(FileSystemPath::Saves) << ".vktmp.st";
-      std::filesystem::remove(deferredTemp, removeError);
+      if (std::getenv("SM3D_KEEP_STATE_TEMP") == nullptr)
+        std::filesystem::remove(deferredTemp, removeError);
       deferredState.clear();
     }
 #endif
@@ -5020,10 +5230,15 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
 
     // Read every frame: the in-game panel edits s_runtime_config while the session is running.
     Inputs->SetGamepadSteeringSmoothing(
-      s_runtime_config["GamepadSteeringSmoothing"].ValueAsDefault<int>(0));
+      s_runtime_config["GamepadSteeringSmoothing"].ValueAsDefault<int>(3));
+    Inputs->SetGamepadSteeringSensitivity(
+      s_runtime_config["GamepadSteeringSensitivity"].ValueAsDefault<int>(66));
 
-    // Poll the inputs
-    if (!Inputs->Poll(&game, xOffset, yOffset, xRes, yRes))
+    // Poll the inputs. The rectangle is converted back to window coordinates because the input
+    // system scales mouse positions (which arrive in points on a Retina Mac) against it.
+    unsigned inputX = 0, inputY = 0, inputW = 0, inputH = 0;
+    WindowSpacePictureRect(inputX, inputY, inputW, inputH);
+    if (!Inputs->Poll(&game, inputX, inputY, inputW, inputH))
       quit = true;
 
     const uint64_t timingPollDone = timing ? OSD::Platform::Now() : 0;
@@ -5076,7 +5291,10 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
      */
     Inputs->PollPointerLate(&game);
 #if !defined(SUPERMODEL_OPENGL_ONLY)
-    UpdateOverlayCrosshair(Inputs, currentInputs, xOffset, yOffset, xRes, yRes, overlayScale);
+    // The crosshair is drawn by CVulkan2D into the swapchain, so its positions and its size are in
+    // device pixels while overlayScale is the interface's point-based scale.
+    UpdateOverlayCrosshair(Inputs, currentInputs, xOffset, yOffset, xRes, yRes,
+      overlayScale * WindowPixelDensity());
 #endif
 
     const uint64_t timingRenderStart = timing ? OSD::Platform::Now() : 0;
@@ -6192,7 +6410,9 @@ static Result ConfigureInputs(CInputs *Inputs, Util::Config::Node *fileConfig, U
     }
 
     // Configure the inputs
-    if (Inputs->ConfigureInputs(game, xOffset, yOffset, xRes, yRes))
+    unsigned inputX = 0, inputY = 0, inputW = 0, inputH = 0;
+    WindowSpacePictureRect(inputX, inputY, inputW, inputH);
+    if (Inputs->ConfigureInputs(game, inputX, inputY, inputW, inputH))
     {
       // Write input configuration and input system settings to config file
       Inputs->StoreToConfig(fileConfigRoot);
@@ -6294,6 +6514,15 @@ Util::Config::Node DefaultConfig()
     { "auto", "xbox360", "xboxone", "xboxseries", "ps3", "ps4", "ps5", "8bitdo", "generic" });
   // CModel3
   config.Set("PowerPCFrequency", 0u, "Core", 0u, 200u);
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+  /*
+   * PowerPC execution mode: 0 = the C interpreter (the reference path, and what an
+   * A/B comparison should run) and 1 = the x86-64 hybrid JIT. Read once, when the
+   * machine is built, because the code cache belongs to the process rather than to a
+   * game session. SM3D_PPC_JIT=0/1 overrides it for a single run.
+   */
+  config.Set("PowerPCMode", 1, "Core", 0, 0, { 0, 1 });
+#endif
   config.Set("MultiThreaded", true,"Core");
   config.Set("GPUMultiThreaded", true, "Core");
   // Drive sound board emulation from the audio callback rather than the render loop, so that a stall
@@ -6312,7 +6541,10 @@ Util::Config::Node DefaultConfig()
   config.Set("Balance", 0.0f, "Sound", -100.f, 100.f);
   config.Set("BalanceLeftRight", 0.0f, "Sound", -100.f, 100.f);
   config.Set("BalanceFrontRear", 0.0f, "Sound", -100.f, 100.f);
-  config.Set("NbSoundChannels", 4, "Sound", 0, 0, { 1,2,4 });
+  config.Set("NbSoundChannels", 4, "Sound", 0, 0, { 1, 2, 4, 6 });
+  config.Set("SurroundUpmix51", true, "Sound");
+  config.Set("RecordWav", false, "Sound");
+  config.Set<std::string>("RecordWavFormat", "wav_float32", "Sound", "", "", { "wav_float32", "wav_pcm16", "flac_pcm24", "flac_pcm16" });
   config.Set("SoundFreq", 57.6f, "Sound", 0.0f, 0.0f, { 57.524160f, 60.f }); // 60.0f? 57.524160f?
   // CDSB
   
@@ -6660,7 +6892,11 @@ Util::Config::Node DefaultConfig()
   // Steering smoothing for gamepad players. The arcade cabinet has a 270-degree wheel with
   // physical damping; a thumbstick is a step input and the driving games' chase cameras react to
   // it. 0 = off, 1 = light, 2 = medium, 3 = strong.
-  config.Set("GamepadSteeringSmoothing", 0, "Sensitivity", 0, 3, { 0,1,2,3 });
+  config.Set("GamepadSteeringSmoothing", 3, "Sensitivity", 0, 3, { 0,1,2,3 });
+  config.Set<unsigned>("GamepadSteeringSensitivity", 66, "Sensitivity", 25, 100);
+  // Chase camera rotational spring-damper stabilizer (NFS-style follow camera). 0 = off, 1 = light,
+  // 2 = standard, 3 = strong.
+  config.Set("ChaseCameraStabilizer", 3, "Sensitivity", 0, 3, { 0,1,2,3 });
 
   config.Set<unsigned>("InputMouseXDeadZone", DEFAULT_MSE_DEADZONE, "Sensitivity", 0, 100);
   config.Set<unsigned>("InputMouseYDeadZone", DEFAULT_MSE_DEADZONE, "Sensitivity", 0, 100);
@@ -7651,6 +7887,9 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
     { "-game-xml-file",         "GameXMLFile"             },
     { "-load-state",            "InitStateFile"           },
     { "-ppc-frequency",         "PowerPCFrequency"        },
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+    { "-ppc-mode",              "PowerPCMode"             },
+#endif
     { "-crosshairs",            "Crosshairs"              },
     { "-crosshair-style",       "CrosshairStyle"          },
     { "-vert-shader",           "VertexShader"            },
@@ -7669,6 +7908,7 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
     { "-vulkan-device",         "VulkanDevice"            },
 #endif
     { "-audio-device",          "AudioDevice"             },
+    { "-record-wav-format",     "RecordWavFormat"         },
     { "-outputs",               "Outputs"                 },
     { "-log-output",            "LogOutput"               },
     { "-log-level",             "LogLevel"                }
@@ -7717,6 +7957,10 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
     { "-no-sound",            { "EmulateSound",     false } },
     { "-dsb",                 { "EmulateDSB",       true } },
     { "-no-dsb",              { "EmulateDSB",       false } },
+    { "-upmix-51",            { "SurroundUpmix51",  true } },
+    { "-no-upmix-51",         { "SurroundUpmix51",  false } },
+    { "-record-wav",          { "RecordWav",        true } },
+    { "-no-record-wav",       { "RecordWav",        false } },
     { "-legacy-scsp",         { "LegacySoundDSP",   true } },
     { "-new-scsp",            { "LegacySoundDSP",   false } },
     { "-no-white-flash",      { "NoWhiteFlash",     true } },
@@ -8448,6 +8692,15 @@ static int RunGameSession(const ParsedCommandLine& cmd_line, std::shared_ptr<CLo
 
   LogConfig(s_runtime_config);
 
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+  /*
+   * PowerPC execution mode. Set before the emulator is constructed, because the code
+   * cache is allocated when the CPU is initialised - and before the first frame, which
+   * is what makes the choice apply to this session and every session after it.
+   */
+  ppc_set_jit_enabled(s_runtime_config["PowerPCMode"].ValueAsDefault<int>(1) != 0);
+#endif
+
   // Flag as DPI-aware, otherwise the window content might be scaled by some graphics drivers. This
   // has to be set before the video subsystem comes up.
   OSD::Platform::SetDPIAwareness();
@@ -8484,6 +8737,18 @@ static int RunGameSession(const ParsedCommandLine& cmd_line, std::shared_ptr<CLo
   xRes = s_runtime_config["XResolution"].ValueAsDefault<unsigned>(496);
   yRes = s_runtime_config["YResolution"].ValueAsDefault<unsigned>(384);
 
+  /*
+   * The size the window is created at.
+   *
+   * CreateVulkanScreen()/CreateGLScreen() take the initial window size from totalXRes/totalYRes, and
+   * these used to be left at zero until Supermodel() set them from the configuration a moment later.
+   * The window was therefore created 1x1, and on a compositor that applies resizes asynchronously
+   * (Wayland) the geometry computation that follows still saw that size: the whole game was scaled
+   * into one pixel and the screen looked black.
+   */
+  totalXRes = xRes;
+  totalYRes = yRes;
+
 #if defined(SUPERMODEL_OPENGL_ONLY)
   // One renderer family, no run-time choice.  Any Vulkan3DEngine value left in
   // a hand-edited file is ignored.
@@ -8514,8 +8779,7 @@ static int RunGameSession(const ParsedCommandLine& cmd_line, std::shared_ptr<CLo
     const std::string message = std::format(
       "Vulkan 1.3 passed the startup check, but the game window could not be created.\n\n"
       "{}\n\n"
-      "See Supermodel.log for the Vulkan device details. The OpenGL-compatible build "
-      "(Supermodel-LegacyOG.exe) can be used if the problem persists.",
+      "See Model3Vulkan.log for the Vulkan device details.",
       OSD::Platform::GetError());
     ErrorLog("Vulkan: the session could not create its window or swapchain: %s", OSD::Platform::GetError());
     OSD::SDL3App::StartupPrint("Model3-Vulkan: {}", message);
@@ -8812,36 +9076,29 @@ static bool InitializeSDL3Startup()
   s_configFilePath = paths->configFile.string();
 
   /*
-   * First run of this executable on an existing installation: seed its own settings file from the
-   * shared Supermodel.ini so the ROM path, control mappings and display preferences carry over.
-   * The OpenGL-only keys in that copy are ignored by this build (Vulkan is forced at session
-   * start), but losing every setting on upgrade would look exactly like a factory reset.
+   * Keep only Model3-Vulkan.ini in Data/Config/.
+   * If a legacy Supermodel.ini is still present from an older installation, migrate it by renaming
+   * when Model3-Vulkan.ini does not exist yet, or remove the stale file when Model3-Vulkan.ini is
+   * already present.
    */
   {
-    std::error_code existsError;
-    const bool haveOwnSettings = std::filesystem::exists(paths->configFile, existsError) && !existsError;
-    if (!haveOwnSettings)
+    std::error_code ec;
+    const std::filesystem::path configDirectory = paths->configFile.parent_path();
+    const std::filesystem::path legacyIni = configDirectory / "Supermodel.ini";
+    const bool haveOwnSettings = std::filesystem::exists(paths->configFile, ec) && !ec;
+    const bool haveLegacyIni = std::filesystem::is_regular_file(legacyIni, ec) && !ec;
+    if (haveLegacyIni)
     {
-      const std::filesystem::path configDirectory = paths->configFile.parent_path();
-      const char* const previousNames[] = { "Supermodel.ini" };
-      for (const char* name : previousNames)
+      if (!haveOwnSettings)
       {
-        const std::filesystem::path source = configDirectory / name;
-        std::error_code sourceError;
-        if (!std::filesystem::is_regular_file(source, sourceError) || sourceError)
-          continue;
-
-        std::error_code copyError;
-        std::filesystem::copy_file(source, paths->configFile,
-          std::filesystem::copy_options::none, copyError);
-        if (copyError)
-        {
-          OSD::SDL3App::StartupPrint("Model3-Vulkan: could not seed settings from '{}': {}",
-            source.string(), copyError.message());
-          break;
-        }
-        OSD::SDL3App::StartupPrint("Model3-Vulkan: seeded settings from '{}'.", source.string());
-        break;
+        std::filesystem::rename(legacyIni, paths->configFile, ec);
+        if (!ec)
+          OSD::SDL3App::StartupPrint("Model3-Vulkan: migrated '{}' -> '{}'.",
+            legacyIni.string(), paths->configFile.string());
+      }
+      else
+      {
+        std::filesystem::remove(legacyIni, ec);
       }
     }
   }
@@ -8863,17 +9120,26 @@ static bool InitializeSDL3Startup()
   else
   {
     OSD::SDL3App::StartupPrint("Model3-Vulkan: host core: {}", (*host)->Version());
-    auto hostConfig = (*host)->LoadIni(paths->configFile);
-    if (hostConfig)
+    std::error_code iniEc;
+    if (!std::filesystem::exists(paths->configFile, iniEc))
     {
-      OSD::SDL3App::StartupPrint(
-        "Model3-Vulkan: host core ini: {}x{}, MSAA {}, mouse {} Hz",
-        hostConfig->XResolution, hostConfig->YResolution, hostConfig->Msaa, hostConfig->MousePollingHz);
+      // A fresh install has no ini until the settings layer writes one; that is not a failure.
+      OSD::SDL3App::StartupPrint("Model3-Vulkan: host core ini: not created yet (first run).");
     }
     else
     {
-      OSD::SDL3App::StartupPrint("Model3-Vulkan: host core ini failed: {}",
-        hostConfig.error().message);
+      auto hostConfig = (*host)->LoadIni(paths->configFile);
+      if (hostConfig)
+      {
+        OSD::SDL3App::StartupPrint(
+          "Model3-Vulkan: host core ini: {}x{}, MSAA {}, mouse {} Hz",
+          hostConfig->XResolution, hostConfig->YResolution, hostConfig->Msaa, hostConfig->MousePollingHz);
+      }
+      else
+      {
+        OSD::SDL3App::StartupPrint("Model3-Vulkan: host core ini failed: {}",
+          hostConfig.error().message);
+      }
     }
   }
 #endif
@@ -8957,16 +9223,47 @@ int main(int argc, char **argv)
     return 1;
   }
   SetLogger(logger);
-  InfoLog("Supermodel Version " SUPERMODEL_VERSION);
+  InfoLog(MODEL3VULKAN_TITLE_FULL " - " MODEL3VULKAN_AUTHOR " (save-state format " SUPERMODEL_VERSION ", built " __DATE__ " " __TIME__ ")");
   InfoLog("Started as:");
   for (int i = 0; i < argc; i++)
     InfoLog("  argv[%d] = %s", i, argv[i]);
+  InfoLog("Paths: base='%s', config='%s', log='%s'.",
+    FileSystemPath::GetBasePath().c_str(), s_configFilePath.c_str(), s_logFilePath.c_str());
+#ifdef _WIN32
+  {
+    MEMORYSTATUSEX memStatus{};
+    memStatus.dwLength = sizeof(memStatus);
+    if (GlobalMemoryStatusEx(&memStatus))
+    {
+      InfoLog("Host memory: %llu MB total physical, %llu MB available (%lu%% in use).",
+        (unsigned long long)(memStatus.ullTotalPhys / (1024ull * 1024ull)),
+        (unsigned long long)(memStatus.ullAvailPhys / (1024ull * 1024ull)),
+        (unsigned long)memStatus.dwMemoryLoad);
+    }
+  }
+#endif
+  InfoLog("Host CPU: %u logical processor(s) reported by hardware_concurrency.",
+    std::thread::hardware_concurrency());
 
   // Load up what settings we have so far. The complete file is passed to the GUI, which edits
   // only the global section and preserves any game-specific sections. Editing the game-specific
   // sections themselves is not supported atm but we can look at this later.
   Util::Config::Node fileConfig("Global");
   Util::Config::FromINIFile(&fileConfig, s_configFilePath);
+  if (fileConfig.TryGet("GameXMLFile") != nullptr)
+  {
+    const std::string cfgXml = fileConfig["GameXMLFile"].ValueAsDefault<std::string>("");
+    if (!cfgXml.empty())
+    {
+      std::error_code xmlEc;
+      const std::string resolvedXml = FileSystemPath::ResolvePath(cfgXml);
+      if (!std::filesystem::exists(std::filesystem::path(resolvedXml), xmlEc) || xmlEc)
+      {
+        InfoLog("Config: repairing stale GameXMLFile '%s' -> '%s'.", cfgXml.c_str(), s_gameXMLFilePath.c_str());
+        fileConfig.Set("GameXMLFile", s_gameXMLFilePath);
+      }
+    }
+  }
   // Before the copy is handed to the settings window (which writes it back) and before it is merged
   // into the run-time configuration, so both the session and the next save see the repaired values.
   RepairSwitchAxisMappings(fileConfig);

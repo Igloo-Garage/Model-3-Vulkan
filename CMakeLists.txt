@@ -40,8 +40,8 @@ endif()
 # Options
 # -----------------------------------------------------------------------------
 
-option(USE_SDL2 "Build the SDL2 compatibility executable" ON)
-option(USE_SDL3 "Build the SDL3 low-latency executable" OFF)
+option(USE_SDL2 "Build the SDL2 compatibility executable" OFF)
+option(USE_SDL3 "Build the SDL3 low-latency executable" ON)
 option(USE_SDL3_NET "Link SDL3_net into the SDL3 executable" OFF)
 option(SUPERMODEL_ENABLE_DEBUGGER "Build the console debugger" OFF)
 option(SUPERMODEL_LTO "Enable IPO/LTO in Release" OFF)
@@ -138,6 +138,20 @@ if(USE_SDL2)
     set(SDL2_DISABLE_UNINSTALL ON CACHE BOOL "" FORCE)
     set(SDL2_DISABLE_SDL2MAIN OFF CACHE BOOL "" FORCE)
     set(SDL_FORCE_STATIC_VCRT ON CACHE BOOL "" FORCE)
+
+    #
+    # SDL2's macOS backend is written in Objective-C, but SDL2 never enables the OBJC
+    # language itself.  CMake then compiles its .m files with the Objective-C++ rules and
+    # injects a C++ standard, which clang rejects because the language is Objective-C:
+    #
+    #   error: invalid argument '-std=c++17' not allowed with 'Objective-C'
+    #
+    # Enabling OBJC here makes those files use the proper language.  Nothing else in this
+    # project compiles Objective-C (FileDialogs.mm stays Objective-C++).
+    #
+    if(APPLE)
+        enable_language(OBJC)
+    endif()
 
     add_subdirectory(
         "${CMAKE_CURRENT_SOURCE_DIR}/Libraries/SDL2-2.30.11"
@@ -747,6 +761,14 @@ function(supermodel_add_platform_target backend)
             CXX_EXTENSIONS OFF)
         target_compile_features(${target_name} PRIVATE cxx_std_23)
         target_compile_definitions(${target_name} PRIVATE SUPERMODEL_CXX23_TARGET=1)
+
+        # Zig's clang driver turns -Wdate-time into an error in release builds to keep
+        # output reproducible. The startup banner stamps the build date and time on
+        # purpose (see the InfoLog line in Main.cpp), so keep the diagnostic off for
+        # this target instead of dropping the timestamp.
+        if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+            target_compile_options(${target_name} PRIVATE -Wno-date-time)
+        endif()
     endif()
 
     target_compile_definitions(${target_name}

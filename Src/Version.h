@@ -77,7 +77,7 @@
  * reusing a version updates (and overwrites) the previous release rather than creating a new one.
  */
 #ifndef MODEL3VULKAN_VERSION
-#define MODEL3VULKAN_VERSION	"0.9.8.6m"
+#define MODEL3VULKAN_VERSION	"0.9.9.6"
 #endif
 
 /*
