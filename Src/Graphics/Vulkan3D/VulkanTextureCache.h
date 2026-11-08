@@ -75,8 +75,17 @@ public:
 	 */
 	uint64_t TextureHash(int page, int x, int y, int width, int height, int format);
 
-	// Queues a PNG export of a region, unless this hash has already been dumped this session.
-	void DumpTexture(uint64_t hash, int page, int x, int y, int width, int height, int format);
+	/*
+	 * Queues a PNG export of a region, unless this hash has already been dumped this session.
+	 *
+	 * useAlpha says whether any material drawn with this rectangle reads the texture's alpha
+	 * (contour / alpha test). When none does, the export is written fully opaque: see QueueDump.
+	 * A sub-texture first seen through an alpha-ignoring material is dumped again if a material
+	 * that does read alpha turns up later, because material order is arbitrary and the file has
+	 * to end up matching what the renderer actually samples.
+	 */
+	void DumpTexture(uint64_t hash, int page, int x, int y, int width, int height, int format,
+		bool useAlpha);
 
 	// Bindless slot of a replacement texture, or -1 while it is absent or still loading.
 	int ResolveHDTexture(uint64_t hash, int wrapX, int wrapY);
@@ -306,6 +315,7 @@ private:
 	std::unordered_map<uint64_t, HashEntry> m_hashCache;
 
 	std::unordered_set<uint64_t> m_dumpedHashes;
+	std::unordered_set<uint64_t> m_dumpedOpaque;     // dumped, but with the source alpha flattened
 	bool m_dumpLimitReported = false;
 	std::string m_gameName;
 	CHDTexturePack m_hdPack;

@@ -26,6 +26,7 @@
 #define INCLUDED_VULKAN3D_H
 
 #include "Graphics/IRender3D.h"
+#include "IglooChaseCamera.h"
 #include "MotionInterpolation.h"
 #include "R3DSceneBuilder.h"
 #include "VulkanTextureCache.h"
@@ -139,7 +140,7 @@ private:
 	void ResolveOit(VkCommandBuffer cmd);
 	void DrawFog(VkCommandBuffer cmd, bool insideScenePass = false);
 	void CopyLos(VkCommandBuffer cmd, int priority);
-	void FillPush(R3DPush& push, const float modelView[16], const float projection[16], const New3D::Model& model, const New3D::Viewport& vp, uint32_t materialIndex, int layer) const;
+	void FillPush(R3DPush& push, const float modelView[16], const New3D::Model& model, const New3D::Viewport& vp, uint32_t materialIndex, int layer) const;
 	void FillMaterial(R3DMaterial& material, const New3D::Mesh& mesh, const New3D::Model& model);
 
 	const Util::Config::Node& m_config;
@@ -429,9 +430,13 @@ private:
 		TRS currBase;
 		float prevProjection[16] = {};
 		float currProjection[16] = {};
+		float prevYawLag = 0.0f;
+		float currYawLag = 0.0f;
+		float deltaYaw = 0.0f;
 		bool hasPrev = false;
 		bool cut = false;
 		bool hud = false;
+		bool stabilized = false;
 	};
 
 	struct InstanceMotion
@@ -455,6 +460,8 @@ private:
 		float emaAngle = 0.0f;
 		uint32_t samples = 0;
 		uint64_t lastSeenFrame = 0;
+		bool stabilizerValid = false;
+		float yawLag = 0.0f;
 	};
 
 	/*
@@ -508,6 +515,7 @@ private:
 	float m_instanceCutAngleDeg = 30.0f;
 	float m_cutDistanceScale = 8.0f;
 	int m_interpolationScope = 0;
+	Igloo::Camera::ChaseCameraStabilizer m_chaseStabilizer;
 
 	bool m_drew = false;
 	uint64_t m_frameSerial = 1;

@@ -29,6 +29,7 @@
 #define INCLUDED_INPUTS_H
 
 #include "InputTypes.h"
+#include "IglooInputFilter.h"
 #include "Types.h"
 #include "Util/NewConfig.h"
 #include <vector>
@@ -58,12 +59,11 @@ private:
    * short flick shows up as a one-frame camera snap. The filter runs once per emulated frame in
    * PollGameInputsLate(), after the raw axis has been sampled and before the CPU sees it.
    */
-  int m_gamepadSteeringSmoothing = 0;
-  bool m_steeringFilterValid = false;
-  double m_steeringFiltered = 0.0;
+  Igloo::Input::GamepadSteeringFilter m_steeringFilter;
   bool m_steeringProbe = false;
   UINT64 m_steeringProbeFrame = 0;
   void FilterSteering();
+  bool IsSteeringBoundToWheel() const;
 
   /*
    * Adds a switch input (eg button) to this collection.
@@ -194,6 +194,7 @@ public:
   bool m_vrCycle = false;      // cycling enabled
   int  m_vrCycleIndex = 2;     // active view (0-3); 2 is the default third-person view
   int  m_vrDefaultIndex = 2;   // view the cycle starts from
+  int  m_vrPulseFrames = 0;    // momentary pulse countdown (frames) so VR buttons are not held down permanently
   bool m_gameInputSuppressed = false;  // see SetGameInputSuppressed()
 
  
@@ -330,6 +331,7 @@ public:
    * Called from LoadFromConfig() and from the main loop so an in-game change is live.
    */
   void SetGamepadSteeringSmoothing(int preset);
+  void SetGamepadSteeringSensitivity(int percent);
   
   /*
    * Stores the current input mapping assignments to the given config object.

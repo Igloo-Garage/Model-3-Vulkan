@@ -44,6 +44,7 @@ namespace
 	{
 		// ---- Configuration labels (WidgetLabel) -------------------------------------------------
 		{ "PowerPC 频率 (MHz，0=自动)",     "PowerPC Frequency (MHz, 0=auto)" },
+		{ "PowerPC 执行模式##PowerPCMode",   "PowerPC Execution Mode##PowerPCMode" },
 		{ "多线程",                          "Multithreaded" },
 		{ "图形多线程",                      "Multithreaded GPU" },
 		{ "四边形渲染",                      "Quad Rendering" },
@@ -55,6 +56,8 @@ namespace
 		{ "用游戏背景填满两侧",            "Fill the sides with the game background" },
 		{ "把游戏底部的 2D 背景层横向拉满，填掉宽屏两侧的黑边。",
 		                                     "Stretches the game's bottom 2D background across the window, filling the side bars in widescreen." },
+	{ "C 纯解释器：逐条解释执行，最保守，排查问题和做对照时用。\nJIT 混合模式：把常用指令编译成 x86-64 原生代码，其余仍走同一套解释器处理函数。\n两者行为一致，只有速度不同。下一局生效。",
+		                                     "C interpreter: decodes one instruction at a time. The conservative choice, for diagnosing a problem and for A/B comparisons.\nHybrid JIT: translates the common instructions into native x86-64 code and calls the same interpreter handlers for the rest.\nBoth paths behave identically; only the speed differs. Takes effect on the next session." },
 		{ "关闭白闪",                        "Disable White Flash" },
 		{ "读档和切场景时，街机硬件会把整屏刷白；开启后跳过这层白闪。\n只影响观感，不影响模拟结果。",
 		                                     "The arcade hardware flashes the screen white during block culling, most visibly on loads and scene changes; this skips it.\nVisual only - the simulation is unaffected." },
@@ -68,6 +71,29 @@ namespace
 		{ "左右平衡",                        "Left/Right Balance" },
 		{ "前后声道",                        "Front/Rear Channels" },
 		{ "声道数",                          "Channels" },
+		{ "智能 5.1 声道上混",               "Smart 5.1 Surround Upmixer" },
+		{ "录制多声道无损音频",              "Record Multi-Channel Lossless Audio" },
+		{ "音频录制格式",                    "Audio Recording Format" },
+		{ "1（单声道）",                     "1 (Mono)" },
+		{ "2（立体声）",                     "2 (Stereo)" },
+		{ "4（4.0 四声道环绕）",             "4 (4.0 Quad Surround)" },
+		{ "6（5.1 环绕声）",                 "6 (5.1 Surround)" },
+		{ "WAV · 32-bit IEEE Float（无损浮点）", "WAV - 32-bit IEEE Float (Lossless)" },
+		{ "WAV · 16-bit PCM（标准整型）",    "WAV - 16-bit PCM (Standard Integer)" },
+		{ "FLAC · 24-bit PCM（无损压缩，高动态）", "FLAC - 24-bit PCM (Lossless, High Dynamic Range)" },
+		{ "FLAC · 16-bit PCM（无损压缩，小体积）", "FLAC - 16-bit PCM (Lossless, Compact)" },
+		{ "当「声道数」设为 6（5.1 环绕声）时，实时从 4.0 声道提取前后共模信号作为中置声道（Center），\n"
+		  "并通过 120Hz 二阶巴特沃斯低通滤波器提取引擎轰鸣与碰撞重低音送入低音炮（LFE）。",
+		                                     "When Channels is set to 6 (5.1 Surround), synthesizes the Center channel from front/rear common-mode signals\n"
+		                                     "and feeds the LFE subwoofer through a 2nd-order Butterworth low-pass filter (< 120 Hz)." },
+		{ "在混音终点将 4.0 / 5.1 多声道原始音频通过无锁环形缓冲异步录制成 WAV 或 FLAC 无损文件\n"
+		  "（保存在 Data/Recordings/Sound/），支持 Premiere / DaVinci Resolve / Audacity 直接识别全部独立音轨。",
+		                                     "Asynchronously records raw 4.0 / 5.1 multi-channel mix output to a lossless WAV or FLAC file\n"
+		                                     "(saved under Data/Recordings/Sound/) via a lock-free ring buffer for Premiere, DaVinci Resolve, and Audacity." },
+		{ "WAV 支持 32-bit IEEE Float（无损浮点，无削波）与 16-bit PCM；\n"
+		  "FLAC 规范仅定义整型无损压缩，提供 24-bit PCM（高动态范围）与 16-bit PCM（体积最小）。",
+		                                     "WAV supports 32-bit IEEE Float (unclipped lossless float) and 16-bit PCM;\n"
+		                                     "the FLAC standard defines integer-only lossless compression and offers 24-bit PCM (high dynamic range) and 16-bit PCM (compact)." },
 		{ "音频刷新率",                      "Audio Rate" },
 		{ "旧版音效 DSP",                    "Legacy Sound DSP" },
 		{ "交换左右声道",                    "Swap Stereo" },
@@ -115,6 +141,8 @@ namespace
 		{ "57.524 Hz（真实机台）",           "57.524 Hz (arcade exact)" },
 		{ "60 Hz（非 VRR / 60Hz 面板）",     "60 Hz (non-VRR / 60 Hz panel)" },
 		{ "仅玩家 1",                        "Player 1 only" },
+		{ "C 纯解释器（对照基准）",          "C interpreter (reference)" },
+		{ "JIT 混合模式（推荐）",            "Hybrid JIT (recommended)" },
 		{ "仅玩家 2",                        "Player 2 only" },
 		{ "玩家 1 和 2",                     "Players 1 and 2" },
 		{ "标准布局（Xbox / PS 通用）",      "Standard layout (Xbox / PS)" },
@@ -186,8 +214,8 @@ namespace
 		{ "重新加载高清纹理##ReloadHDTextures", "Reload HD textures##ReloadHDTextures" },
 		{ "读取 Data/Assets/HDTextures/<游戏>/ 里的替换贴图，按内容哈希匹配。\n支持 PNG、WebP 与 DDS（BC1/BC3/BC5/BC7，可压成 .dds.zst），\n分辨率可以是原图的 2x、4x、8x 等任意倍数，DDS 可自带 mip 链。\n找不到替换的贴图仍用原版。",
 		 "Reads replacements from Data/Assets/HDTextures/<set>/, matched by content hash.\nPNG, WebP and DDS are supported (BC1/BC3/BC5/BC7, optionally .dds.zst)\nat any scale (2x, 4x, 8x ...); DDS may carry its own mip chain.\nTextures without a replacement use the original." },
-		{ "把游戏实际使用的每块子贴图解码成 RGBA8 PNG，写到\nData/Assets/DumpTextures/<游戏>/，文件名带内容哈希。\n同一张内容只写一次；超分后放进 HDTextures 目录即可替换。",
-		                                     "Decodes every sub-texture the game draws to an RGBA8 PNG under\nData/Assets/DumpTextures/<set>/, with its content hash in the name.\nEach distinct texture is written once; upscale it and drop it into HDTextures." },
+		{ "把游戏实际使用的每块子贴图解码成 RGBA8 PNG，写到\nData/Assets/DumpTextures/<游戏>/，文件名带内容哈希。\n同一张内容只写一次；超分后放进 HDTextures 目录即可替换。\n贴图本身不带 alpha 的图按不透明导出；带 alpha 的图会保留\n原机的 1-bit 抖动，看图时可能看到白点。",
+			                                     "Decodes every sub-texture the game draws to an RGBA8 PNG under\nData/Assets/DumpTextures/<set>/, with its content hash in the name.\nEach distinct texture is written once; upscale it and drop it into HDTextures.\nTextures whose material ignores alpha are written opaque; alpha-keyed\nones keep the original 1-bit dither and may show white dots in a viewer." },
 		{ "（F4 切换替换/原版，F3 重扫；关闭面板后生效）",
 										 "(F4 switches replacements on/off, F3 rescans; applied when the panel closes)" },
 		{ "替换贴图：Data/Assets/HDTextures/<游戏>/（PNG / WebP / DDS）",
@@ -228,11 +256,24 @@ namespace
 		{ "视角切换",                        "View Cycling" },
 		{ "手柄转向",                        "Gamepad steering" },
 		{ "摇杆转向平滑##GamepadSteeringSmoothing", "Stick steering smoothing##GamepadSteeringSmoothing" },
-
-		// Steering smoothing help. Kept whole rather than split per line: a partial lookup would
-		// fall back to Chinese mid-paragraph, the same reason the Sinden text above is one entry.
-		{ "把手柄摇杆的阶跃输入压平，模拟方向盘阻尼。\n关闭：原始输入。\n轻度 / 中度 / 强力：约 35 / 50 / 75ms 平滑，依次更稳。\n只影响转向轴；真实方向盘建议关闭。",
-		                                     "Smooths the step-like stick input to imitate a wheel's damping.\nOff: raw input.\nLight / Medium / Strong: about 35 / 50 / 75 ms of smoothing, progressively steadier.\nOnly affects the steering axis; leave it off with a real wheel." },
+		{ "摇杆转向灵敏度 (%)##GamepadSteeringSensitivity", "Stick steering sensitivity (%)##GamepadSteeringSensitivity" },
+		{ "缩放手柄摇杆的转向输出上限（25%–100%）。\n觉得推一点摇杆车头就打死时，调到 60%–75% 会明显更稳；关闭平滑或使用真实方向盘时自动保持 100%。",
+		                                     "Scales the thumbstick's maximum steering output (25%-100%).\nIf a small stick push still turns too sharply, lower this to 60%-75%; automatically resets to 100% when smoothing is Off or a wheel is used." },
+		{ "把手柄摇杆的阶跃输入压平，模拟方向盘阻尼。\n"
+		  "关闭：原始 1:1 输入（灵敏度自动归位 100%）。\n"
+		  "轻度 / 中度 / 强力：约 55 / 95 / 155ms 平滑与非线性中心曲线，依次更稳。\n"
+		  "仅对手柄生效；当转向绑定在真实方向盘上时会自动旁路保持 1:1 直通。",
+		                                     "Smooths out step inputs from a gamepad thumbstick to simulate wheel damping.\n"
+		                                     "Off: raw 1:1 input (sensitivity resets to 100%).\n"
+		                                     "Light / Medium / Strong: ~55 / 95 / 155 ms smoothing with a non-linear centre curve.\n"
+		                                     "Applies to gamepads only; automatically bypassed (1:1 direct response) when steering is bound to a racing wheel." },
+		{ "追尾镜头防抖##ChaseCameraStabilizer", "Chase camera stabilizer##ChaseCameraStabilizer" },
+		{ "关闭（原始街机镜头）",            "Off (arcade camera)" },
+		{ "轻度（滤除微晃）",                "Light (damp micro-sway)" },
+		{ "标准（极品飞车式追随）",          "Standard (NFS-style follow)" },
+		{ "强力（镜头最稳）",                "Strong (steadiest horizon)" },
+		{ "围绕车身支点对相机朝向做弹簧阻尼平滑，车头左右微调时车身在画面内摆动而远景不晃。\n关闭：街机原始刚性追尾镜头。\n轻度 / 标准 / 强力：依次加大阻尼与弹性偏角上限；即时生效。",
+		                                     "Spring-damper smoothing around the car pivot so steering corrections turn the car inside a steady frame instead of whipping the horizon.\nOff: original rigid arcade chase camera.\nLight / Standard / Strong: progressively stronger damping and yaw slack; applies immediately." },
 
 		// Sinden light-gun border help text. Kept whole rather than split per line: the translation
 		// is the same sentence and a partial lookup would fall back to Chinese mid-paragraph.
@@ -349,8 +390,8 @@ namespace
 		                                     "Option 1: borderless; the desktop compositor sets the cadence. Simplest.\nOption 2: the display follows the emulator. Needs VRR.\nOption 3: locks the display to 57.5 Hz; create a custom resolution first.\nWhich one: use option 2 with VRR, otherwise option 1." },
 		{ "显示控制台窗口##ShowConsole",     "Show console window##ShowConsole" },
 		{ "Vulkan 校验层##VkValidation",     "Vulkan validation layers##VkValidation" },
-		{ "让 Vulkan 校验层逐帧检查绘制调用、描述符和同步，发现的问题写进 Supermodel.log。正常游玩请关闭（会明显变慢）；排查花屏、闪烁或崩溃时临时打开。",
-		                                     "Checks every frame's draw calls, descriptors and synchronisation with the Vulkan validation layers and writes the findings to Supermodel.log. Leave it off for normal play (it is much slower); turn it on temporarily when investigating corruption, flicker or crashes." },
+		{ "让 Vulkan 校验层逐帧检查绘制调用、描述符和同步，发现的问题写进 Model3Vulkan.log。正常游玩请关闭（会明显变慢）；排查花屏、闪烁或崩溃时临时打开。",
+		                                     "Checks every frame's draw calls, descriptors and synchronisation with the Vulkan validation layers and writes the findings to Model3Vulkan.log. Leave it off for normal play (it is much slower); turn it on temporarily when investigating corruption, flicker or crashes." },
 
 		// ---- Display device helper text ---------------------------------------------------------
 		{ "自动（默认高性能显卡）",          "Auto (default high-performance GPU)" },
@@ -624,9 +665,9 @@ namespace
 		{ "取消启动时自动运行",              "Clear Auto-Launch" },
 
 		// ---- Controls tab -----------------------------------------------------------------------
-		{ "力反馈 / 灵敏度",                 "FFB" },
-		{ "先在「常用」页勾选「力反馈」，这一页的设置才会生效。",
-		                                     "Tick \"Force feedback\" on the Common tab first; nothing on this page takes effect until it is on." },
+		{ "力反馈 / 灵敏度",                 "FFB / Sensitivity" },
+		{ "先在「常用」页勾选「力反馈」，下面的力反馈设置才会生效；「灵敏度」和「手柄转向」随时可用。",
+		                                     "Tick \"Force feedback\" on the Common tab for the force feedback settings below to take effect; Sensitivity and Stick steering always apply." },
 		{ "校准摇杆",                        "Calibrate Sticks" },
 		{ "摇杆/方向盘轴校准是命令行功能：用 -config-inputs 启动后按 B。手柄的轴由 SDL 归一化，通常不需要校准。",
 		                                     "Stick and wheel axis calibration is a command-line feature: start with -config-inputs and press B. Gamepad axes are normalised by SDL and usually need none." },
@@ -657,8 +698,8 @@ namespace
 		                                     "This overwrites the current settings. The ROM directory is only replaced when the one in the file exists on this machine." },
 		{ "选择文件",                        "Choose File" },
 		{ "保存到哪个文件？",                "Where should the settings be saved?" },
-		{ "默认位置：程序目录下的 Data\\Config\\Supermodel.ini",
-		                                     "Default location: Data\\Config\\Supermodel.ini next to the program." },
+		{ "默认位置：程序目录下的 Data\\Config\\Model3-Vulkan.ini",
+		                                     "Default location: Data\\Config\\Model3-Vulkan.ini next to the program." },
 		{ "保存到默认位置",                  "Save to Default" },
 		{ "另存为...",                       "Save as..." },
 		{ "设置另存为",                      "Save settings as" },
@@ -785,6 +826,35 @@ namespace
 		{ "Model 3-Vulkan(TM) 与 Igloo-Garage(TM) 是 REXABYTE SOFTWARE INC. 的商标与品牌资产；GPLv3 第 7(e) 条不授予商标权。",
 		                                     "Model 3-Vulkan(TM) and Igloo-Garage(TM) are trademarks and brand assets of REXABYTE SOFTWARE INC.; GPLv3 Section 7(e) grants no trademark rights." },
 
+		// ---- Wheel / Pedal Axis Calibration & H-Shifter Auto-Neutral ----------------------------
+		{ "方向盘与踏板轴死区 / 行程校准",   "Wheel & pedal axis deadzone / travel calibration" },
+		{ "独立踏板默认只识别后半段行程（0 到 32767）。将踏板轴的「起点模式」设为「全行程踏板（起点 -32768）」，即可从踩下瞬间起获得完整 0–100% 行程。",
+		                                     "Standalone pedals default to using only the upper half of their axis (0 to 32767). Set a pedal axis to 'Full-travel pedal (Off=-32768)' so it responds across the full 0-100% throw from the moment you press it." },
+		{ "未连接，可预设",                  "disconnected, presettable" },
+		{ "选择控制器##AxisCalibJoy",        "Controller##AxisCalibJoy" },
+		{ "轴 / 实时读数",                   "Axis / live value" },
+		{ "起点模式",                        "Rest / travel mode" },
+		{ "死区 (%)",                        "Deadzone (%)" },
+		{ "饱和度 (%)",                      "Saturation (%)" },
+		{ "起止点 (Min / Off / Max)",        "Range (Min / Off / Max)" },
+		{ "居中双向 (方向盘/摇杆 Off=0)",    "Centred bidirectional (wheel/stick Off=0)" },
+		{ "全行程踏板 (正向 -32768→32767)",  "Full-travel pedal (normal -32768->32767)" },
+		{ "全行程踏板 (反向 +32767→-32768)", "Full-travel pedal (inverted +32767->-32768)" },
+		{ "自定义起止点",                    "Custom Min/Off/Max" },
+		{ "最小值 (MinVal)",                 "Minimum raw value (MinVal)" },
+		{ "中心/起点值 (OffVal)：踏板设 -32768，方向盘设 0",
+		                                     "Center/off value (OffVal): use -32768 for pedals, 0 for steering wheels" },
+		{ "最大值 (MaxVal)",                 "Maximum raw value (MaxVal)" },
+		{ "取当前起点",                      "Set Off=now" },
+		{ "重置",                            "Reset" },
+		{ "将当前轴的实时读数直接设为中心/起点值 (OffVal)",
+		                                     "Set the axis center/off value (OffVal) to its current live reading" },
+		{ "H 挡松开回空挡",                  "H-shifter auto-neutral" },
+		{ "H 挡松开自动回空挡（按 1–4 挡生成）",
+		                                     "Auto-neutral on H-shifter release (from Gears 1-4)" },
+		{ "根据当前 1–4 挡已绑定的排挡杆按键，自动把 !JOY1_BUTTONx+... 组合写入「换挡空挡」，实现真实 H 挡摘挡即回空挡。",
+		                                     "Builds a !JOY1_BUTTONx+... expression from the buttons currently bound to Shift 1-4 and assigns it to Shift Neutral, so releasing any H-shifter gear returns to neutral automatically." },
+
 	};
 
 	/*
@@ -806,7 +876,7 @@ namespace
 		{ "Common Controls",                "通用控制" },
 		{ "4-Way Joysticks",                "四方向摇杆" },
 		{ "Fighting Game Buttons",          "格斗游戏按键" },
-		{ "Spikeout Buttons",               "Spikeout 按键" },
+		{ "Spikeout Buttons",               "锐击 按键" },
 		{ "Virtua Striker Buttons",         "VR 射手（足球）按键" },
 		{ "Racing Game Steering Controls",  "赛车：转向" },
 		{ "Racing Game Gear 4-Way Shift",   "赛车：四速换挡" },
@@ -1060,8 +1130,8 @@ namespace
 	const std::pair<std::string_view, const char*> kGameTitles[] =
 	{
 		{ "Cyber Troopers Virtual-On Oratorio Tangram", "电脑战机 Virtual-On 神谕探戈" },
-		{ "Daytona USA 2 - Battle on the Edge",         "戴通纳 USA 2 - 边缘之战" },
-		{ "Daytona USA 2 - Power Edition",              "戴通纳 USA 2 - 动力版" },
+		{ "Daytona USA 2 - Battle on the Edge",         "梦游美国 2：决战边缘" },
+		{ "Daytona USA 2 - Power Edition",              "梦游美国 2：动力版" },
 		{ "Dirt Devils",                                "泥地恶魔" },
 		{ "Emergency Call Ambulance",                   "紧急救护车" },
 		{ "Fighting Vipers 2",                          "格斗之蛇 2" },
@@ -1075,8 +1145,8 @@ namespace
 		{ "Sega Bass Fishing",                          "世嘉钓鱼" },
 		{ "Sega Rally 2",                               "世嘉拉力赛 2" },
 		{ "Ski Champ",                                  "滑雪冠军" },
-		{ "Spikeout",                                   "街头格斗" },
-		{ "Spikeout Final Edition",                     "街头格斗 最终版" },
+		{ "Spikeout",                                   "锐击" },
+		{ "Spikeout Final Edition",                     "锐击 最终版" },
 		{ "Star Wars Trilogy Arcade",                   "星球大战三部曲 街机版" },
 		{ "The Lost World",                             "失落的世界" },
 		{ "The Ocean Hunter",                           "海洋猎人" },

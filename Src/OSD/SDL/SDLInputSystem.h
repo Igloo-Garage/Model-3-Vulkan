@@ -308,6 +308,7 @@ public:
 
 	void RefreshPointer();
 	void RefreshState();
+	void RefreshJoyStateOnly() override;
 
 	// Copies the platform snapshot into the caches the bindings read; shared by Poll() and
 	// RefreshState().

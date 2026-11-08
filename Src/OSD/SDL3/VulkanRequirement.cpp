@@ -200,7 +200,7 @@ void AppendToStartupLog(const std::string& text)
 {
     std::error_code error;
     const std::filesystem::path logPath =
-        std::filesystem::path(FileSystemPath::GetPath(FileSystemPath::Log)) / "Supermodel.log";
+        std::filesystem::path(FileSystemPath::GetPath(FileSystemPath::Log)) / "Model3Vulkan.log";
 
     std::ofstream out(logPath, std::ios::app);
     if (out)

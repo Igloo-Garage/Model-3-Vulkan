@@ -690,7 +690,7 @@ int CHDTexturePack::Resolve(uint64_t hash, int wrapU, int wrapV)
 }
 
 void CHDTexturePack::QueueDump(uint64_t hash, int page, int x, int y, int width, int height,
-	int format, const uint16_t* pageRam, int pageWidth, int pageHeight)
+	int format, const uint16_t* pageRam, int pageWidth, int pageHeight, bool keepAlpha)
 {
 	if (!m_dumpEnabled || hash == 0 || pageRam == nullptr || width <= 0 || height <= 0)
 		return;
@@ -712,6 +712,7 @@ void CHDTexturePack::QueueDump(uint64_t hash, int page, int x, int y, int width,
 	job.width = (uint32_t)width;
 	job.height = (uint32_t)height;
 	job.format = format;
+	job.keepAlpha = keepAlpha;
 	job.texels.resize((size_t)width * height);
 	const int maskX = pageWidth - 1;
 	const int maskY = pageHeight - 1;
@@ -850,6 +851,22 @@ void CHDTexturePack::DumperMain()
 		for (size_t i = 0; i < job.texels.size(); ++i)
 			DecodeTexel(job.format, job.texels[i], &rgba[i * 4]);
 
+		/*
+		 * Alpha that no material reads is not part of the picture.
+		 *
+		 * T1RGB5 spends bit 15 and the 4-bit formats spend their alpha nibble on a 1-bit mask, and
+		 * Model 3 art uses it as a dither pattern for translucency. A material without contour and
+		 * without alpha test never samples it - the shader overwrites alpha with 1 - so writing the
+		 * raw bit turns a clean photo into one covered in white dots as soon as the image is viewed
+		 * (or uploaded to GitHub) on a light background. That looks like a broken dump and hides the
+		 * fact that the RGB is exactly right.
+		 */
+		if (!job.keepAlpha)
+		{
+			for (size_t i = 0; i < job.texels.size(); ++i)
+				rgba[i * 4 + 3] = 255;
+		}
+
 		// WriteRGBA follows the older helper convention and reports true on failure.
 		if (Util::PNG::WriteRGBA(job.path, rgba.data(), (int32_t)job.width, (int32_t)job.height))
 		{
@@ -860,6 +877,10 @@ void CHDTexturePack::DumperMain()
 		{
 			std::lock_guard<std::mutex> guard(m_dumperMutex);
 			++m_dumpedCount;
+			if (!job.keepAlpha && m_alphaFlattened++ == 0)
+				InfoLog("HD textures: '%s' is drawn by materials that ignore the texture's alpha; the dump "
+					"is written opaque (the source bit is a 1-bit transparency dither, not colour data).",
+					job.path.c_str());
 			if (m_dumpedCount == 1)
 				InfoLog("HD textures: dumped the first texture to '%s'.", job.path.c_str());
 		}

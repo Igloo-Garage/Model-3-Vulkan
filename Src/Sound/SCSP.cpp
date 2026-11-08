@@ -67,6 +67,7 @@ Anyways credit to R. Belmont and ElSemi for the code, and for being awesome emul
 
 #include "Supermodel.h"
 #include "SCSPDSP.h"
+#include "Sound/IglooAudioDSP.h"
 #include "OSD/Thread.h"
 
 
@@ -326,6 +327,49 @@ struct _SCSP
 } SCSPs[MAX_SCSP],*SCSP=SCSPs;
 
 static signed short *RBUFDST;	//this points to where the sample will be stored in the RingBuf
+static UINT32 s_fmModulatorMask = 0; // Bitmask of slots currently referenced as FM modulators on the active SCSP
+
+static inline INT16 FetchSlotSample(_SCSP *chip, _SLOT *slot, INT32 sampleIndex) noexcept
+{
+	const INT32 lsa = (INT32)LSA(slot);
+	const INT32 lea = (INT32)LEA(slot);
+	if (sampleIndex < 0)
+	{
+		if (LPCTL(slot) == 1 && lea > lsa)
+			sampleIndex = lsa + ((sampleIndex - lsa) % (lea - lsa) + (lea - lsa)) % (lea - lsa);
+		else
+			sampleIndex = 0;
+	}
+	else if (lea > 0 && sampleIndex >= lea)
+	{
+		switch (LPCTL(slot))
+		{
+		case 1: // normal loop
+			if (lea > lsa)
+				sampleIndex = lsa + ((sampleIndex - lsa) % (lea - lsa));
+			else
+				sampleIndex = lea - 1;
+			break;
+		case 2: // reverse loop
+		case 3: // ping-pong
+		default:
+			sampleIndex = lea - 1;
+			break;
+		}
+	}
+
+	const UINT32 baseOffset = (UINT32)(slot->base - chip->SCSPRAM);
+	if (PCM8B(slot))
+	{
+		const UINT32 byteAddr = ((baseOffset + (UINT32)sampleIndex) & 0x7FFFFu) ^ 1u;
+		return (INT16)(((INT32)(*(signed char *)&chip->SCSPRAM[byteAddr])) << 8);
+	}
+	else
+	{
+		const UINT32 byteAddr = (baseOffset + ((UINT32)sampleIndex << 1)) & 0x7FFFEu;
+		return *(signed short *)&chip->SCSPRAM[byteAddr];
+	}
+}
 
 
 unsigned char DecodeSCI(unsigned char irq)
@@ -351,29 +395,28 @@ void CheckPendingIRQ()
 	/*
 	 * MIDI FIFO critical section
 	 *
-	 * NOTE: I don't think a mutex is really needed here, so I've disabled
-	 * this critical section.
+	 * The main thread pushes MIDI input (SCSP_MidiIn), so sample the FIFO state under the lock.
+	 * No caller holds MIDILock here.
 	 */
-	//if (g_Config.multiThreaded)
-	//	MIDILock->Lock();
+	bool midiInPending;
+	if (s_multiThreaded)
+		MIDILock->Lock();
+	midiInPending = (MidiW != MidiR);
+	if (s_multiThreaded)
+		MIDILock->Unlock();
 
-	if(MidiW!=MidiR)
+	if(midiInPending)
 	{
-		//if (g_Config.multiThreaded)
-		//	MIDILock->Unlock();
-
 		//SCSP.data[0x20/2]|=0x8;	//Hold midi line while there are commands pending
 
 		//Int68kCB(IrqMidi);
 		//printf("68K: MIDI IRQ\n");
 		//ErrorLogMessage("Midi");
 
-		SCSP->data[0x20 / 2] |= 8;
+		SCSP = SCSPs + 0;
+		SCSPs->data[0x20 / 2] |= 8;
 		pend |= 8;
 	}
-
-	//if (g_Config.multiThreaded)
-	//	MIDILock->Unlock();
 
 	unsigned int irqLevel = 0;
 
@@ -395,7 +438,7 @@ void CheckPendingIRQ()
 	if (pend & en & 0x8)
 	{
 		irqLevel = (IrqMidi > irqLevel) ? IrqMidi : irqLevel;
-		SCSP->data[0x20 / 2] &= ~8;
+		SCSPs->data[0x20 / 2] &= ~8;
 	}
 
 	Int68kCB(irqLevel);
@@ -649,6 +692,8 @@ Result SCSP_Init(const Util::Config::Node &config, int n)
 		SCSP=SCSPs+1;
 		memset(SCSP,0,sizeof(_SCSP));
 		SCSP->Master=0;
+		SCSP->SCSPRAM_LENGTH = 512 * 1024;
+		SCSP->DSP.SCSPRAM_LENGTH = (512 * 1024) / 2;
 		HasSlaveSCSP=1;
 #ifdef USEDSP
 		SCSPDSP_Init(&SCSP->DSP);
@@ -787,7 +832,10 @@ Result SCSP_Init(const Util::Config::Node &config, int n)
 	}
 
 	for(int i=0;i<32;++i)
+	{
 		SCSPs[0].Slots[i].slot=i;
+		SCSPs[1].Slots[i].slot=i;
+	}
 
 #ifdef USEDSP
 	//allocate 0x300 (over 1 frame) * 32 slots * 16 bit
@@ -819,6 +867,18 @@ void SCSP_SetRAM(int n,unsigned char *r)
 #endif
 }
 
+static void UpdateSlotEnvelopeRates(_SLOT *slot)
+{
+	int octave = (OCT(slot) ^ 8) - 8;
+	int rate = (KRS(slot) != 0xf) ? (octave + 2 * KRS(slot) + ((FNS(slot) >> 9) & 1)) : 0;
+	slot->EG.AR = Get_AR(rate, AR(slot));
+	slot->EG.D1R = Get_DR(rate, D1R(slot));
+	slot->EG.D2R = Get_DR(rate, D2R(slot));
+	slot->EG.RR = Get_DR(rate, RR(slot));
+	slot->EG.DL = 0x1f - DL(slot);
+	slot->EG.EGHOLD = EGHOLD(slot);
+}
+
 void SCSP_UpdateSlotReg(int s,int r)
 {
 	struct _SLOT *slot = SCSP->Slots + s;
@@ -846,18 +906,25 @@ void SCSP_UpdateSlotReg(int s,int r)
 			slot->data[0] &= ~0x1000;
 		}
 		break;
+	case 0x8:
+	case 0x9:
+	case 0xA:
+	case 0xB:
+		UpdateSlotEnvelopeRates(slot);
+		break;
 	case 0x10:
 	case 0x11:
 		slot->step = SCSP_Step(slot);
-		break;
-	case 0xA:
-	case 0xB:
-		slot->EG.RR = Get_DR(0, RR(slot));
-		slot->EG.DL = 0x1f - DL(slot);
+		UpdateSlotEnvelopeRates(slot);
 		break;
 	case 0x12:
 	case 0x13:
 		Compute_LFO(slot);
+		if (LFORE(slot))
+		{
+			slot->PLFO.phase = 0;
+			slot->ALFO.phase = 0;
+		}
 		break;
 	}
 }
@@ -1005,10 +1072,11 @@ void SCSP_UpdateRegR(int reg)
 		MidiInFill--;
 		SCSP->data[0x4 / 2] = v;
 
-		CheckPendingIRQ();
-
 		if (s_multiThreaded)
 			MIDILock->Unlock();
+
+		// Called without the lock held: CheckPendingIRQ takes it itself to read the FIFO state.
+		CheckPendingIRQ();
 	}
 	break;
 	case 8:
@@ -1364,9 +1432,12 @@ signed int inline SCSP_UpdateSlot(_SLOT *slot)
 		addr2 = (slot->nxt_addr >> (SHIFT - 1)) & 0x7fffe;
 	}
 
-	if (MDL(slot) != 0 || MDXSL(slot) != 0 || MDYSL(slot) != 0)
+	const bool isFmCarrier = (MDL(slot) != 0 || MDXSL(slot) != 0 || MDYSL(slot) != 0);
+	const bool isFmModulator = ((s_fmModulatorMask & (1u << (slot->slot & 31))) != 0);
+
+	if (isFmCarrier)
 	{
-		signed int smp = (SCSPs->RINGBUF[(SCSPs->BUFPTR + MDXSL(slot)) & 63] + SCSPs->RINGBUF[(SCSPs->BUFPTR + MDYSL(slot)) & 63]) / 2;
+		signed int smp = (SCSP->RINGBUF[(SCSP->BUFPTR + MDXSL(slot)) & 63] + SCSP->RINGBUF[(SCSP->BUFPTR + MDYSL(slot)) & 63]) / 2;
 		smp <<= 0xA; // associate cycle with 1024
 		// Here down below, a sample range of 24 is needed for VF3 to sound correct.
 		smp >>= 0x18 - MDL(slot); // ex. for MDL=0xF, sample range corresponds to +/- 64 pi (32=2^5 cycles) so shift by 11 (16-5 == 0x1A-0xF)
@@ -1381,38 +1452,35 @@ signed int inline SCSP_UpdateSlot(_SLOT *slot)
 			addr1 &= 0x7ffff; addr2 &= 0x7ffff;
 		}
 	}
-	//if (SSCTL(slot) == 0) {
-		if (PCM8B(slot))	//8 bit signed
-		{
-			signed char p1 = *(signed char *) &(slot->base[addr1 ^ 1]);
-			signed char p2 = *(signed char *) &(slot->base[addr2 ^ 1]);
-			int s;
-			signed int fpart = slot->cur_addr&((1 << SHIFT) - 1);
-			//sample=(p[0])<<8;
-			s = (int)(p1 << 8)*((1 << SHIFT) - fpart) + (int)(p2 << 8)*fpart;
-			sample = (s >> SHIFT);
-		}
-		else	//16 bit signed (endianness?)
-		{
-			signed short p1 = *(signed short *) &(slot->base[addr1]);
-			signed short p2 = *(signed short *) &(slot->base[addr2]);
-			int s;
-			signed int fpart = slot->cur_addr&((1 << SHIFT) - 1);
-			//sample=(p[0]);
-			s = (int)(p1)*((1 << (SHIFT)) - fpart) + (int)(p2)*fpart;
-			sample = (s >> (SHIFT));
 
-			//sample=((p[0]>>8)&0xFF)|(p[0]<<8);
-			//s=(int) p[0]*((1<<SHIFT)-fpart)+(int) p[1]*fpart;
-			//sample=s>>SHIFT;
-
-			/*		if(SBCTL(slot)&1)	//reverse data
-			sample^=0x7fff;
-			if(SBCTL(slot)&2)	//reverse sign
-			sample^=0x8000;
-			*/
-		}
-	//}
+	const signed int fpart = slot->cur_addr & ((1 << SHIFT) - 1);
+	if (!isFmCarrier && !isFmModulator && SCSP->SCSPRAM != nullptr)
+	{
+		// Pure PCM voice: upgrade from 2-tap linear to 4-tap Catmull-Rom cubic spline interpolation
+		// to eliminate pitch-transposition aliasing while keeping FM phase-modulation slots untouched.
+		const INT32 idx1 = (INT32)(slot->cur_addr >> SHIFT);
+		const INT32 idx2 = (INT32)(slot->nxt_addr >> SHIFT);
+		const INT32 dir  = slot->Back ? -1 : 1;
+		const INT32 y0 = FetchSlotSample(SCSP, slot, idx1 - dir);
+		const INT32 y1 = FetchSlotSample(SCSP, slot, idx1);
+		const INT32 y2 = FetchSlotSample(SCSP, slot, idx2);
+		const INT32 y3 = FetchSlotSample(SCSP, slot, idx2 + dir);
+		sample = Igloo::AudioDSP::CubicInterpolate4Tap(y0, y1, y2, y3, fpart);
+	}
+	else if (PCM8B(slot))	//8 bit signed (FM slot path)
+	{
+		signed char p1 = *(signed char *) &(slot->base[addr1 ^ 1]);
+		signed char p2 = *(signed char *) &(slot->base[addr2 ^ 1]);
+		int s = (int)(p1 << 8)*((1 << SHIFT) - fpart) + (int)(p2 << 8)*fpart;
+		sample = (s >> SHIFT);
+	}
+	else	//16 bit signed (FM slot path)
+	{
+		signed short p1 = *(signed short *) &(slot->base[addr1]);
+		signed short p2 = *(signed short *) &(slot->base[addr2]);
+		int s = (int)(p1)*((1 << (SHIFT)) - fpart) + (int)(p2)*fpart;
+		sample = (s >> (SHIFT));
+	}
 
 	if (SBCTL(slot) & 0x1)
 		sample ^= 0x7FFF;
@@ -1546,6 +1614,33 @@ void SCSP_DoMasterSamples(int nsamples)
 	float* bufrr = bufferrr;
 
 	/*
+	 * Precompute per-chip FM modulator slot masks for this frame so pure PCM slots can safely use
+	 * 4-tap cubic interpolation without altering any FM modulator or carrier waveform.
+	 */
+	UINT32 modMask0 = 0, modMask1 = 0;
+	for (INT32 sl = 0; sl < 32; ++sl)
+	{
+		if (SCSPs[0].Slots[sl].active)
+		{
+			_SLOT *s0 = &SCSPs[0].Slots[sl];
+			if (MDL(s0) != 0 || MDXSL(s0) != 0 || MDYSL(s0) != 0)
+			{
+				modMask0 |= (1u << ((sl + MDXSL(s0)) & 31));
+				modMask0 |= (1u << ((sl + MDYSL(s0)) & 31));
+			}
+		}
+		if (HasSlaveSCSP && SCSPs[1].Slots[sl].active)
+		{
+			_SLOT *s1 = &SCSPs[1].Slots[sl];
+			if (MDL(s1) != 0 || MDXSL(s1) != 0 || MDYSL(s1) != 0)
+			{
+				modMask1 |= (1u << ((sl + MDXSL(s1)) & 31));
+				modMask1 |= (1u << ((sl + MDYSL(s1)) & 31));
+			}
+		}
+	}
+
+	/*
 	 * Generate samples
 	 */
 	for (INT32 s = 0; s < nsamples; ++s)
@@ -1562,6 +1657,8 @@ void SCSP_DoMasterSamples(int nsamples)
 #endif
 			if (SCSPs[0].Slots[sl].active)
 			{
+				SCSP = &SCSPs[0];
+				s_fmModulatorMask = modMask0;
 				_SLOT *slot = SCSPs[0].Slots + sl;
 				UINT16 Enc;
 
@@ -1598,6 +1695,8 @@ void SCSP_DoMasterSamples(int nsamples)
 			{
 				if (SCSPs[1].Slots[sl].active)
 				{
+					SCSP = &SCSPs[1];
+					s_fmModulatorMask = modMask1;
 					_SLOT *slot = SCSPs[1].Slots + sl;
 					UINT16 Enc;
 
@@ -1657,8 +1756,29 @@ void SCSP_DoMasterSamples(int nsamples)
 				}
 			}
 		}
+		// Slots 16..17 control direct mixer routing for EXTS[0..1] (external digital audio inputs)
+		for (INT32 i = 0; i < 2; ++i)
+		{
+			_SLOT *slot = SCSPs[0].Slots + (16 + i);
+			if (EFSDL(slot) && SCSPs[0].DSP.EXTS[i] != 0)
+			{
+				UINT16 Enc = ((EFPAN(slot)) << 0x8) | ((EFSDL(slot)) << 0xd);
+				smpfl += (int)(masterBalance*(float)(((SCSPs[0].DSP.EXTS[i] * LPANTABLE[Enc]) >> SHIFT)));
+				smpfr += (int)(masterBalance*(float)(((SCSPs[0].DSP.EXTS[i] * RPANTABLE[Enc]) >> SHIFT)));
+			}
+			if (HasSlaveSCSP)
+			{
+				_SLOT *slot1 = SCSPs[1].Slots + (16 + i);
+				if (EFSDL(slot1) && SCSPs[1].DSP.EXTS[i] != 0)
+				{
+					UINT16 Enc = ((EFPAN(slot1)) << 0x8) | ((EFSDL(slot1)) << 0xd);
+					smprl += (int)(slaveBalance*(float)(((SCSPs[1].DSP.EXTS[i] * LPANTABLE[Enc]) >> SHIFT)));
+					smprr += (int)(slaveBalance*(float)(((SCSPs[1].DSP.EXTS[i] * RPANTABLE[Enc]) >> SHIFT)));
+				}
+			}
+		}
 
-		if (DAC18B((&SCSP[0])))
+		if (DAC18B((&SCSPs[0])))
 		{
 			smpfl = ICLIP18(smpfl);
 			smpfr = ICLIP18(smpfr);
@@ -2117,6 +2237,7 @@ void SCSP_LoadState(CBlockFile *StateFile)
 		StateFile->Read(&(SCSPs[i].DSP.Stopped), sizeof(SCSPs[i].DSP.Stopped));
 		StateFile->Read(&(SCSPs[i].DSP.LastStep), sizeof(SCSPs[i].DSP.LastStep));
 	}
+	SCSP = SCSPs + 0;
 }
 
 void SCSP_SetBuffers(float *leftBufferPtr, float *rightBufferPtr, float* leftRearBufferPtr, float* rightRearBufferPtr, int bufferLength)
@@ -2137,7 +2258,8 @@ void SCSP_SetFrameLength(int bufferLength)
 void SCSP_Deinit(void)
 {
 #ifdef USEDSP
-	free(SCSP->MIXBuf);
+	free(SCSPs[0].MIXBuf);
+	SCSPs[0].MIXBuf = NULL;
 #endif
 	delete MIDILock;
 	MIDILock = NULL;

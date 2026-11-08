@@ -246,6 +246,15 @@ void DrawAdvancedSettingsPanel(Util::Config::Node& config, bool overlayMode);
 void DrawHDTextureSettings(Util::Config::Node& config, bool overlayMode);
 
 /*
+ * PowerPC execution mode: the C interpreter or the x86-64 hybrid JIT.
+ *
+ * Draws its own control and help marker, no section heading: it belongs with the other
+ * Core keys and the surrounding list already separates them. The value is read when a
+ * game session builds its machine, so a change takes effect on the next launch.
+ */
+void DrawPowerPCModeSettings(Util::Config::Node& config);
+
+/*
  * CRT colour and 2D upscaling, shared by the settings window's Video page and the top of the
  * in-game panel.
  *

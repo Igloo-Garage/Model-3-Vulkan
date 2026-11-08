@@ -1306,8 +1306,10 @@ void SampleDisplay()
 		// The readout prints an integer rate; SDL3 reports a float. Rounded rather than truncated so
 		// 59.94 Hz reports 60, which is what the display's own OSD says.
 		g_display.refreshHz = (int)(mode.refreshHz + 0.5f);
-		g_display.width = mode.width;
-		g_display.height = mode.height;
+		// Device pixels, not the mode's coordinate size: a 4K Mac in its default scaled mode reports
+		// 1920x1080 with a density of 2, and the panel line is about the panel.
+		g_display.width = (int)std::lround((double)mode.width * mode.pixelDensity);
+		g_display.height = (int)std::lround((double)mode.height * mode.pixelDensity);
 		g_display.valid = true;
 	}
 }

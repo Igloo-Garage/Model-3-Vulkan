@@ -118,6 +118,22 @@
 #include "OSX/FileDialogs.h"
 #endif
 
+#if !defined(_WIN32)
+#include <strings.h>
+#endif
+
+// Case-insensitive compare for mapping tokens. Windows spells it _stricmp, POSIX spells it
+// strcasecmp; this translation unit does not include Supermodel.h, where the rest of the code
+// gets its alias, so keep a local one instead of depending on that header.
+static int CaseInsensitiveCompare(const char* a, const char* b)
+{
+#if defined(_WIN32)
+    return _stricmp(a, b);
+#else
+    return strcasecmp(a, b);
+#endif
+}
+
 /*
  * Settings window.
  *
@@ -569,17 +585,22 @@ static void UiTextColored(const ImVec4& colour, const char* label)
  * A small ring of buffers keeps concurrent or nested uses from overwriting each other within a
  * frame; ImGui copies the text it draws, so nothing has to outlive the call.
  */
-static void UiTextDim(const char* format, ...)
+static void UiTextDim(const char* text)
+{
+	PushHelpWrap();
+	ImGui::TextDisabled("%s", Tr(text));
+	PopHelpWrap();
+}
+
+template <typename Arg0, typename... Args>
+static void UiTextDim(const char* format, Arg0 arg0, Args... args)
 {
 	static thread_local char buffers[4][1024];
 	static thread_local int next = 0;
 	char* buffer = buffers[next];
 	next = (next + 1) % 4;
 
-	va_list args;
-	va_start(args, format);
-	vsnprintf(buffer, sizeof(buffers[0]), Tr(format), args);
-	va_end(args);
+	std::snprintf(buffer, sizeof(buffers[0]), Tr(format), arg0, args...);
 
 	PushHelpWrap();
 	ImGui::TextDisabled("%s", buffer);
@@ -610,17 +631,22 @@ static ImVec4 AttentionColour()
  * Warning-coloured line. Kept apart from UiTextDim so that a real problem does not read as one more
  * piece of the grey explanatory text around it.
  */
-static void UiTextWarn(const char* format, ...)
+static void UiTextWarn(const char* text)
+{
+	PushHelpWrap();
+	ImGui::TextColored(AttentionColour(), "%s", Tr(text));
+	PopHelpWrap();
+}
+
+template <typename Arg0, typename... Args>
+static void UiTextWarn(const char* format, Arg0 arg0, Args... args)
 {
 	static thread_local char buffers[2][1024];
 	static thread_local int next = 0;
 	char* buffer = buffers[next];
 	next = (next + 1) % 2;
 
-	va_list args;
-	va_start(args, format);
-	vsnprintf(buffer, sizeof(buffers[0]), Tr(format), args);
-	va_end(args);
+	std::snprintf(buffer, sizeof(buffers[0]), Tr(format), arg0, args...);
 
 	PushHelpWrap();
 	ImGui::TextColored(AttentionColour(), "%s", buffer);
@@ -637,17 +663,22 @@ static void UiTextWarn(const char* format, ...)
  * Named for what it does rather than reusing UiTextWarn, so that neither caller misrepresents the
  * other - see the note on the colour constant above.
  */
-static void UiTextHighlight(const char* format, ...)
+static void UiTextHighlight(const char* text)
+{
+	PushHelpWrap();
+	ImGui::TextColored(AttentionColour(), "%s", Tr(text));
+	PopHelpWrap();
+}
+
+template <typename Arg0, typename... Args>
+static void UiTextHighlight(const char* format, Arg0 arg0, Args... args)
 {
 	static thread_local char buffers[2][1024];
 	static thread_local int next = 0;
 	char* buffer = buffers[next];
 	next = (next + 1) % 2;
 
-	va_list args;
-	va_start(args, format);
-	vsnprintf(buffer, sizeof(buffers[0]), Tr(format), args);
-	va_end(args);
+	std::snprintf(buffer, sizeof(buffers[0]), Tr(format), arg0, args...);
 
 	PushHelpWrap();
 	ImGui::TextColored(AttentionColour(), "%s", buffer);
@@ -698,7 +729,7 @@ static bool HasDedicatedUI(const std::string& key)
         "Vulkan3DEngine", "VkValidation", "VulkanDevice",
 #endif
         "New3DEngine",
-        "XResolution", "YResolution", "FullScreen", "Stretch", "WideScreen", "VSync", "ShowFrameRate", "ShowStatsOsd", "StatsOsdStyle",
+        "XResolution", "YResolution", "FullScreen", "BorderlessWindow", "Stretch", "WideScreen", "VSync", "ShowFrameRate", "ShowStatsOsd", "StatsOsdStyle",
         "IntegerScale", "UiLanguage",
         // Interface appearance. Drawn by hand at the top of the 常用 page, together with the
         // language: they are both about the window rather than about the emulator.
@@ -714,8 +745,8 @@ static bool HasDedicatedUI(const std::string& key)
         "RefreshRateMode", "FixedRefreshRate",
         "MotionInterpolation", "LowLatency", "InterpolationScope",
         "CameraCutAngleDegrees", "InstanceCutAngleDegrees", "CutDistanceScale",
-        // Gamepad steering smoothing, drawn by hand on the 力反馈 / 灵敏度 page.
-        "GamepadSteeringSmoothing",
+        // Gamepad steering smoothing, sensitivity and chase camera stabilizer, drawn by hand on the 力反馈 / 灵敏度 page.
+        "GamepadSteeringSmoothing", "GamepadSteeringSensitivity", "ChaseCameraStabilizer",
         // The set starred in the game list right-click menu. It is not an emulator setting: it is a
         // list preference with its own menu item, and the generic renderer used to put a bare,
         // untranslated text box for it at the top of the 核心 page. Written straight to the ini.
@@ -725,6 +756,9 @@ static bool HasDedicatedUI(const std::string& key)
         // as a checkbox. The key and SM3D_INST_INTERP stay for experiments; listed here so the
         // generic renderer does not put an unlabelled tick box on the page instead.
         "InstanceInterpolation",
+        // PowerPC execution mode. Hand-drawn on the 核心 page as a two-item combo; the generic
+        // renderer would show it as a numeric slider from 0 to 1.
+        "PowerPCMode",
         // Test hook for the phase multiples; not something to offer as a setting.
         "PaceAssumePanelHz",
         // Bezel backdrop. Hand-drawn on the "画面" page, where a display option belongs.
@@ -785,6 +819,9 @@ static std::string WidgetLabel(const std::string& key)
         { "BalanceLeftRight", "左右平衡" },
         { "BalanceFrontRear", "前后声道" },
         { "NbSoundChannels", "声道数" },
+        { "SurroundUpmix51", "智能 5.1 声道上混" },
+        { "RecordWav", "录制多声道无损音频" },
+        { "RecordWavFormat", "音频录制格式" },
         { "SoundFreq", "音频刷新率" },
         { "FlipStereo", "交换左右声道" },
         { "DirectInputConstForceLeftMax", "恒力（左）" },
@@ -839,6 +876,15 @@ static const char* KeyHelpText(const std::string& key)
         { "NoWhiteFlash",
             "读档和切场景时，街机硬件会把整屏刷白；开启后跳过这层白闪。\n"
             "只影响观感，不影响模拟结果。" },
+        { "SurroundUpmix51",
+            "当「声道数」设为 6（5.1 环绕声）时，实时从 4.0 声道提取前后共模信号作为中置声道（Center），\n"
+            "并通过 120Hz 二阶巴特沃斯低通滤波器提取引擎轰鸣与碰撞重低音送入低音炮（LFE）。" },
+        { "RecordWav",
+            "在混音终点将 4.0 / 5.1 多声道原始音频通过无锁环形缓冲异步录制成 WAV 或 FLAC 无损文件\n"
+            "（保存在 Data/Recordings/Sound/），支持 Premiere / DaVinci Resolve / Audacity 直接识别全部独立音轨。" },
+        { "RecordWavFormat",
+            "WAV 支持 32-bit IEEE Float（无损浮点，无削波）与 16-bit PCM；\n"
+            "FLAC 规范仅定义整型无损压缩，提供 24-bit PCM（高动态范围）与 16-bit PCM（体积最小）。" },
     };
     const auto found = help.find(key);
     return found == help.end() ? nullptr : found->second;
@@ -1156,6 +1202,21 @@ static void CreateControls(Util::Config::Node& config, const std::string group)
                                 for (int i = 0; i < 2; i++)
                                     sVector[i] = Tr(names[i]);
                             }
+                            if (key == "NbSoundChannels" && sVector.size() == 4) {
+                                static const char* names[] = { "1（单声道）", "2（立体声）", "4（4.0 四声道环绕）", "6（5.1 环绕声）" };
+                                for (int i = 0; i < 4; i++)
+                                    sVector[i] = Tr(names[i]);
+                            }
+                            if (key == "RecordWavFormat" && sVector.size() == 4) {
+                                static const char* names[] = {
+                                    "WAV · 32-bit IEEE Float（无损浮点）",
+                                    "WAV · 16-bit PCM（标准整型）",
+                                    "FLAC · 24-bit PCM（无损压缩，高动态）",
+                                    "FLAC · 16-bit PCM（无损压缩，小体积）"
+                                };
+                                for (int i = 0; i < 4; i++)
+                                    sVector[i] = Tr(names[i]);
+                            }
                             if (key == "Crosshairs" && sVector.size() == 4) {
                                 static const char* names[] = { "关闭", "仅玩家 1", "仅玩家 2", "玩家 1 和 2" };
                                 for (int i = 0; i < 4; i++)
@@ -1375,6 +1436,94 @@ struct KeyBindState
     }
 };
 
+static std::string BuildHShifterNeutralMapping(const Util::Config::Node& config)
+{
+    static const char* const gearKeys[] = {
+        "InputGearShift1", "InputGearShift2", "InputGearShift3", "InputGearShift4"
+    };
+
+    std::vector<std::string> joyTokens;
+    for (const char* key : gearKeys)
+    {
+        const auto* node = config.TryGet(key);
+        if (!node || node->Empty())
+            continue;
+        std::string raw = node->ValueAs<std::string>();
+        size_t pos = 0;
+        while (pos < raw.size())
+        {
+            size_t end = raw.find_first_of(",+", pos);
+            if (end == std::string::npos)
+                end = raw.size();
+            std::string tok = Util::TrimWhiteSpace(raw.substr(pos, end - pos));
+            if (!tok.empty() && tok[0] == '!')
+                tok = Util::TrimWhiteSpace(tok.substr(1));
+            if (tok.size() > 3 &&
+                (tok[0] == 'J' || tok[0] == 'j') &&
+                (tok[1] == 'O' || tok[1] == 'o') &&
+                (tok[2] == 'Y' || tok[2] == 'y'))
+            {
+                bool exists = false;
+                for (const auto& existing : joyTokens)
+                {
+                    if (CaseInsensitiveCompare(existing.c_str(), tok.c_str()) == 0)
+                    {
+                        exists = true;
+                        break;
+                    }
+                }
+                if (!exists)
+                    joyTokens.push_back(tok);
+            }
+            pos = end + 1;
+        }
+    }
+
+    if (joyTokens.empty())
+        return std::string();
+
+    std::vector<std::string> keyFallbacks;
+    if (const auto* nNode = config.TryGet("InputGearShiftN"); nNode && !nNode->Empty())
+    {
+        for (const auto& part : SplitByComma(nNode->ValueAs<std::string>()))
+        {
+            std::string trimmed = Util::TrimWhiteSpace(part);
+            if (trimmed.size() > 4 &&
+                (trimmed[0] == 'K' || trimmed[0] == 'k') &&
+                (trimmed[1] == 'E' || trimmed[1] == 'e') &&
+                (trimmed[2] == 'Y' || trimmed[2] == 'y') &&
+                trimmed[3] == '_')
+            {
+                keyFallbacks.push_back(trimmed);
+            }
+        }
+    }
+    if (keyFallbacks.empty())
+        keyFallbacks.push_back("KEY_T");
+
+    std::string result;
+    for (const auto& k : keyFallbacks)
+    {
+        if (!result.empty())
+            result += ",";
+        result += k;
+    }
+
+    std::string releaseExpr;
+    for (const auto& jt : joyTokens)
+    {
+        if (!releaseExpr.empty())
+            releaseExpr += "+";
+        releaseExpr += "!";
+        releaseExpr += jt;
+    }
+
+    if (!result.empty())
+        result += ",";
+    result += releaseExpr;
+    return result;
+}
+
 static void BindKeys(Util::Config::Node& config, KeyBindState& kb, bool openPopup)
 {
     bool finish = false;
@@ -1437,6 +1586,16 @@ static void BindKeys(Util::Config::Node& config, KeyBindState& kb, bool openPopu
         if (UiButton("默认", ImVec2(120, 0))) {
             SetDefaultKeyVal(kb.input);
             kb.input->StoreToConfig(&config);
+        }
+
+        if (kb.input && std::strcmp(kb.input->id, "GearShiftN") == 0) {
+            if (UiButton("H 挡松开回空挡", ImVec2(150, 0))) {
+                std::string autoNeutral = BuildHShifterNeutralMapping(config);
+                if (!autoNeutral.empty()) {
+                    kb.input->SetMapping(autoNeutral.c_str());
+                    kb.input->StoreToConfig(&config);
+                }
+            }
         }
 
         if (UiButton("完成", ImVec2(120, 0))) {
@@ -1545,6 +1704,330 @@ static std::shared_ptr<CInputs> GetInputSystem(Util::Config::Node& config, OSD::
     }
 
     return nullptr;
+}
+
+static void DrawJoystickAxisCalibrationPanel(
+    Util::Config::Node& config,
+    std::shared_ptr<CInputs>& inputs,
+    OSD::Platform::Window* window)
+{
+    UiSep("方向盘与踏板轴死区 / 行程校准");
+    UiTextDim("独立踏板默认只识别后半段行程（0 到 32767）。将踏板轴的「起点模式」设为「全行程踏板（起点 -32768）」，即可从踩下瞬间起获得完整 0–100% 行程。");
+
+    if (inputs == nullptr)
+        inputs = GetInputSystem(config, window);
+
+    CInputSystem* sys = inputs ? inputs->GetInputSystem().get() : nullptr;
+    if (sys != nullptr)
+        sys->RefreshJoyStateOnly();
+
+    const int numJoys = (sys != nullptr && sys->GetNumJoysticks() > 0) ? sys->GetNumJoysticks() : 0;
+    static int s_selectedJoy = 0;
+    const int maxJoySlots = std::max(numJoys, 4);
+    if (s_selectedJoy < 0 || s_selectedJoy >= maxJoySlots)
+        s_selectedJoy = 0;
+
+    std::vector<std::string> joyLabels;
+    std::vector<const char*> joyLabelPtrs;
+    joyLabels.reserve(maxJoySlots);
+    for (int i = 0; i < maxJoySlots; ++i)
+    {
+        const JoyDetails* details = (sys != nullptr && i < numJoys) ? sys->GetJoyDetails(i) : nullptr;
+        if (details != nullptr && details->name[0] != '\0')
+            joyLabels.push_back(std::string("JOY") + std::to_string(i + 1) + ": " + details->name);
+        else
+            joyLabels.push_back(std::string("JOY") + std::to_string(i + 1) + " (" + Tr("未连接，可预设") + ")");
+    }
+    for (const auto& s : joyLabels)
+        joyLabelPtrs.push_back(s.c_str());
+
+    ComboRow(Tr("选择控制器##AxisCalibJoy"), &s_selectedJoy, joyLabelPtrs.data(), (int)joyLabelPtrs.size());
+
+    const JoyDetails* joyDetails = (sys != nullptr && s_selectedJoy < numJoys)
+        ? sys->GetJoyDetails(s_selectedJoy) : nullptr;
+
+    static const char* const axisIds[NUM_JOY_AXES] = {
+        "X", "Y", "Z", "RX", "RY", "RZ", "S1", "S2"
+    };
+    static const char* const modeItems[4] = {
+        "居中双向 (方向盘/摇杆 Off=0)",
+        "全行程踏板 (正向 -32768→32767)",
+        "全行程踏板 (反向 +32767→-32768)",
+        "自定义起止点"
+    };
+    static const char* modeItemsTr[4];
+
+    const std::string joyPrefix = std::string("InputJoy") + std::to_string(s_selectedJoy + 1);
+    bool anyChanged = false;
+
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const char* const* modeLabels = UiItems(modeItems, 4, modeItemsTr);
+
+    // Measure every column's natural unclipped width at the current DPI scale so headers, combo
+    // items, progress readouts and 6-char signed integers ("-32768") never truncate or overlap.
+    const float cellPad = style.CellPadding.x * 2.0f + 10.0f;
+    const float framePad = style.FramePadding.x * 2.0f;
+    const float smallGap = (std::max)(6.0f, style.ItemInnerSpacing.x);
+    const float midGap = (std::max)(8.0f, style.ItemSpacing.x);
+
+    const float numInputMinW = std::ceil(ImGui::CalcTextSize("-327688").x + framePad + 10.0f);
+    const float btnSetOffW = std::ceil(ImGui::CalcTextSize(Tr("取当前起点")).x + framePad + 6.0f);
+    const float btnResetW = std::ceil(ImGui::CalcTextSize(Tr("重置")).x + framePad + 6.0f);
+
+    float widestModeW = 0.0f;
+    for (int i = 0; i < 4; ++i)
+        widestModeW = (std::max)(widestModeW, ImGui::CalcTextSize(modeLabels[i]).x);
+
+    const char* const colHeaders[5] = {
+        Tr("轴 / 实时读数"),
+        Tr("起点模式"),
+        Tr("死区 (%)"),
+        Tr("饱和度 (%)"),
+        Tr("起止点 (Min / Off / Max)")
+    };
+
+    const float minColW[5] = {
+        std::ceil((std::max)(ImGui::CalcTextSize(colHeaders[0]).x,
+            ImGui::CalcTextSize("RX").x + ImGui::CalcTextSize("-32768").x + 56.0f) + cellPad),
+        std::ceil((std::max)(ImGui::CalcTextSize(colHeaders[1]).x,
+            widestModeW + ImGui::GetFrameHeight() + framePad + 6.0f) + cellPad),
+        std::ceil((std::max)(ImGui::CalcTextSize(colHeaders[2]).x,
+            ImGui::CalcTextSize("100%").x + 54.0f) + cellPad),
+        std::ceil((std::max)(ImGui::CalcTextSize(colHeaders[3]).x,
+            ImGui::CalcTextSize("200%").x + 54.0f) + cellPad),
+        std::ceil((std::max)(ImGui::CalcTextSize(colHeaders[4]).x,
+            numInputMinW * 3.0f + btnSetOffW + btnResetW + smallGap * 3.0f + midGap + 6.0f) + cellPad)
+    };
+
+    int visibleAxisCount = 0;
+    for (int axisNum = 0; axisNum < NUM_JOY_AXES; ++axisNum)
+    {
+        const std::string baseKey = joyPrefix + axisIds[axisNum];
+        const bool hasCustomInConfig =
+            config.TryGet(baseKey + "MinVal") != nullptr ||
+            config.TryGet(baseKey + "OffVal") != nullptr ||
+            config.TryGet(baseKey + "MaxVal") != nullptr ||
+            config.TryGet(baseKey + "DeadZone") != nullptr ||
+            config.TryGet(baseKey + "Saturation") != nullptr;
+        if (joyDetails == nullptr || joyDetails->hasAxis[axisNum] || hasCustomInConfig)
+            ++visibleAxisCount;
+    }
+
+    const float totalMinTableW = minColW[0] + minColW[1] + minColW[2] + minColW[3] + minColW[4] + 8.0f;
+    const float availTableW = ImGui::GetContentRegionAvail().x;
+    const bool useHorizontalScroll = availTableW > 0.0f && availTableW < totalMinTableW;
+
+    ImGuiTableFlags tableFlags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg;
+    ImVec2 tableOuterSize(0.0f, 0.0f);
+    if (useHorizontalScroll)
+    {
+        tableFlags |= ImGuiTableFlags_ScrollX | ImGuiTableFlags_SizingFixedFit;
+        const float rowH = ImGui::GetFrameHeight() + style.CellPadding.y * 2.0f;
+        const float headerH = ImGui::GetTextLineHeightWithSpacing() + style.CellPadding.y * 2.0f;
+        tableOuterSize = ImVec2(
+            availTableW,
+            headerH + rowH * (float)(std::max)(1, visibleAxisCount) + style.ScrollbarSize + 4.0f);
+    }
+    else
+    {
+        tableFlags |= ImGuiTableFlags_SizingStretchProp;
+    }
+
+    if (ImGui::BeginTable("AxisCalibTable", 5, tableFlags, tableOuterSize))
+    {
+        const ImGuiTableColumnFlags colFlag = useHorizontalScroll
+            ? ImGuiTableColumnFlags_WidthFixed
+            : ImGuiTableColumnFlags_WidthStretch;
+        for (int c = 0; c < 5; ++c)
+            ImGui::TableSetupColumn(colHeaders[c], colFlag, minColW[c]);
+        ImGui::TableHeadersRow();
+
+        for (int axisNum = 0; axisNum < NUM_JOY_AXES; ++axisNum)
+        {
+            const std::string baseKey = joyPrefix + axisIds[axisNum];
+            const bool hasCustomInConfig =
+                config.TryGet(baseKey + "MinVal") != nullptr ||
+                config.TryGet(baseKey + "OffVal") != nullptr ||
+                config.TryGet(baseKey + "MaxVal") != nullptr ||
+                config.TryGet(baseKey + "DeadZone") != nullptr ||
+                config.TryGet(baseKey + "Saturation") != nullptr;
+
+            if (joyDetails != nullptr && !joyDetails->hasAxis[axisNum] && !hasCustomInConfig)
+                continue;
+
+            int minVal = config.TryGet(baseKey + "MinVal")
+                ? config[baseKey + "MinVal"].ValueAsDefault<int>(DEFAULT_JOY_AXISMINVAL)
+                : DEFAULT_JOY_AXISMINVAL;
+            int offVal = config.TryGet(baseKey + "OffVal")
+                ? config[baseKey + "OffVal"].ValueAsDefault<int>(DEFAULT_JOY_AXISOFFVAL)
+                : DEFAULT_JOY_AXISOFFVAL;
+            int maxVal = config.TryGet(baseKey + "MaxVal")
+                ? config[baseKey + "MaxVal"].ValueAsDefault<int>(DEFAULT_JOY_AXISMAXVAL)
+                : DEFAULT_JOY_AXISMAXVAL;
+            int deadZone = config.TryGet(baseKey + "DeadZone")
+                ? (int)config[baseKey + "DeadZone"].ValueAsDefault<unsigned>(DEFAULT_JOY_DEADZONE)
+                : DEFAULT_JOY_DEADZONE;
+            int saturation = config.TryGet(baseKey + "Saturation")
+                ? (int)config[baseKey + "Saturation"].ValueAsDefault<unsigned>(DEFAULT_JOY_SATURATION)
+                : DEFAULT_JOY_SATURATION;
+
+            deadZone = std::clamp(deadZone, 0, 99);
+            saturation = std::clamp(saturation, 1, 200);
+
+            int mode = 3;
+            if (minVal == -32768 && offVal == 0 && maxVal == 32767)
+                mode = 0;
+            else if (minVal == -32768 && offVal == -32768 && maxVal == 32767)
+                mode = 1;
+            else if ((minVal == 32767 && offVal == 32767 && maxVal == -32768) ||
+                     (minVal == -32768 && offVal == 32767 && maxVal == 32767))
+                mode = 2;
+
+            const int rawVal = (sys != nullptr && s_selectedJoy < numJoys)
+                ? sys->ReadJoyAxisRaw(s_selectedJoy, axisNum) : 0;
+
+            bool rowChanged = false;
+            ImGui::PushID(axisNum);
+            ImGui::TableNextRow();
+
+            // Column 0: Axis name + live raw value progress bar
+            ImGui::TableSetColumnIndex(0);
+            ImGui::AlignTextToFramePadding();
+            ImGui::Text("%-2s", axisIds[axisNum]);
+            ImGui::SameLine(0.0f, smallGap);
+            {
+                const float norm = std::clamp((rawVal + 32768.0f) / 65535.0f, 0.0f, 1.0f);
+                char overlayBuf[32];
+                std::snprintf(overlayBuf, sizeof(overlayBuf), "%d", rawVal);
+                ImGui::ProgressBar(norm, ImVec2(-1.0f, ImGui::GetFrameHeight()), overlayBuf);
+            }
+
+            // Column 1: Mode preset combo
+            ImGui::TableSetColumnIndex(1);
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::Combo("##AxisMode", &mode, modeLabels, 4))
+            {
+                if (mode == 0)
+                {
+                    minVal = -32768;
+                    offVal = 0;
+                    maxVal = 32767;
+                    rowChanged = true;
+                }
+                else if (mode == 1)
+                {
+                    minVal = -32768;
+                    offVal = -32768;
+                    maxVal = 32767;
+                    if (deadZone == DEFAULT_JOY_DEADZONE)
+                        deadZone = 1;
+                    rowChanged = true;
+                }
+                else if (mode == 2)
+                {
+                    minVal = 32767;
+                    offVal = 32767;
+                    maxVal = -32768;
+                    if (deadZone == DEFAULT_JOY_DEADZONE)
+                        deadZone = 1;
+                    rowChanged = true;
+                }
+            }
+            HandOver();
+
+            // Column 2: DeadZone (%)
+            ImGui::TableSetColumnIndex(2);
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::SliderInt("##DeadZone", &deadZone, 0, 99, "%d%%"))
+            {
+                deadZone = std::clamp(deadZone, 0, 99);
+                rowChanged = true;
+            }
+            HandOver();
+
+            // Column 3: Saturation (%)
+            ImGui::TableSetColumnIndex(3);
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::SliderInt("##Saturation", &saturation, 1, 200, "%d%%"))
+            {
+                saturation = std::clamp(saturation, 1, 200);
+                rowChanged = true;
+            }
+            HandOver();
+
+            // Column 4: Min / Off / Max inputs + take-current-as-off & reset buttons
+            ImGui::TableSetColumnIndex(4);
+            const float col4Avail = ImGui::GetContentRegionAvail().x;
+            const float buttonsTotalW = btnSetOffW + btnResetW + smallGap * 3.0f + midGap;
+            const float numInputW = (std::max)(
+                numInputMinW,
+                (std::min)(numInputMinW * 1.45f, std::floor((col4Avail - buttonsTotalW) / 3.0f)));
+
+            ImGui::SetNextItemWidth(numInputW);
+            if (ImGui::InputInt("##MinVal", &minVal, 0, 0))
+            {
+                minVal = std::clamp(minVal, -32768, 32767);
+                rowChanged = true;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", Tr("最小值 (MinVal)"));
+            ImGui::SameLine(0.0f, smallGap);
+            ImGui::SetNextItemWidth(numInputW);
+            if (ImGui::InputInt("##OffVal", &offVal, 0, 0))
+            {
+                offVal = std::clamp(offVal, -32768, 32767);
+                rowChanged = true;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", Tr("中心/起点值 (OffVal)：踏板设 -32768，方向盘设 0"));
+            ImGui::SameLine(0.0f, smallGap);
+            ImGui::SetNextItemWidth(numInputW);
+            if (ImGui::InputInt("##MaxVal", &maxVal, 0, 0))
+            {
+                maxVal = std::clamp(maxVal, -32768, 32767);
+                rowChanged = true;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", Tr("最大值 (MaxVal)"));
+
+            ImGui::SameLine(0.0f, midGap);
+            if (UiSmallButton("取当前起点"))
+            {
+                offVal = std::clamp(rawVal, -32768, 32767);
+                rowChanged = true;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", Tr("将当前轴的实时读数直接设为中心/起点值 (OffVal)"));
+
+            ImGui::SameLine(0.0f, smallGap);
+            if (UiSmallButton("重置"))
+            {
+                minVal = DEFAULT_JOY_AXISMINVAL;
+                offVal = DEFAULT_JOY_AXISOFFVAL;
+                maxVal = DEFAULT_JOY_AXISMAXVAL;
+                deadZone = DEFAULT_JOY_DEADZONE;
+                saturation = DEFAULT_JOY_SATURATION;
+                rowChanged = true;
+            }
+
+            if (rowChanged)
+            {
+                config.Set(baseKey + "MinVal", minVal);
+                config.Set(baseKey + "OffVal", offVal);
+                config.Set(baseKey + "MaxVal", maxVal);
+                config.Set(baseKey + "DeadZone", (unsigned)deadZone);
+                config.Set(baseKey + "Saturation", (unsigned)saturation);
+                anyChanged = true;
+            }
+
+            ImGui::PopID();
+        }
+
+        ImGui::EndTable();
+    }
+
+    if (anyChanged && inputs != nullptr)
+        inputs->LoadFromConfig(config);
 }
 
 struct RomEntry
@@ -1930,11 +2413,7 @@ static bool BrowseSaveFile(OSD::Platform::Window* window, std::string& path)
         dialog->SetFileTypes(IM_ARRAYSIZE(filters), filters);
         dialog->SetFileTypeIndex(1);
         dialog->SetDefaultExtension(L"ini");
-#if defined(SUPERMODEL_PURE_VULKAN)
         dialog->SetFileName(L"Model3-Vulkan.ini");
-#else
-        dialog->SetFileName(L"Supermodel.ini");
-#endif
 
         // Start in the folder the current settings came from, so "Save as" defaults to a sibling
         // copy rather than dropping the user in Documents.
@@ -2235,11 +2714,7 @@ static bool BrowseSaveFile(OSD::Platform::Window*, std::string& path)
 {
     const DialogTool tool = DetectDialogTool();
     const std::string title = Tr("设置另存为");
-#if defined(SUPERMODEL_PURE_VULKAN)
     const std::string suggested = path.empty() ? std::string("Model3-Vulkan.ini") : path;
-#else
-    const std::string suggested = path.empty() ? std::string("Supermodel.ini") : path;
-#endif
     if (tool == DialogTool::Zenity)
     {
         return BrowseWithDialog("zenity --file-selection --save --title=" + ShellQuote(title) +
@@ -2613,8 +3088,8 @@ static bool DecodeBoxart(const std::filesystem::path& path, int maxWidth, std::v
      * fallback on a machine that does have the Windows WebP codec. Purely diagnostic.
      */
     const char *forced = std::getenv("SM3D_BOXART_DECODER");
-    const bool tryWic = forced == nullptr || _stricmp(forced, "webp") != 0;
-    const bool tryWebp = forced == nullptr || _stricmp(forced, "wic") != 0;
+    const bool tryWic = forced == nullptr || CaseInsensitiveCompare(forced, "webp") != 0;
+    const bool tryWebp = forced == nullptr || CaseInsensitiveCompare(forced, "wic") != 0;
 
     if (tryWic && DecodeBoxartWIC(path, maxWidth, pixels, width, height))
         return true;
@@ -3825,8 +4300,12 @@ static void DrawManageSavesModal(int& selectedGameIndex, bool& exit, bool& saveS
                 SaveCard& card = g_saveCards[i];
                 ImGui::TableNextColumn();
                 ImGui::PushID(i);
-                ImGui::BeginChild("##card", ImVec2(cardWidth, cardHeight), ImGuiChildFlags_Borders,
+                ImGui::BeginChild("##card", ImVec2(cardWidth, cardHeight),
+                    ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding,
                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+
+                const float cardInnerWidth = ImGui::GetContentRegionAvail().x;
+                const float startX = ImGui::GetCursorPosX();
 
                 // Double-clicking anywhere on the card starts a rename. Loading is the explicit
                 // button: a stray click over a card should not throw away the running game.
@@ -3834,20 +4313,20 @@ static void DrawManageSavesModal(int& selectedGameIndex, bool& exit, bool& saveS
                 if (card.texture != 0)
                 {
                     const float imageWidth = imageHeight * (float)card.width / (float)(std::max)(1, card.height);
-                    const ImVec2 size = imageWidth > contentWidth
-                        ? ImVec2(contentWidth, imageHeight * contentWidth / imageWidth)
+                    const ImVec2 size = imageWidth > cardInnerWidth
+                        ? ImVec2(cardInnerWidth, imageHeight * cardInnerWidth / imageWidth)
                         : ImVec2(imageWidth, imageHeight);
-                    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (contentWidth - size.x) * 0.5f);
+                    ImGui::SetCursorPosX(startX + (std::max)(0.0f, (cardInnerWidth - size.x) * 0.5f));
                     ImGui::Image(ImTextureRef(card.texture), size);
                     beginRename = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0);
                 }
                 else
                 {
                     // Same total height as the thumbnail so the text below lines up across cards.
-                    ImGui::Dummy(ImVec2(contentWidth, imageHeight - ImGui::GetTextLineHeightWithSpacing()));
+                    ImGui::Dummy(ImVec2(cardInnerWidth, imageHeight - ImGui::GetTextLineHeightWithSpacing()));
                     const char* placeholder = Tr("无缩略图");
-                    ImGui::SetCursorPosX(ImGui::GetCursorPosX()
-                        + (contentWidth - ImGui::CalcTextSize(placeholder).x) * 0.5f);
+                    ImGui::SetCursorPosX(startX
+                        + (std::max)(0.0f, (cardInnerWidth - ImGui::CalcTextSize(placeholder).x) * 0.5f));
                     ImGui::TextDisabled("%s", placeholder);
                     beginRename = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0);
                 }
@@ -3896,7 +4375,7 @@ static void DrawManageSavesModal(int& selectedGameIndex, bool& exit, bool& saveS
                     // Two lines are reserved and the rest is clipped, so a long title cannot push
                     // the buttons out of the card or move them between cards. A title that fits is
                     // centred with the date and size below it; one that wraps uses the full width.
-                    ImGui::BeginChild("##title", ImVec2(0.0f, lineHeight * 2.0f), ImGuiChildFlags_None,
+                    ImGui::BeginChild("##title", ImVec2(cardInnerWidth, lineHeight * 2.0f), ImGuiChildFlags_None,
                         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
                     const float titleWidth = ImGui::GetContentRegionAvail().x;
                     const ImVec2 titleExtent = ImGui::CalcTextSize(title.c_str(), nullptr, false, titleWidth);
@@ -3909,8 +4388,8 @@ static void DrawManageSavesModal(int& selectedGameIndex, bool& exit, bool& saveS
 
                     const std::string savedAt = FormatSaveTime(card.meta.SavedAt, "-");
                     const float savedAtWidth = ImGui::CalcTextSize(savedAt.c_str()).x;
-                    ImGui::SetCursorPosX(ImGui::GetCursorPosX()
-                        + (std::max)(0.0f, (contentWidth - savedAtWidth) * 0.5f));
+                    ImGui::SetCursorPosX(startX
+                        + (std::max)(0.0f, (cardInnerWidth - savedAtWidth) * 0.5f));
                     ImGui::TextDisabled("%s", savedAt.c_str());
 
                     // Large states run to several megabytes, so the unit is picked to keep the line
@@ -3922,8 +4401,8 @@ static void DrawManageSavesModal(int& selectedGameIndex, bool& exit, bool& saveS
                     else
                         std::snprintf(sizeText, sizeof(sizeText), "%.0f KB", sizeKb);
                     const float sizeWidth = ImGui::CalcTextSize(sizeText).x;
-                    ImGui::SetCursorPosX(ImGui::GetCursorPosX()
-                        + (std::max)(0.0f, (contentWidth - sizeWidth) * 0.5f));
+                    ImGui::SetCursorPosX(startX
+                        + (std::max)(0.0f, (cardInnerWidth - sizeWidth) * 0.5f));
                     ImGui::TextDisabled("%s", sizeText);
                 }
 
@@ -3939,8 +4418,8 @@ static void DrawManageSavesModal(int& selectedGameIndex, bool& exit, bool& saveS
                 // the title wrapped to, and centred with equal margins on both sides.
                 ImGui::SetCursorPosY(cardHeight - style.WindowPadding.y - ImGui::GetFrameHeight());
                 const float rowWidth = g_saveDeleteIndex == i ? confirmWidth : actionsWidth;
-                ImGui::SetCursorPosX(ImGui::GetCursorPosX()
-                    + (std::max)(0.0f, (contentWidth - rowWidth) * 0.5f));
+                ImGui::SetCursorPosX(startX
+                    + (std::max)(0.0f, (cardInnerWidth - rowWidth) * 0.5f));
                 if (g_saveDeleteIndex == i)
                 {
                     // Two-step delete: the confirm button takes the place Load had, so the second
@@ -4188,16 +4667,22 @@ static void HelpMarker(const char* text)
  * dragged and is the whole reason that section exists. Explanations go through here and disappear in
  * the overlay; readouts keep using UiTextDim/UiTextWarn and stay in both.
  */
-static void UiExplain(const char* format, ...)
+static void UiExplain(const char* text)
+{
+    if (g_overlayMode)
+        return;
+
+    ImGui::TextDisabled("%s", Tr(text));
+}
+
+template <typename Arg0, typename... Args>
+static void UiExplain(const char* format, Arg0 arg0, Args... args)
 {
     if (g_overlayMode)
         return;
 
     static thread_local char buffer[2048];
-    va_list args;
-    va_start(args, format);
-    vsnprintf(buffer, sizeof(buffer), Tr(format), args);
-    va_end(args);
+    std::snprintf(buffer, sizeof(buffer), Tr(format), arg0, args...);
 
     ImGui::TextDisabled("%s", buffer);
 }
@@ -4853,8 +5338,12 @@ static void DrawHardwarePresetSettings(Util::Config::Node& config)
             int h = tier.height;
             if (haveDesktop)
             {
-                if (w > desktopMode.width) w = desktopMode.width;
-                if (h > desktopMode.height) h = desktopMode.height;
+                // Device pixels. On a Retina Mac the desktop mode is reported in points, and clamping
+                // with that silently turned the 4K tier into 1920x1080.
+                const int panelWidth = (int)std::lround(desktopMode.width * desktopMode.pixelDensity);
+                const int panelHeight = (int)std::lround(desktopMode.height * desktopMode.pixelDensity);
+                if (w > panelWidth) w = panelWidth;
+                if (h > panelHeight) h = panelHeight;
             }
             config.Set("XResolution", w);
             config.Set("YResolution", h);
@@ -5313,7 +5802,7 @@ static void DrawQuickSettings(Util::Config::Node& config, std::shared_ptr<CInput
     if (renderer != 0)
         ImGui::EndDisabled();
     HelpMarker(
-        "让 Vulkan 校验层逐帧检查绘制调用、描述符和同步，发现的问题写进 Supermodel.log。"
+        "让 Vulkan 校验层逐帧检查绘制调用、描述符和同步，发现的问题写进 Model3Vulkan.log。"
         "正常游玩请关闭（会明显变慢）；排查花屏、闪烁或崩溃时临时打开。");
 
     if (renderer == 0)
@@ -6180,7 +6669,7 @@ static int CrtPresetOutputHeight()
 {
 	OSD::Platform::DisplayMode mode{};
 	if (OSD::Platform::GetDesktopDisplayMode(OSD::Platform::kPrimaryDisplay, &mode) && mode.height > 0)
-		return mode.height;
+		return (int)std::lround(mode.height * mode.pixelDensity);
 	return 2160;
 }
 
@@ -6715,7 +7204,9 @@ void DrawHDTextureSettings(Util::Config::Node& config, bool overlayMode)
         HelpMarker(
             "把游戏实际使用的每块子贴图解码成 RGBA8 PNG，写到\n"
             "Data/Assets/DumpTextures/<游戏>/，文件名带内容哈希。\n"
-            "同一张内容只写一次；超分后放进 HDTextures 目录即可替换。");
+            "同一张内容只写一次；超分后放进 HDTextures 目录即可替换。\n"
+            "贴图本身不带 alpha 的图按不透明导出；带 alpha 的图会保留\n"
+            "原机的 1-bit 抖动，看图时可能看到白点。");
 
     if (overlayMode)
     {
@@ -6739,6 +7230,39 @@ void DrawHDTextureSettings(Util::Config::Node& config, bool overlayMode)
         ImGui::EndDisabled();
         UiTextDim("仅 Vulkan 渲染引擎有效，当前不是。");
     }
+#endif
+}
+
+/*
+ * PowerPC execution mode.
+ *
+ * 0 is the C interpreter, which is the reference the hybrid JIT is verified
+ * against, so it stays available as a setting rather than as a compile-time
+ * choice: a game that misbehaves can be checked against the path that cannot be
+ * wrong, and a frame-time comparison needs both. 1 translates the common
+ * instructions into native code and calls the same C handlers for the rest.
+ *
+ * The mode is read when a session builds its machine - the code cache belongs
+ * to the process - hence the "next session" note. Draws no section heading: it
+ * belongs with the other Core keys rather than in a section of its own.
+ */
+void DrawPowerPCModeSettings(Util::Config::Node& config)
+{
+#if defined(SUPERMODEL_OPENGL_ONLY)
+    (void)config;
+#else
+    const char* modes[] = { Tr("C 纯解释器（对照基准）"), Tr("JIT 混合模式（推荐）") };
+
+    int mode = config["PowerPCMode"].ValueAsDefault<int>(1);
+    if (mode < 0 || mode > 1)
+        mode = 1;
+
+    if (ComboRow(Tr("PowerPC 执行模式##PowerPCMode"), &mode, modes, 2))
+        config.Set("PowerPCMode", mode);
+    HelpMarker(
+        "C 纯解释器：逐条解释执行，最保守，排查问题和做对照时用。\n"
+        "JIT 混合模式：把常用指令编译成 x86-64 原生代码，其余仍走同一套解释器处理函数。\n"
+        "两者行为一致，只有速度不同。下一局生效。");
 #endif
 }
 
@@ -7004,6 +7528,54 @@ void DrawAdvancedSettingsPanel(Util::Config::Node& config, bool overlayMode)
      */
     if (overlayMode && vulkan)
     {
+        UiSep("手柄转向");
+        {
+            static const char* smoothingItems[] = {
+                "关闭（原始 1:1）", "轻度（保留转向手感）",
+                "中度（推荐手柄）", "强力（最平稳）"
+            };
+            static const char* smoothingTr[4];
+            int smoothing = config["GamepadSteeringSmoothing"].ValueAsDefault<int>(3);
+            if (smoothing < 0 || smoothing > 3)
+                smoothing = 3;
+            if (ComboRow(Tr("摇杆转向平滑##GamepadSteeringSmoothing"), &smoothing,
+                UiItems(smoothingItems, 4, smoothingTr), 4))
+            {
+                config.Set("GamepadSteeringSmoothing", smoothing);
+                if (smoothing == 0)
+                    config.Set<unsigned>("GamepadSteeringSensitivity", 100u);
+            }
+
+            const bool smoothingOff = (smoothing == 0);
+            int steerSens = smoothingOff
+                ? 100
+                : (int)config["GamepadSteeringSensitivity"].ValueAsDefault<unsigned>(66);
+            steerSens = std::clamp(steerSens, 25, 100);
+            ImGui::BeginDisabled(smoothingOff);
+            ImGui::SetNextItemWidth(220.0f);
+            if (ImGui::SliderInt(Tr("摇杆转向灵敏度 (%)##GamepadSteeringSensitivity"), &steerSens, 25, 100))
+                config.Set<unsigned>("GamepadSteeringSensitivity", (unsigned)steerSens);
+            HandOver();
+            ImGui::EndDisabled();
+        }
+        {
+            static const char* camStabItems[] = {
+                "关闭（原始街机镜头）", "轻度（滤除微晃）",
+                "标准（极品飞车式追随）", "强力（镜头最稳）"
+            };
+            static const char* camStabTr[4];
+            int camStab = config["ChaseCameraStabilizer"].ValueAsDefault<int>(3);
+            if (camStab < 0 || camStab > 3)
+                camStab = 3;
+            if (ComboRow(Tr("追尾镜头防抖##ChaseCameraStabilizer"), &camStab,
+                UiItems(camStabItems, 4, camStabTr), 4))
+                config.Set("ChaseCameraStabilizer", camStab);
+        }
+        HelpMarker(
+            "围绕车身支点对相机朝向做弹簧阻尼平滑，车头左右微调时车身在画面内摆动而远景不晃。\n"
+            "关闭：街机原始刚性追尾镜头。\n"
+            "轻度 / 标准 / 强力：依次加大阻尼与弹性偏角上限；即时生效。");
+
         UiSep("宽屏");
         /*
          * Low-resolution rendering needs a scene target the width of the picture, so a widened frustum
@@ -8007,7 +8579,20 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
      */
     ImGui::BeginChild("Settings", ImVec2(rightPaneWidth, paneHeight),
         classicUi ? ImGuiChildFlags_Borders : ImGuiChildFlags_AlwaysUseWindowPadding,
-        ImGuiWindowFlags_AlwaysVerticalScrollbar | (classicUi ? 0 : ImGuiWindowFlags_NoBackground));
+        classicUi ? 0 : ImGuiWindowFlags_NoBackground);
+    /*
+     * The tab bar is the fixed header of this pane; only the page below it scrolls. Keeping the
+     * bar outside the scrolling child means it stays put when a long tab (Core, FFB / Sensitivity)
+     * is scrolled, so switching pages never requires scrolling back to the top first.
+     *
+     * The page child always reserves its vertical scrollbar, which also keeps the content width
+     * and the tab bar's scroll arrows from jumping between tabs.
+     */
+    auto BeginSettingsPage = [](const char* id) {
+        ImGui::BeginChild(id, ImVec2(0.0f, 0.0f), ImGuiChildFlags_None,
+            ImGuiWindowFlags_AlwaysVerticalScrollbar);
+    };
+    auto EndSettingsPage = []() { ImGui::EndChild(); };
     /*
      * Shrink the tabs to fit rather than scrolling them.
      *
@@ -8023,14 +8608,23 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
     {
         if (UiTabItem("常用"))
         {
+            BeginSettingsPage("##pageCommon");
             DrawQuickSettings(config, inputs);
+            EndSettingsPage();
             ImGui::EndTabItem();
         }
         if (UiTabItem("核心"))
         {
+            BeginSettingsPage("##pageCore");
             UpdateTempValues(config, "Core", true);
             CreateControls(config, "Core");
             UpdateTempValues(config, "Core", false);
+
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+            // Read when a game session builds its machine, so it sits with the other Core keys
+            // rather than under the runtime options further down the page.
+            DrawPowerPCModeSettings(config);
+#endif
 
             // The advanced rendering options used to live on their own tab. They are part of the
             // same "how the emulator runs" decision as the core settings, and a separate page made
@@ -8056,10 +8650,12 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
             DrawHDTextureSettings(config, false);
 #endif
 
+            EndSettingsPage();
             ImGui::EndTabItem();
         }
         if (UiTabItem("画面"))
         {
+            BeginSettingsPage("##pageVideo");
 #if !defined(SUPERMODEL_OPENGL_ONLY)
             DrawPresentationCadenceSettings(config, window);
 #endif
@@ -8103,13 +8699,16 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
             DrawBezelSettings(config, window);
 #endif
 
+            EndSettingsPage();
             ImGui::EndTabItem();
         }
         if (UiTabItem("声音"))
         {
+            BeginSettingsPage("##pageSound");
             UpdateTempValues(config, "Sound", true);
             CreateControls(config, "Sound");
             UpdateTempValues(config, "Sound", false);
+            EndSettingsPage();
             ImGui::EndTabItem();
         }
         if (UiTabItem("按键"))
@@ -8131,7 +8730,7 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
             {
                 UiText("这个输入系统没有初始化成功，换一个再打开这一页。");
             }
-            else if (ImGui::BeginTable("KeyTable", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY, ImVec2(0, ImGui::GetContentRegionAvail().y - ImGui::GetFrameHeightWithSpacing())))
+            else if (ImGui::BeginTable("KeyTable", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY, ImVec2(0, ImGui::GetContentRegionAvail().y - ImGui::GetFrameHeightWithSpacing() * 2.1f)))
             {
                 UiColumn("分组");
                 UiColumn("动作");
@@ -8140,49 +8739,100 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
                 AddKeys(config, kb, inputs->GetGameInputs(GameForSelection(games, selectedGameIndex)));
                 ImGui::EndTable();
             }
+            if (UiSmallButton("H 挡松开自动回空挡（按 1–4 挡生成）"))
+            {
+                const std::string autoNeutral = BuildHShifterNeutralMapping(config);
+                if (!autoNeutral.empty())
+                {
+                    config.Set("InputGearShiftN", autoNeutral);
+                    if (inputs != nullptr)
+                        inputs->LoadFromConfig(config);
+                }
+            }
+            HelpMarker(
+                "根据当前 1–4 挡已绑定的排挡杆按键，自动把 !JOY1_BUTTONx+... 组合写入「换挡空挡」，实现真实 H 挡摘挡即回空挡。");
+            ImGui::SameLine(0.0f, 12.0f);
             UiTextDim("双击一行来修改。选中左边的游戏后，这里只显示那款游戏用到的按键。");
             UiTextDim("手柄编号：1=A/× 2=B/○ 3=X/□ 4=Y/△ 5=LB 6=RB 7=Back/Select 8=Start");
             ImGui::EndTabItem();
         }
-        if (UiTabItem("网络"))
-        {
-            /*
-             * The hand-drawn settings first, and deliberately *before* the temp-value snapshot below.
-             *
-             * Before, not after: every key these controls touch lives in the "Network" group, and the
-             * write-back at the end of this block restores whatever the snapshot captured. Editing a
-             * Network-group key in between the snapshot and the write-back gets the edit reverted -
-             * the same trap the 画面 tab documents around DrawBezelSettings. Taking the snapshot after
-             * these controls have run means it captures their new values rather than undoing them.
-             *
-             * Everything in this block is listed in HasDedicatedUI, so without calling it explicitly
-             * the generic renderer skips it and the tab shows only the debug-output keys that are not
-             * - which is why these controls used to sit at the bottom of 常用 instead.
-             */
-            DrawNetworkSettings(config);
-            UiSep("调试输出");
-            UpdateTempValues(config, "Network", true);
-            CreateControls(config, "Network");
-            UpdateTempValues(config, "Network", false);
-            ImGui::EndTabItem();
-        }
-        // Force feedback and sensitivity share one page. Both are short lists of sliders for the same
-        // subject - how the controls feel - and together they were a dozen rows in a panel that holds
-        // far more, so keeping them apart cost a tab click and two nearly empty pages.
+        // Force feedback and sensitivity share one page, placed right after Controls.
         if (UiTabItem("力反馈 / 灵敏度"))
         {
+            BeginSettingsPage("##pageFfb");
+            /*
+             * Hand-drawn controls first, BEFORE UpdateTempValues(..., true) below.
+             *
+             * These three keys belong to the "Sensitivity" group in DefaultConfig(), and
+             * UpdateTempValues("Sensitivity", true/false) snapshots and writes back every key in
+             * that group. Placing hand-drawn controls between the snapshot and the write-back
+             * causes the write-back to overwrite any change made here on the same frame.
+             */
+            UiSep("手柄转向");
+            {
+                static const char* smoothingItems[] = {
+                    "关闭（原始 1:1）", "轻度（保留转向手感）",
+                    "中度（推荐手柄）", "强力（最平稳）"
+                };
+                static const char* smoothingTr[4];
+                int smoothing = config["GamepadSteeringSmoothing"].ValueAsDefault<int>(3);
+                if (smoothing < 0 || smoothing > 3)
+                    smoothing = 3;
+                if (ComboRow(Tr("摇杆转向平滑##GamepadSteeringSmoothing"), &smoothing,
+                    UiItems(smoothingItems, 4, smoothingTr), 4))
+                {
+                    config.Set("GamepadSteeringSmoothing", smoothing);
+                    if (smoothing == 0)
+                        config.Set<unsigned>("GamepadSteeringSensitivity", 100u);
+                }
+                HelpMarker(
+                    "把手柄摇杆的阶跃输入压平，模拟方向盘阻尼。\n"
+                    "关闭：原始 1:1 输入（灵敏度自动归位 100%）。\n"
+                    "轻度 / 中度 / 强力：约 55 / 95 / 155ms 平滑与非线性中心曲线，依次更稳。\n"
+                    "仅对手柄生效；当转向绑定在真实方向盘上时会自动旁路保持 1:1 直通。");
+
+                const bool smoothingOff = (smoothing == 0);
+                int steerSens = smoothingOff
+                    ? 100
+                    : (int)config["GamepadSteeringSensitivity"].ValueAsDefault<unsigned>(66);
+                steerSens = std::clamp(steerSens, 25, 100);
+                ImGui::BeginDisabled(smoothingOff);
+                ImGui::SetNextItemWidth(220.0f);
+                if (ImGui::SliderInt(Tr("摇杆转向灵敏度 (%)##GamepadSteeringSensitivity"), &steerSens, 25, 100))
+                    config.Set<unsigned>("GamepadSteeringSensitivity", (unsigned)steerSens);
+                HandOver();
+                ImGui::EndDisabled();
+                HelpMarker(
+                    "缩放手柄摇杆的转向输出上限（25%–100%）。\n"
+                    "觉得推一点摇杆车头就打死时，调到 60%–75% 会明显更稳；关闭平滑或使用真实方向盘时自动保持 100%。");
+            }
+
+#if !defined(SUPERMODEL_OPENGL_ONLY)
+            {
+                static const char* camStabItems[] = {
+                    "关闭（原始街机镜头）", "轻度（滤除微晃）",
+                    "标准（极品飞车式追随）", "强力（镜头最稳）"
+                };
+                static const char* camStabTr[4];
+                int camStab = config["ChaseCameraStabilizer"].ValueAsDefault<int>(3);
+                if (camStab < 0 || camStab > 3)
+                    camStab = 3;
+                if (ComboRow(Tr("追尾镜头防抖##ChaseCameraStabilizer"), &camStab,
+                    UiItems(camStabItems, 4, camStabTr), 4))
+                    config.Set("ChaseCameraStabilizer", camStab);
+            }
+            HelpMarker(
+                "围绕车身支点对相机朝向做弹簧阻尼平滑，车头左右微调时车身在画面内摆动而远景不晃。\n"
+                "关闭：街机原始刚性追尾镜头。\n"
+                "轻度 / 标准 / 强力：依次加大阻尼与弹性偏角上限；即时生效。");
+#endif
+
             UpdateTempValues(config, "ForceFeedback", true);
             UpdateTempValues(config, "Sensitivity", true);
 
             UiSep("力反馈");
-            /*
-             * The master switch lives on the Common page, and without it nothing on this page does
-             * anything: each drive board calls Disable() in Init() when ForceFeedback is off, so the
-             * emulated board never sends a single effect. Say so here rather than leaving a page of
-             * sliders that look live and do nothing.
-             */
             if (!config["ForceFeedback"].ValueAsDefault<bool>(false))
-                UiTextWarn("先在「常用」页勾选「力反馈」，这一页的设置才会生效。");
+                UiTextWarn("先在「常用」页勾选「力反馈」，下面的力反馈设置才会生效；「灵敏度」和「手柄转向」随时可用。");
             CreateControls(config, "ForceFeedback");
 
             UiSep("灵敏度");
@@ -8191,35 +8841,20 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
             UpdateTempValues(config, "ForceFeedback", false);
             UpdateTempValues(config, "Sensitivity", false);
 
-            UiSep("手柄转向");
-            {
-                static const char* smoothingItems[] = {
-                    "关闭（原始 1:1）", "轻度（保留转向手感）",
-                    "中度（推荐手柄）", "强力（最平稳）"
-                };
-                static const char* smoothingTr[4];
-                int smoothing = config["GamepadSteeringSmoothing"].ValueAsDefault<int>(0);
-                if (smoothing < 0 || smoothing > 3)
-                    smoothing = 0;
-                if (ComboRow(Tr("摇杆转向平滑##GamepadSteeringSmoothing"), &smoothing,
-                    UiItems(smoothingItems, 4, smoothingTr), 4))
-                    config.Set("GamepadSteeringSmoothing", smoothing);
-            }
-            HelpMarker(
-                "把手柄摇杆的阶跃输入压平，模拟方向盘阻尼。\n"
-                "关闭：原始输入。\n"
-                "轻度 / 中度 / 强力：约 35 / 50 / 75ms 平滑，依次更稳。\n"
-                "只影响转向轴；真实方向盘建议关闭。");
+            DrawJoystickAxisCalibrationPanel(config, inputs, window);
 
-            ImGui::Spacing();
-            /*
-             * There used to be a "Calibrate Sticks" button here that called
-             * CInputs::CalibrateJoysticks() directly. That routine prompts on stdout and reads keys
-             * through the input system, and a GUI build has no console to put the prompts in: from
-             * here it printed into nothing and waited for a reply the user could not see. Say where
-             * it lives instead of leaving a button that appears to do nothing.
-             */
-            UiTextDim("摇杆/方向盘轴校准是命令行功能：用 -config-inputs 启动后按 B。手柄的轴由 SDL 归一化，通常不需要校准。");
+            EndSettingsPage();
+            ImGui::EndTabItem();
+        }
+        if (UiTabItem("网络"))
+        {
+            BeginSettingsPage("##pageNetwork");
+            DrawNetworkSettings(config);
+            UiSep("调试输出");
+            UpdateTempValues(config, "Network", true);
+            CreateControls(config, "Network");
+            UpdateTempValues(config, "Network", false);
+            EndSettingsPage();
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
@@ -8427,7 +9062,7 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& config, const std::map<st
     if (ImGui::BeginPopupModal("SaveSettings", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
     {
         UiText("保存到哪个文件？");
-        UiTextDim("默认位置：程序目录下的 Data\\Config\\Supermodel.ini");
+        UiTextDim("默认位置：程序目录下的 Data\\Config\\Model3-Vulkan.ini");
         if (UiButton("保存到默认位置", ImVec2(190, 0)))
         {
             g_writeSettings = true;
@@ -8639,6 +9274,18 @@ static void ApplyGuiWindowMinimumSize(OSD::Platform::Window* window, float previ
     {
         areaWidth = info.usableBounds.width - borderLeft - borderRight;
         areaHeight = info.usableBounds.height - borderTop - borderBottom;
+
+        /*
+         * On Wayland the compositor reports no borders and no panel struts: the window is decorated
+         * client-side by libdecor, which does not exist when SDL is asked for its border size, and
+         * the work area is the whole display. A 1280x800 panel (Steam Deck) would then be allowed a
+         * 1280x800 client area plus a title bar, and the bottom of the window lands off-screen.
+         * The same allowance the initial size uses applies here, so a saved size from another
+         * display cannot reintroduce that either.
+         */
+        if (borderTop + borderBottom == 0)
+            areaHeight -= (int)(48.0f * scale);
+
         if (areaWidth > 0)
             minWidth = (std::min)(minWidth, areaWidth);
         if (areaHeight > 0)
@@ -9270,6 +9917,13 @@ void LoadUiFont(ImGuiIO& io, float scale)
     // rather than document faces: PingFang on macOS, Microsoft YaHei on Windows, Noto Sans CJK on
     // Linux. The interface is otherwise entirely custom-drawn, so there is nothing to match
     // metrically - only the text has to be readable and to have Chinese glyphs.
+    //
+    // A face is shipped with the package as well, because the platform list alone is not enough on
+    // Linux: a stock Ubuntu installs neither WenQuanYi nor Noto CJK, and the fallback it does have
+    // (Droid Sans Fallback) has no Latin glyphs, so every label disappeared while the widgets still
+    // drew. See the bundledFont use below.
+    const std::string bundledFont =
+        Util::Format() << FileSystemPath::GetPath(FileSystemPath::Assets) << "Fonts/wqy-microhei.ttc";
 #ifdef _WIN32
     const char* paths[] = {
         "C:\\Windows\\Fonts\\msyh.ttc",
@@ -9291,16 +9945,20 @@ void LoadUiFont(ImGuiIO& io, float scale)
      * TrueType outlines first, then CFF, then whatever Fontconfig offers.
      *
      * The probe below checks every candidate before use, so this order is about quality of fit rather
-     * than compatibility: WenQuanYi, Droid and the AR PL collections are TrueType and stay crisp at
+     * than compatibility: WenQuanYi and the AR PL collections are TrueType and stay crisp at
      * interface sizes, while the Noto CJK files are CFF. Variable fonts - the "-VF" files - are
      * deliberately absent: they use the CFF2 table, which the rasteriser cannot read at all.
+     *
+     * Droid Sans Fallback is deliberately absent too. It is a valid TrueType font that parses
+     * cleanly, and it is the face a stock Ubuntu falls back to - but it maps no Basic Latin code
+     * point, so an English interface came up with every label missing. ProbeFontData() now rejects
+     * such a font by coverage, and the bundled face above means the list below is only a preference.
      */
     const char* paths[] = {
         "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
         "/usr/share/fonts/wqy-microhei/wqy-microhei.ttc",
         "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
         "/usr/share/fonts/wqy-zenhei/wqy-zenhei.ttc",
-        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
         "/usr/share/fonts/truetype/arphic/uming.ttc",
         "/usr/share/fonts/truetype/arphic/ukai.ttc",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
@@ -9348,9 +10006,25 @@ void LoadUiFont(ImGuiIO& io, float scale)
         return true;
     };
 
+    /*
+     * The Linux order is: shipped face first, then the distribution's, then Fontconfig's.
+     *
+     * The shipped one goes first here because what a distribution installs cannot be known in
+     * advance and the wrong choice is silent - the window draws without text rather than failing.
+     * Windows and macOS have a native face that is worth preferring, so they use the shipped file
+     * only after their own list, as a last resort before the built-in vector font.
+     */
+#if !defined(_WIN32) && !defined(__APPLE__)
+    if (addFont(bundledFont.c_str()))
+        return;
+#endif
     for (const char* path : paths)
         if (addFont(path))
             return;
+#if defined(_WIN32) || defined(__APPLE__)
+    if (addFont(bundledFont.c_str()))
+        return;
+#endif
 
 #if !defined(_WIN32) && !defined(__APPLE__)
     // Tried last: Fontconfig knows where this distribution put its CJK fonts and in what order it
@@ -9361,14 +10035,14 @@ void LoadUiFont(ImGuiIO& io, float scale)
 #endif
 
     /*
-     * Nothing usable. The built-in face has no CJK glyphs, so Chinese text would be blank boxes -
-     * which looks like an encoding bug unless the reason is stated.
+     * Nothing usable, including the face shipped in Data/Assets/Fonts - which means the package is
+     * incomplete or that file was replaced. Said plainly, because the built-in face has no CJK
+     * glyphs (blank boxes look like an encoding bug) and a Latin-less system font leaves every label
+     * invisible, which looks like a renderer fault.
      */
-    InfoLog("GUI: no usable CJK system font found; the built-in face has no Chinese glyphs, so Chinese "
-            "text will not render.");
-#if !defined(_WIN32) && !defined(__APPLE__)
-    InfoLog("GUI: install one to fix it - for example fonts-wqy-microhei, or a non-variable Noto Sans CJK.");
-#endif
+    InfoLog("GUI: no usable interface font found, including the bundled 'Fonts/wqy-microhei.ttc'; the "
+            "built-in face has no Chinese glyphs, so Chinese text will not render. Re-extract the package "
+            "to restore the font file.");
     io.Fonts->AddFontDefaultVector();
 }
 
@@ -9613,7 +10287,23 @@ GuiState* GuiCreate(const std::string& configPath, const Util::Config::Node& fil
         if (usable.width > 0 && usable.height > 0)
         {
             if (windowWidth > usable.width) windowWidth = usable.width;
-            if (windowHeight > usable.height) windowHeight = usable.height;
+
+            /*
+             * Reserve room for the window frame.
+             *
+             * On Windows and X11 the work area already excludes the taskbar or panel, and the
+             * title bar is added on top of it - the defaults are sized for that. Wayland is
+             * different: the compositor exposes no panel struts, and a client-side title bar
+             * (libdecor) only exists once the window has been created, so the usable bounds are
+             * the whole display. Asking for a 1280x800 client area on a 1280x800 panel - the Steam
+             * Deck's exact geometry - then puts the bottom of the interface under the screen edge.
+             *
+             * 48 logical pixels covers a title bar with a little slack. It costs nothing on a
+             * larger display, where the default stays 1280x800.
+             */
+            const int frameAllowance = (int)(48.0f * ddpiScale);
+            const int usableHeight = (std::max)(minHeight, usable.height - frameAllowance);
+            if (windowHeight > usableHeight) windowHeight = usableHeight;
         }
 
         // Record how the size was arrived at. Window geometry problems are otherwise hard to

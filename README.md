@@ -31,6 +31,19 @@ Re-architected from the ground up, the project transitions away from legacy Open
 
 ---
 
+## 🩹 What's New in v0.9.9.6
+
+A major feature, audio, performance, and peripheral release built on the v0.9.8.6 line:
+
+* **Native 4.0 / 5.1 Surround Output, Smart 5.1 Upmixer & Lock-Free WAV/FLAC Recorder**: `NbSoundChannels` now supports `6` (`[FL, FR, FC, LFE, RL, RR]`) alongside `4` (`[FL, FR, RL, RR]`), `2`, and `1`. `SurroundUpmix51` extracts common-mode vocals/navigator audio into Center (`FC`) and filters engine/collision bass into `LFE` through a 120 Hz 2nd-order Butterworth low-pass filter. A lock-free asynchronous recorder (`RecordWav` / `RecordWavFormat`) captures discrete multi-channel **WAV (32-bit IEEE Float / 16-bit PCM)** or **FLAC (24-bit / 16-bit PCM)** files to `Data/Recordings/Sound/`.
+* **SCSP 4-Tap Cubic Interpolation, Direct Float DSB & Master Soft-Clipper**: pure PCM SCSP voices now use loop-aware 4-tap Catmull-Rom cubic spline interpolation (keeping FM voices bit-exact), slave-SCSP FM ring-buffer cross-talk and Slot 16/17 `EXTS` routing are fixed, the DSB MPEG decoder outputs 32-bit float directly into the 64-tap resampler with per-sample volume ramping, and the master bus uses a $C^1$-continuous knee soft-clipper.
+* **Restored MPEG Music Intros & Fixed Daytona USA 2 Same-Track Bug**: looped DSB tracks keep their pre-loop intros (such as the 9.9-second intro of *Daytona USA 2*'s attract theme and 12.6-second race intros), and single-button view cycling (`VRCycle`) now emits a 6-frame momentary pulse instead of holding `VR3` down permanently (which previously triggered *Daytona USA 2*'s hidden track-8 BGM override cheat on every course).
+* **PowerPC 603e to x86-64 Hybrid JIT (`PowerPCMode`)**: translates 603e blocks to native x86-64 (~4.1× faster in CPU-bound scenes and pixel-identical to the interpreter across 675M lock-step blocks), paired with `CR3DSceneBuilder` optimisations ported from the Android branch.
+* **Steering Wheel Force Feedback & Live Axis Calibration**: fixed SDL3 DirectInput haptic initialisation order, raw-joystick wheel filtering, Cartesian constant-force sign, and `SDL_HAPTIC_SINE` road vibration. Added a DPI-aware wheel/pedal deadzone and travel calibration table on **FFB / Sensitivity** and a one-click "H-shifter release to neutral" generator on **Controls**.
+* **Need for Speed-Style Chase Camera & Stick Steering**: `ChaseCameraStabilizer` smooths camera yaw about the car's pivot without shaking 3D HUDs, paired with `GamepadSteeringSensitivity` (25%–100%, default 66%) and stronger stick smoothing (automatically bypassed for 1:1 direct response when a racing wheel is used, and reset to 100% when smoothing is Off).
+* **Attract-Mode Save States & Clean HD Texture Dumps**: `CSimNetBoard` state is now saved (and synthesized for older saves) so attract-mode saves no longer time out or hang on *"Please Wait"*; HD texture dumps write opaque alpha (`255`) for materials that ignore the 1-bit `T1RGB5` dither mask.
+* **macOS Retina 4K, Consolidated Platform Hotfixes (`v0.9.8.6a` / `v0.9.8.6x`) & Enriched Diagnostics**: native high-density 4K rendering on macOS Retina displays, 96-byte push constants for Windows + AMD GPUs (`maxPushConstantsSize = 128`), Ubuntu 24.04 `GLIBC_2.38` baseline + bundled font + Wayland title bars + in-game overlay input on Linux/macOS, a single `Data/Config/Model3-Vulkan.ini` configuration file, and expanded hardware/audio/calibration diagnostics in `Data/Model3Vulkan.log`.
+
 ## 🩹 What's New in v0.9.8.6
 
 A peripheral and interface release:
@@ -295,7 +308,7 @@ The version string is defined in exactly one location: `Src/Version.h`:
 ```c
 #define SUPERMODEL_VERSION      "0.3a-WIP"     /* Upstream core; recorded in save states */
 #define MODEL3VULKAN_UPSTREAM_RELEASE "0.3a-2026.09.28"
-#define MODEL3VULKAN_VERSION "0.9.8.6"
+#define MODEL3VULKAN_VERSION "0.9.9.6"
 ```
 
 `MODEL3VULKAN_TITLE_FULL` is assembled from the title and the fork version, and `build.bat` reads these definitions via `Scripts/VersionString.ps1`. `SUPERMODEL_VERSION` is deliberately preserved: it is recorded in save states and NVRAM, preventing existing saves from being invalidated.
@@ -325,6 +338,16 @@ The version string is defined in exactly one location: `Src/Version.h`:
 
 ---
 
+## 💖 Community & Support
+
+* **Reddit Community:** [r/Model3Vulkan](https://www.reddit.com/r/Model3Vulkan/) *(Join us for HD texture pack sharing, compatibility discussions, and netplay updates)*
+* **GitHub Discussions / Issues:** Open for technical discussions, bug reports, and hardware feedback.
+* **Support via Ko-fi:** Development is fueled by late-night reverse engineering, hardware validation, and community passion. If you find this project valuable, consider supporting via Ko-fi:
+
+[![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/igloogarage)
+
+---
+
 ## 📜 License & Credits
 
 Model 3-Vulkan is licensed under the **GNU General Public License v3.0 (GPLv3)**. See [Docs/LICENSE.txt](Docs/LICENSE.txt) for details.
@@ -342,14 +365,3 @@ In accordance with **Section 7(e) of the GNU General Public License v3.0 (GPLv3)
 Note: ™ denotes an unregistered / common-law trademark or brand asset; see [TRADEMARK.md](TRADEMARK.md) for the full policy, the company details, and the enforcement process.
 
 This project builds upon the reverse-engineering foundations laid by **Bart Trzynadlowski**, **Nik Henson**, **Ian (dukey)**, **Ville Linde**, **Stefano Teso**, and the original **Supermodel** team. Third-party components and attribution details are documented in [`Docs/NOTICE.md`](Docs/NOTICE.md).
-
----
-## 💖 Community & Support
-
-* **Reddit Community:** [r/Model3Vulkan](https://www.reddit.com/r/Model3Vulkan/) *(Join us for HD texture pack sharing, compatibility discussions, and netplay updates)*
-* **GitHub Discussions / Issues:** Open for technical discussions, bug reports, and hardware feedback.
-* **Support via Ko-fi:** Development is fueled by late-night reverse engineering, hardware validation, and community passion. If you find this project valuable, consider supporting via Ko-fi:
-
-[![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/igloogarage)
-
-

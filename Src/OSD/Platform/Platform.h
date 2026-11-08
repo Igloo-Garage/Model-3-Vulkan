@@ -106,6 +106,14 @@ struct DisplayMode
     int width = 0;
     int height = 0;
     float refreshHz = 0.0f;
+
+    /*
+     * Device pixels per coordinate unit of width/height. 1.0 everywhere the two spaces are the same
+     * and 2.0 on a Retina Mac, where a mode that "looks like" 1920x1080 is backed by a 3840x2160
+     * framebuffer. Anything that means the panel's real resolution (integer scaling, CRT presets,
+     * the hardware presets' clamp) has to multiply by this; anything that is a window size must not.
+     */
+    float pixelDensity = 1.0f;
 };
 
 /*

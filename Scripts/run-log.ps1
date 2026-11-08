@@ -46,7 +46,7 @@ $root = Split-Path -Parent $PSScriptRoot
 $bin = Join-Path $root "build-cmake\bin"
 $exe = Join-Path $bin $Exe
 if (-not (Test-Path $exe)) { Write-Output ("missing: " + $exe); exit 1 }
-if ($Log -eq "") { $Log = Join-Path $bin "Data\Supermodel.log" }
+if ($Log -eq "") { $Log = Join-Path $bin "Data\Model3Vulkan.log" }
 if (Test-Path $Log) { Remove-Item $Log -Force }
 
 if ($SetEnv -ne "") {

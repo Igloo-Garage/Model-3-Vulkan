@@ -2242,6 +2242,16 @@
         <file offset="0x000000" name="mpr-20484.22" crc32="0x8AC3FBC4" />
         <file offset="0x400000" name="mpr-20485.24" crc32="0xCFD8C19B" />
       </region>
+      <!-- DSB2 ROMs not dumped: the Twin's, when they are there -->
+      <region name="mpeg_program" stride="1" chunk_size="1" byte_swap="true" required="false" merge="false">
+        <file offset="0" name="epr-20641.2" crc32="0xC9B82035" />
+      </region>
+      <region name="mpeg_music" stride="1" chunk_size="1" required="false" merge="false">
+        <file offset="0x000000" name="mpr-20637.57" crc32="0xD66E8A02" />
+        <file offset="0x400000" name="mpr-20638.58" crc32="0xD1513382" />
+        <file offset="0x800000" name="mpr-20639.59" crc32="0xF6603B7B" />
+        <file offset="0xC00000" name="mpr-20640.60" crc32="0x9EEA07B7" />
+      </region>
     </roms>
   </game>
 
@@ -2381,7 +2391,7 @@
         <file offset="4" name="epr-crom2.18" crc32="0xE4147534" />
         <file offset="6" name="epr-crom3.17" crc32="0x84734E94" />
       </region>
-      <region name="banked_crom" stride="8" chunk_size="2" byte_swap="true">
+      <region name="banked_crom" stride="8" chunk_size="2" byte_swap="true" merge="false">
         <!-- CROM0 -->
         <file offset="0x0000000" name="epr-crom00.04" crc32="0xDC0D974D" />
         <file offset="0x0000002" name="epr-crom01.03" crc32="0x4D13685D" />

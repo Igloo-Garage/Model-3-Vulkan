@@ -43,6 +43,10 @@ if [ -f "$root/build-cmake/bin/libModel3VulkanHostCore.dylib" ]; then
 fi
 
 cp -R "$root/Config/." "$stage/Data/Config/"
+# Games.xml and Music.xml are the payload. A working copy can also hold the author's own settings and
+# their timestamped backups, and shipping those presents one machine's ROM path and video options as
+# if they were the defaults.
+find "$stage/Data/Config" -maxdepth 1 -type f \( -name '*.ini' -o -name '*.bak-*' \) -delete
 cp -R "$root/Assets/." "$stage/Data/Assets/"
 cp "$root/Model3VulkanBezel.png" "$stage/Data/Assets/"
 cp "$root/Docs/LICENSE.txt" "$stage/Data/"
@@ -51,6 +55,9 @@ cp "$root/Docs/NOTICE.md" "$root/LICENSE-ADDITIONAL-TERMS.md" "$root/TRADEMARK.m
 
 cp "$root/Docs/README-PACKAGE.txt" "$stage/README.txt"
 cp "$root/usermanual.md" "$root/usermanual_chs.md" "$root/supported-games.txt" "$stage"/
+if [ -f "$root/RELEASE_NOTES.md" ]; then
+    cp "$root/RELEASE_NOTES.md" "$stage"/
+fi
 
 if [ -f "$root/Scripts/install-linux-deps.sh" ] && [ "$platform" = "Linux" ]; then
     cp "$root/Scripts/install-linux-deps.sh" "$stage/Scripts/"

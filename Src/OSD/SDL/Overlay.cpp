@@ -132,9 +132,12 @@ bool g_haveSnapshot = false;
 // Input state carried between frames, because ImGui needs edges and the platform layer is otherwise
 // stateless.
 bool g_mouseDown[3] = {};
-bool g_keyDown[512] = {};            // indexed by Win32 virtual key
+bool g_keyDown[512] = {};            // indexed by Win32 virtual key, or by scancode off Windows
 #ifdef _WIN32
 POINT g_lastMouse = { -1, -1 };
+#else
+float g_lastMouseX = -1.0f;
+float g_lastMouseY = -1.0f;
 #endif
 
 // A frame's worth of ImGui draw data, kept so that building the UI and recording the GPU work can
@@ -178,7 +181,10 @@ const char* const kOverlayKeys[] = {
 	"PostGlow",
 	"PostGlowLevels",
 	"PostGlowThreshold",
-	"PostGain"
+	"PostGain",
+	"GamepadSteeringSmoothing",
+	"GamepadSteeringSensitivity",
+	"ChaseCameraStabilizer"
 };
 
 /*
@@ -197,7 +203,8 @@ const char* const kOverlayKeys[] = {
  * Windows only, along with IsDown() and g_lastMouse above. The table is spelled out in terms of
  * VK_* constants, which exist in no other platform's headers: leaving these declarations at file
  * scope - as they were - broke the Linux and macOS builds with "VK_TAB was not declared" and similar
- * before the compiler ever reached FeedInput(), where the #ifdef was.
+ * before the compiler ever reached FeedInput(), where the #ifdef was. The other platforms get an
+ * equivalent table keyed by HID usage id just below this block, fed from Platform::Input().
  */
 #ifdef _WIN32
 struct KeyMap
@@ -246,6 +253,51 @@ bool IsDown(int vk)
 }
 #endif  // _WIN32
 
+#if !defined(_WIN32)
+/*
+ * The same key set, expressed as USB HID usage ids - which is the numbering Platform::Scancode uses.
+ *
+ * These builds run CSDLInputSystem, so the platform's per-frame snapshot is the authoritative state:
+ * BeginInputFrame()/PollEvent() have already folded this frame's events into it before the panel is
+ * built. Polling the OS directly is not even an option off Windows: a Wayland client has no global
+ * pointer or keyboard state to ask for.
+ */
+struct KeyMap
+{
+	ImGuiKey imgui;
+	OSD::Platform::Scancode scancode;
+};
+
+const KeyMap kKeyMap[] = {
+	{ ImGuiKey_Tab,        43 },
+	{ ImGuiKey_LeftArrow,  80 },
+	{ ImGuiKey_RightArrow, 79 },
+	{ ImGuiKey_UpArrow,    82 },
+	{ ImGuiKey_DownArrow,  81 },
+	{ ImGuiKey_PageUp,     75 },
+	{ ImGuiKey_PageDown,   78 },
+	{ ImGuiKey_Home,       74 },
+	{ ImGuiKey_End,        77 },
+	{ ImGuiKey_Insert,     73 },
+	{ ImGuiKey_Delete,     76 },
+	{ ImGuiKey_Backspace,  42 },
+	{ ImGuiKey_Space,      44 },
+	{ ImGuiKey_Enter,      40 },
+	{ ImGuiKey_Escape,     41 },
+	{ ImGuiKey_A, 4 }, { ImGuiKey_C, 6 }, { ImGuiKey_V, 25 }, { ImGuiKey_X, 27 }, { ImGuiKey_Z, 29 },
+	{ ImGuiKey_0, 39 }, { ImGuiKey_1, 30 }, { ImGuiKey_2, 31 }, { ImGuiKey_3, 32 }, { ImGuiKey_4, 33 },
+	{ ImGuiKey_5, 34 }, { ImGuiKey_6, 35 }, { ImGuiKey_7, 36 }, { ImGuiKey_8, 37 }, { ImGuiKey_9, 38 },
+	{ ImGuiKey_Keypad0, 98 }, { ImGuiKey_Keypad1, 89 }, { ImGuiKey_Keypad2, 90 }, { ImGuiKey_Keypad3, 91 },
+	{ ImGuiKey_Keypad4, 92 }, { ImGuiKey_Keypad5, 93 }, { ImGuiKey_Keypad6, 94 }, { ImGuiKey_Keypad7, 95 },
+	{ ImGuiKey_Keypad8, 96 }, { ImGuiKey_Keypad9, 97 },
+	{ ImGuiKey_KeypadDecimal,  99 },
+	{ ImGuiKey_KeypadSubtract, 86 },
+	{ ImGuiKey_Minus,          45 },
+	{ ImGuiKey_Period,         55 },
+	{ ImGuiKey_Comma,          54 },
+};
+#endif  // !_WIN32
+
 // Feeds one frame of input into ImGui by reading the physical device state.
 void FeedInput()
 {
@@ -256,9 +308,24 @@ void FeedInput()
 		int windowW = 0, windowH = 0;
 		OSD::Platform::GetWindowSize(g_window, &windowW, &windowH);
 		io.DisplaySize = ImVec2((float)windowW, (float)windowH);
+
+		/*
+		 * The panel is laid out in window coordinates and rasterised into the swapchain, which is the
+		 * drawable: the two are the same size on Windows and Linux, and on a Retina Mac the drawable is
+		 * twice the window. ImGui_ImplVulkan_RenderDrawData() projects its vertices by this scale, so
+		 * leaving it at 1.0 drew the panel into the lower-left quarter at half size once the game window
+		 * was given a high-density drawable.
+		 */
+		int pixelW = windowW, pixelH = windowH;
+		OSD::Platform::GetWindowPixelSize(g_window, &pixelW, &pixelH);
+		io.DisplayFramebufferScale = (windowW > 0 && windowH > 0)
+			? ImVec2((float)pixelW / (float)windowW, (float)pixelH / (float)windowH)
+			: ImVec2(1.0f, 1.0f);
 	}
-	// No HiDPI framebuffer scaling: the swapchain is the window's pixel size in this renderer.
-	io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
+	else
+	{
+		io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
+	}
 
 	// Wheel delta for this frame. Read after the input system has polled, so it is this frame's
 	// events; discarded while the panel is closed, because scrolling a hidden panel would bank a
@@ -307,6 +374,51 @@ void FeedInput()
 		if (down != g_keyDown[map.vk & 511])
 		{
 			g_keyDown[map.vk & 511] = down;
+			io.AddKeyEvent(map.imgui, down);
+		}
+	}
+#else
+	/*
+	 * Non-Windows: everything comes from the platform snapshot. Before this branch existed, only the
+	 * wheel was fed here, so on Linux and macOS the panel could be opened and then not touched at all -
+	 * no pointer position, no clicks, no keys.
+	 */
+	const OSD::Platform::InputSnapshot& input = OSD::Platform::Input();
+
+	if (input.mouseX != g_lastMouseX || input.mouseY != g_lastMouseY)
+	{
+		g_lastMouseX = input.mouseX;
+		g_lastMouseY = input.mouseY;
+		io.AddMousePosEvent(input.mouseX, input.mouseY);
+	}
+
+	// ImGui's button order is left, right, middle; the platform's mask numbers middle before right.
+	const uint32_t mouseFlags[3] = {
+		OSD::Platform::MouseButton_Left,
+		OSD::Platform::MouseButton_Right,
+		OSD::Platform::MouseButton_Middle
+	};
+	for (int i = 0; i < 3; ++i)
+	{
+		const bool down = (input.mouseButtons & mouseFlags[i]) != 0;
+		if (down != g_mouseDown[i])
+		{
+			g_mouseDown[i] = down;
+			io.AddMouseButtonEvent(i, down);
+		}
+	}
+
+	// Modifiers are queued separately from the keys they combine with, and either side counts.
+	io.AddKeyEvent(ImGuiMod_Ctrl,  input.KeyDown(224) || input.KeyDown(228));
+	io.AddKeyEvent(ImGuiMod_Shift, input.KeyDown(225) || input.KeyDown(229));
+	io.AddKeyEvent(ImGuiMod_Alt,   input.KeyDown(226) || input.KeyDown(230));
+
+	for (const KeyMap& map : kKeyMap)
+	{
+		const bool down = input.KeyDown(map.scancode);
+		if (down != g_keyDown[map.scancode])
+		{
+			g_keyDown[map.scancode] = down;
 			io.AddKeyEvent(map.imgui, down);
 		}
 	}
@@ -617,6 +729,9 @@ void OverlaySetVisible(Util::Config::Node& config, bool visible)
 #ifdef _WIN32
 		g_lastMouse.x = -1;
 		g_lastMouse.y = -1;
+#else
+		g_lastMouseX = -1.0f;
+		g_lastMouseY = -1.0f;
 #endif
 	}
 	g_visible = visible;

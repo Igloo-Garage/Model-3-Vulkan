@@ -32,6 +32,7 @@
 #include "SDLInputSystem.h"
 
 #include "Supermodel.h"
+#include "Inputs/IglooInputFilter.h"
 #include "Inputs/Input.h"
 #include "OSD/Platform/PlatformInput.h"
 // Only for the SDL_SCANCODE_* constants in the key table below. They number USB HID usage ids in
@@ -555,15 +556,20 @@ bool CSDLInputSystem::OpenJoystickAt(int joyNum)
     joyDetails.numButtons = info.numButtons;
   }
 
-  // SDL3 exposes rumble but not the effect-based haptics SDL2 has, so force feedback is limited to
-  // what SetGamepadRumble() can express. The bindings still report the capability so that the
-  // settings UI can say what will actually happen.
-  joyDetails.hasFFeedback = info.isGamepad && info.hasRumble;
+  // Steering wheels and flight sticks expose effect-based force feedback (constant, spring,
+  // friction, sine vibration) through SDL_Haptic, whereas standard gamepads may only expose
+  // dual-motor rumble. Opening SDL_Haptic here probes real effect capability for raw joysticks
+  // (such as direct-drive wheel bases) as well as game controllers.
+  const bool hasHaptic = OSD::Platform::OpenHaptics(info.id) || info.hasHaptic;
+  joyDetails.hasFFeedback = hasHaptic || info.hasRumble;
+  joyDetails.isGamepad = info.isGamepad;
+  joyDetails.isWheel = Igloo::Input::IsRacingWheelDeviceName(joyDetails.name, info.isGamepad, info.numAxes);
 
   for (int axisNum = 0; axisNum < NUM_JOY_AXES; axisNum++)
   {
     joyDetails.hasAxis[axisNum] = joyDetails.numAxes > axisNum;
-    joyDetails.axisHasFF[axisNum] = joyDetails.hasFFeedback && (axisNum == AXIS_X || axisNum == AXIS_Y);
+    joyDetails.axisHasFF[axisNum] = joyDetails.hasFFeedback &&
+      (hasHaptic ? joyDetails.hasAxis[axisNum] : (axisNum == AXIS_X || axisNum == AXIS_Y));
     strcpy(joyDetails.axisName[axisNum], CInputSystem::GetDefaultAxisName(axisNum));
   }
 
@@ -577,10 +583,10 @@ bool CSDLInputSystem::OpenJoystickAt(int joyNum)
   // it (nothing here), or it was opened but the bindings do not match what the pad reports. The raw
   // capability figures are what makes the second case diagnosable - a pad with no X/Y is not a
   // driving wheel, and 16 buttons on the standard layout is the synthetic count, not the real one.
-  InfoLog("Input: joystick %d '%s' - %u axes, %u buttons, %u hat(s), %s, rumble %s.",
+  InfoLog("Input: joystick %d '%s' - %u axes, %u buttons, %u hat(s), %s, haptic %s, rumble %s.",
     (int)m_joyDetails.size(), joyDetails.name, (unsigned)info.numAxes, (unsigned)info.numButtons,
     (unsigned)info.numHats, info.isGamepad ? "game controller" : "raw joystick",
-    info.hasRumble ? "yes" : "no");
+    hasHaptic ? "yes" : "no", info.hasRumble ? "yes" : "no");
 
   // Seed the cached state without reporting it: the first diff would otherwise log every resting
   // hat as if it had just moved there.
@@ -1051,20 +1057,24 @@ int CSDLInputSystem::GetJoyAxisValue(int joyNum, int axisNum) const
 
   if (useStandard)
   {
+    const auto toRaw = [](float v) -> int {
+      return v < 0.0f ? (int)std::lround(v * 32768.0f) : (int)std::lround(v * 32767.0f);
+    };
     switch (axisNum) {
-      case AXIS_X:  return (int)(state.standardAxes[(unsigned)OSD::Platform::PadAxis::LeftX] * 32767.0f);
-      case AXIS_Y:  return (int)(state.standardAxes[(unsigned)OSD::Platform::PadAxis::LeftY] * 32767.0f);
-      case AXIS_Z:  return (int)(state.standardAxes[(unsigned)OSD::Platform::PadAxis::LeftTrigger] * 32767.0f);
-      case AXIS_RX: return (int)(state.standardAxes[(unsigned)OSD::Platform::PadAxis::RightX] * 32767.0f);
-      case AXIS_RY: return (int)(state.standardAxes[(unsigned)OSD::Platform::PadAxis::RightY] * 32767.0f);
-      case AXIS_RZ: return (int)(state.standardAxes[(unsigned)OSD::Platform::PadAxis::RightTrigger] * 32767.0f);
+      case AXIS_X:  return toRaw(state.standardAxes[(unsigned)OSD::Platform::PadAxis::LeftX]);
+      case AXIS_Y:  return toRaw(state.standardAxes[(unsigned)OSD::Platform::PadAxis::LeftY]);
+      case AXIS_Z:  return toRaw(state.standardAxes[(unsigned)OSD::Platform::PadAxis::LeftTrigger]);
+      case AXIS_RX: return toRaw(state.standardAxes[(unsigned)OSD::Platform::PadAxis::RightX]);
+      case AXIS_RY: return toRaw(state.standardAxes[(unsigned)OSD::Platform::PadAxis::RightY]);
+      case AXIS_RZ: return toRaw(state.standardAxes[(unsigned)OSD::Platform::PadAxis::RightTrigger]);
       default:      return 0;
     }
   }
 
   if (axisNum >= (int)OSD::Platform::kMaxGamepadAxes)
     return 0;
-  return (int)(state.axes[axisNum] * 32767.0f);
+  const float v = state.axes[axisNum];
+  return v < 0.0f ? (int)std::lround(v * 32768.0f) : (int)std::lround(v * 32767.0f);
 #else
   // Get raw joystick axis value for given joystick from SDL (values range from -32768 to 32767)
   if (m_useGameController)
@@ -1549,6 +1559,15 @@ void CSDLInputSystem::RefreshState()
   ReadSnapshot();
 }
 
+void CSDLInputSystem::RefreshJoyStateOnly()
+{
+#if defined(SUPERMODEL_PLATFORM_SDL3)
+  RefreshGamepadStates();
+#else
+  SDL_JoystickUpdate();
+#endif
+}
+
 void CSDLInputSystem::SetMouseVisibility(bool visible)
 {
   OSD::Platform::SetCursorVisible(visible);
@@ -1574,12 +1593,17 @@ void CSDLInputSystem::StopAllEffect(int joyNum)
 
 void CSDLInputSystem::StopConstanteforce(int joyNum)
 {
-  if (JoyNumValid(joyNum))
-    OSD::Platform::StopHapticEffect(m_gamepadIds[joyNum], OSD::Platform::HapticEffect::Constant);
+  if (!JoyNumValid(joyNum))
+    return;
+  OSD::Platform::StopHapticEffect(m_gamepadIds[joyNum], OSD::Platform::HapticEffect::Constant);
+  if (joyNum >= (int)m_padVibration.size() || m_padVibration[joyNum] <= 0.0f)
+    OSD::Platform::SetGamepadRumble(m_gamepadIds[joyNum], 0.0f, 0.0f, 0);
 }
 
 void CSDLInputSystem::StopVibrationforce(int joyNum)
 {
+  if (JoyNumValid(joyNum))
+    OSD::Platform::StopHapticEffect(m_gamepadIds[joyNum], OSD::Platform::HapticEffect::Vibration);
   VibrationEffect(0.0f, joyNum);
 }
 
@@ -1606,19 +1630,37 @@ void CSDLInputSystem::VibrationEffect(float strength, int joyNum)
   if (clamped > 1.0f)
     clamped = 1.0f;
 
+  // Prefer the SDL_Haptic periodic sine-wave effect (50 ms / 20 Hz, matching the SDL2 and
+  // DirectInput paths) so steering wheels vibrate through their force-feedback motor.
+  bool hapticSent = false;
+  if (OSD::Platform::OpenHaptics(m_gamepadIds[joyNum]))
+  {
+    hapticSent = OSD::Platform::SetHapticEffect(
+      m_gamepadIds[joyNum], OSD::Platform::HapticEffect::Vibration, clamped);
+  }
+
   /*
-   * Stored as a level and re-issued every frame by ServicePadVibration().
+   * Stored as a level and re-issued every frame by ServicePadVibration() when the device uses
+   * gamepad rumble rather than SDL_Haptic sine effects.
    *
    * The drive board only writes this value when it changes, and on real hardware that means "the
    * motor runs at this strength until further notice". SDL_RumbleGamepad() is a timed pulse, so a
    * single command produced one 100 ms buzz and then silence while the game still expected the
    * motor to be running - which is why a wall scrape felt like nothing at all.
    */
-  if (joyNum < (int)m_padVibration.size())
-    m_padVibration[joyNum] = clamped;
+  bool rumbleSent = false;
+  if (!hapticSent)
+  {
+    if (joyNum < (int)m_padVibration.size())
+      m_padVibration[joyNum] = clamped;
 
-  const bool sent = OSD::Platform::SetGamepadRumble(m_gamepadIds[joyNum], clamped, clamped,
-    clamped > 0.0f ? kVibrationPulseMs : 0);
+    rumbleSent = OSD::Platform::SetGamepadRumble(m_gamepadIds[joyNum], clamped, clamped,
+      clamped > 0.0f ? kVibrationPulseMs : 0);
+  }
+  else if (joyNum < (int)m_padVibration.size())
+  {
+    m_padVibration[joyNum] = 0.0f;
+  }
 
   // Once per session: "the pad never vibrates" and "the game never asks it to" look identical from
   // the outside, and this is the last place where the two can be told apart.
@@ -1626,8 +1668,9 @@ void CSDLInputSystem::VibrationEffect(float strength, int joyNum)
   if (!reported)
   {
     reported = true;
-    InfoLog("FFB: vibration force %.2f %s by the SDL rumble path.", clamped,
-      sent ? "accepted" : "rejected");
+    InfoLog("FFB: vibration force %.2f %s (%s).", clamped,
+      (hapticSent || rumbleSent) ? "accepted" : "rejected",
+      hapticSent ? "SDL_Haptic sine" : "SDL rumble");
   }
 }
 
@@ -1669,11 +1712,19 @@ void CSDLInputSystem::ConstantForceEffect(float force, int dir, int length, int 
 
   if (!JoyNumValid(joyNum))
     return;
-  if (!OSD::Platform::OpenHaptics(m_gamepadIds[joyNum]))
+  if (OSD::Platform::OpenHaptics(m_gamepadIds[joyNum]) &&
+      OSD::Platform::SetHapticEffect(m_gamepadIds[joyNum], OSD::Platform::HapticEffect::Constant,
+        force * (float)dir))
+  {
     return;
+  }
 
-  OSD::Platform::SetHapticEffect(m_gamepadIds[joyNum], OSD::Platform::HapticEffect::Constant,
-    force * (float)dir);
+  // Fallback for rumble-only gamepads that have no constant-force actuator, matching the SDL2 path.
+  const float threshold = (float)m_config["SDLConstForceThreshold"].ValueAs<unsigned>() / 100.0f;
+  if (force != 0.0f && force > threshold)
+    OSD::Platform::SetGamepadRumble(m_gamepadIds[joyNum], force, force, 200);
+  else if (joyNum >= (int)m_padVibration.size() || m_padVibration[joyNum] <= 0.0f)
+    OSD::Platform::SetGamepadRumble(m_gamepadIds[joyNum], 0.0f, 0.0f, 0);
 }
 
 void CSDLInputSystem::SpringForceEffect(float force, int joyNum)

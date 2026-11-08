@@ -132,9 +132,17 @@ public:
 	// Bindless slot for a hash, or -1 when the pack has no usable replacement (yet).
 	int Resolve(uint64_t hash, int wrapU, int wrapV);
 
-	// Snapshots a decoded sub-texture and queues the PNG write on the dump thread.
+	/*
+	 * Snapshots a decoded sub-texture and queues the PNG write on the dump thread.
+	 *
+	 * keepAlpha is false when every material drawn with this rectangle ignores the texture's alpha
+	 * (no contour, no alpha test): the shader forces alpha to 1 for those, so the PNG is written
+	 * fully opaque as well. The source bit is otherwise a 1-bit dither mask (T1RGB5 bit 15,
+	 * A4L4/RGBA4 alpha) that image viewers and GitHub show as white dotted lines, which reads as a
+	 * broken dump even though the game never uses it.
+	 */
 	void QueueDump(uint64_t hash, int page, int x, int y, int width, int height, int format,
-		const uint16_t* pageRam, int pageWidth, int pageHeight);
+		const uint16_t* pageRam, int pageWidth, int pageHeight, bool keepAlpha);
 
 	// Creates pending images, finishes their uploads/mips and publishes descriptors.
 	void RecordUploads(VkCommandBuffer cmd, CVulkanRingBuffer& ring);
@@ -227,6 +235,7 @@ private:
 		uint32_t width = 0;
 		uint32_t height = 0;
 		int format = 0;
+		bool keepAlpha = true;
 		std::vector<uint16_t> texels;
 	};
 
@@ -298,6 +307,7 @@ private:
 	bool m_dumperStop = false;
 	uint32_t m_dumpedCount = 0;
 	uint32_t m_dumpErrors = 0;
+	uint32_t m_alphaFlattened = 0;		// dumps written opaque because no material read alpha
 	bool m_dumpStarted = false;
 	bool m_firstResolveLogged = false;
 };

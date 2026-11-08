@@ -1466,6 +1466,8 @@ bool CVulkan3D::CreateFogPipelineFor(VkRenderPass renderPass, VkPipeline* dest)
 	VkPipelineInputAssemblyStateCreateInfo assembly = {};
 	assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
 	assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+	// Metal (MoltenVK) cannot disable primitive restart; see UiBlur.cpp.
+	assembly.primitiveRestartEnable = VK_TRUE;
 	VkPipelineViewportStateCreateInfo viewport = {};
 	viewport.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
 	viewport.viewportCount = 1;
@@ -2441,9 +2443,19 @@ void CVulkan3D::BuildDrawList()
 						if (textureHash != 0)
 						{
 							if (hdDump)
+							{
+								/*
+								 * Whether the texture's alpha channel is part of the picture is decided by the
+								 * material, not the format: the shader forces alpha to 1 unless the polygon asks
+								 * for contour (alpha test) or texture alpha. A dump written without that bit of
+								 * context shows the 1-bit transparency dither as white dots over a photo.
+								 */
+								const bool alphaUsed =
+									(material.flags & (kMatAlphaTest | kMatTextureAlpha)) != 0;
 								m_textures.DumpTexture(textureHash, material.texturePage & 1,
 									material.texX, material.texY, material.texWidth, material.texHeight,
-									material.texFormat);
+									material.texFormat, alphaUsed);
+							}
 							if (hdLoad)
 								material.hdTexIndex = m_textures.ResolveHDTexture(
 									textureHash, material.wrapModeX, material.wrapModeY);
@@ -2518,6 +2530,7 @@ void CVulkan3D::ResetInterpolation()
 	m_cutsSinceLog = 0;
 	m_cutFramesSinceLog = 0;
 	m_framesSinceLog = 0;
+	m_chaseStabilizer.Reset();
 }
 
 void CVulkan3D::PrepareMotion()
@@ -2530,6 +2543,13 @@ void CVulkan3D::PrepareMotion()
 	m_interpolationScope = m_config["InterpolationScope"].ValueAsDefault<int>(0);
 	if (m_interpolationScope < 0 || m_interpolationScope > 2)
 		m_interpolationScope = 0;
+	const int stabilizerPreset = std::clamp(m_config["ChaseCameraStabilizer"].ValueAsDefault<int>(3), 0, 3);
+	if (m_chaseStabilizer.SetPreset(stabilizerPreset))
+	{
+		for (auto& entry : m_viewportHistory)
+			entry.stabilizerValid = false;
+		InfoLog("Vulkan: chase camera stabilizer preset %d.", m_chaseStabilizer.Preset());
+	}
 	m_motionStats = MotionStats();
 
 	auto& nodes = m_scene.Nodes();
@@ -2632,6 +2652,63 @@ void CVulkan3D::PrepareMotion()
 			std::fabs(a.vpWidth - b.vpWidth) < 0.01f && std::fabs(a.vpHeight - b.vpHeight) < 0.01f;
 	};
 
+	// Measure the player car's centre distance (-Z in view space) and update the scene-wide
+	// chase camera stabilizer once per frame from the primary full-screen viewport, so transient
+	// effect viewports (exhaust backfire, tyre smoke) cannot desynchronise or reset the camera.
+	const New3D::Viewport* primaryCamVp = nullptr;
+	size_t primaryModels = 0;
+	for (size_t ni = 0; ni < nodes.size(); ni++)
+	{
+		const New3D::Viewport& vp = nodes[ni].viewport;
+		if (!vp.fullScreen || !vp.hasCameraMatrix)
+			continue;
+		if (!Igloo::Camera::HasNonTrivialWorldTranslation(vp.cameraMatrix))
+			continue;
+		if (nodes[ni].models.size() > primaryModels)
+		{
+			primaryModels = nodes[ni].models.size();
+			primaryCamVp = &vp;
+		}
+	}
+	auto sharesPrimaryCamera = [&](const New3D::Viewport& vp) -> bool
+	{
+		if (primaryCamVp == nullptr)
+			return false;
+		return Igloo::Camera::SharesWorldCamera(
+			vp.fullScreen, vp.hasCameraMatrix, vp.priority, vp.cameraMatrix,
+			primaryCamVp->priority, primaryCamVp->cameraMatrix);
+	};
+
+	Igloo::Camera::ChaseCameraStabilizer::StepResult camStep{};
+	if (primaryCamVp != nullptr)
+		camStep = m_chaseStabilizer.StepSceneCamera(primaryCamVp->cameraMatrix, m_cameraCutAngleDeg);
+
+	if (m_chaseStabilizer.Preset() > 0)
+	{
+		double sumZ = 0.0;
+		unsigned countZ = 0;
+		for (size_t ni = 0; ni < nodes.size(); ni++)
+		{
+			const New3D::Viewport& vp = nodes[ni].viewport;
+			if (!sharesPrimaryCamera(vp))
+				continue;
+			for (const New3D::Model& mdl : nodes[ni].models)
+			{
+				auto found = prevByKey.find(mdl.instanceKey);
+				if (found == prevByKey.end() || found->second.node == UINT32_MAX)
+					continue;
+				const New3D::Model& prevMdl = prevNodes[found->second.node].models[found->second.model];
+				float distZ = 0.0f;
+				if (Igloo::Camera::IsPlayerCarPivotCandidate(mdl.modelMat, prevMdl.modelMat, distZ))
+				{
+					sumZ += (double)distZ;
+					countZ++;
+				}
+			}
+		}
+		m_chaseStabilizer.UpdatePivotDistanceFromSamples(sumZ, countZ);
+	}
+
 	for (size_t ni = 0; ni < nodes.size(); ni++)
 	{
 		const New3D::Viewport& vp = nodes[ni].viewport;
@@ -2640,10 +2717,25 @@ void CVulkan3D::PrepareMotion()
 		DecomposeRigid(vp.baseMatrix, motion.currBase);
 		std::memcpy(motion.currProjection, vp.projectionMatrix.currentMatrix, sizeof(motion.currProjection));
 
+		const bool isWorldCamVp = sharesPrimaryCamera(vp);
+		if (camStep.stabilized && isWorldCamVp && !nodes[ni].models.empty())
+		{
+			// Only viewports that share the 3D world camera (matching priority and root
+			// world-to-view cameraMatrix) receive chase stabilization. Full-screen 3D HUD
+			// viewports (Daytona 2's speedometer, course map, turn arrows) stay locked to
+			// the screen.
+			motion.prevYawLag = camStep.prevYawLag;
+			motion.currYawLag = camStep.currYawLag;
+			motion.deltaYaw = camStep.deltaYaw;
+			motion.stabilized = true;
+		}
+
 		auto pit = prevViewport.find(vp.sourceAddress);
 		if (pit == prevViewport.end() || pit->second == nullptr)
 		{
-			motion.cut = true;
+			// If the scene camera is tracked via root cameraMatrix (Scud Race / Daytona 2),
+			// a shifted Culling RAM viewport slot is not a camera cut unless the camera cut.
+			motion.cut = (primaryCamVp != nullptr && vp.fullScreen) ? camStep.cameraCut : true;
 			continue;
 		}
 
@@ -2689,7 +2781,10 @@ void CVulkan3D::PrepareMotion()
 		}
 
 		const bool angleCut = motion.hasPrev && deltaAngle > m_cameraCutAngleDeg;
-		motion.cut = !motion.hasPrev || !sameLayout(prevVp, vp) || angleCut || distanceCut || deltaScale > 0.25f;
+		if (primaryCamVp != nullptr && vp.fullScreen)
+			motion.cut = camStep.cameraCut || angleCut || distanceCut || deltaScale > 0.25f;
+		else
+			motion.cut = !motion.hasPrev || !sameLayout(prevVp, vp) || angleCut || distanceCut || deltaScale > 0.25f;
 
 		if (history->samples == 0)
 		{
@@ -2725,6 +2820,9 @@ void CVulkan3D::PrepareMotion()
 			motion.hud = !vp.fullScreen && small && motion.hasPrev &&
 				deltaDistance < 0.01f && deltaAngle < 0.1f;
 		}
+
+		if (motion.hud)
+			motion.stabilized = false;
 
 		if (motion.cut || motion.hud || !motion.hasPrev)
 			continue;
@@ -2877,7 +2975,10 @@ void CVulkan3D::PrepareMotion()
 	for (size_t i = 0; i < m_viewportMotion.size(); i++)
 	{
 		const ViewportMotion& vm = m_viewportMotion[i];
-		cutsNow += vm.cut ? 1u : 0u;
+		// Only count a cut when the viewport actually carries scene geometry; a 1-model effect
+		// viewport (exhaust flame, particle layer) toggling on/off is not a camera cut.
+		if (vm.cut && !vm.hud && nodes[i].viewport.fullScreen && nodes[i].models.size() >= 16)
+			cutsNow += 1u;
 		hudsNow += vm.hud ? 1u : 0u;
 		for (const auto& im : m_modelMotion[i])
 		{
@@ -2923,33 +3024,60 @@ const float* CVulkan3D::EffectiveModelMatrix(std::size_t nodeIndex, std::size_t 
 		return nullptr;
 
 	const New3D::Model& model = nodes[nodeIndex].models[modelIndex];
-	if (alpha >= 0.999f || nodeIndex >= m_viewportMotion.size() ||
-		modelIndex >= m_modelMotion[nodeIndex].size())
+	if (nodeIndex >= m_viewportMotion.size() || modelIndex >= m_modelMotion[nodeIndex].size())
 		return model.modelMat;
 
 	const ViewportMotion& vp = m_viewportMotion[nodeIndex];
-	const InstanceMotion& inst = m_modelMotion[nodeIndex][modelIndex];
-	if (!vp.hasPrev || vp.cut || vp.hud || !vp.prevBase.valid || !vp.currBase.valid)
+	if (!vp.stabilized && alpha >= 0.999f)
 		return model.modelMat;
 
-	float base[16];
-	InterpolateRigid(vp.prevBase, vp.currBase, alpha, base);
+	// A screen-aligned far plane (e.g. Scud Race's 0x95B73E backdrop quad at (0, 0, -208) with
+	// identity view-space rotation) is locked to the camera frustum; rotating it would tilt the
+	// backdrop quad relative to the screen.
+	if (Igloo::Camera::IsScreenAlignedBackdrop(model.modelMat))
+		return model.modelMat;
 
-	if (inst.hasPrev && !inst.staticLocal && !inst.snap && inst.prevLocal.valid && inst.currLocal.valid)
+	const InstanceMotion& inst = m_modelMotion[nodeIndex][modelIndex];
+	if (vp.hud)
+		return model.modelMat;
+
+	const float* result = model.modelMat;
+	float interpOut[16];
+	if (alpha < 0.999f && vp.hasPrev && !vp.cut && vp.prevBase.valid && vp.currBase.valid)
 	{
-		float local[16];
-		// Linear blend of the instance's own transform, not a slerp. The camera above keeps the
-		// quaternion slerp (it is one global matrix, so it cannot open a seam); the instance must be
-		// a linear combination so that an edge shared with another model stays shared for every
-		// alpha. See LerpMatrix().
-		LerpMatrix(inst.prevLocalMat, inst.currLocalMat, (float)alpha, local);
-		Mul4x4(base, local, out);
+		float base[16];
+		InterpolateRigid(vp.prevBase, vp.currBase, alpha, base);
+
+		if (inst.hasPrev && !inst.staticLocal && !inst.snap && inst.prevLocal.valid && inst.currLocal.valid)
+		{
+			float local[16];
+			LerpMatrix(inst.prevLocalMat, inst.currLocalMat, (float)alpha, local);
+			Mul4x4(base, local, interpOut);
+		}
+		else
+		{
+			Mul4x4(base, model.localMat, interpOut);
+		}
+		result = interpOut;
 	}
-	else
+
+	if (vp.stabilized)
 	{
-		Mul4x4(base, model.localMat, out);
+		const float yawLag = vp.currYawLag;
+		if (std::fabs(yawLag) > 1.0e-5f)
+		{
+			float stab[16];
+			Igloo::Camera::BuildPivotYawCounterRotation(yawLag, m_chaseStabilizer.PivotDistance(), stab);
+			Mul4x4(stab, result, out);
+			return out;
+		}
 	}
-	return out;
+	if (result == interpOut)
+	{
+		std::memcpy(out, interpOut, sizeof(interpOut));
+		return out;
+	}
+	return result;
 }
 
 const float* CVulkan3D::EffectiveProjection(std::size_t nodeIndex, float alpha, float out[16])
@@ -3171,28 +3299,17 @@ void CVulkan3D::FillMaterial(R3DMaterial& material, const New3D::Mesh& mesh, con
 		material.flags |= kMatLayered;
 }
 
-void CVulkan3D::FillPush(R3DPush& push, const float modelView[16], const float projection[16], const New3D::Model& model, const New3D::Viewport& vp, uint32_t materialIndex, int layer) const
+/*
+ * Fills the per-draw half of the scene state.
+ *
+ * Everything that is constant for a viewport - the projection, the light parameters and the fog
+ * colour - is written into ViewportUBO by DrawBucket() instead, because the push constant block has
+ * to stay within the 128 bytes AMD's Windows driver reports (see R3DPush in VulkanCommon.h).
+ */
+void CVulkan3D::FillPush(R3DPush& push, const float modelView[16], const New3D::Model& model, const New3D::Viewport& vp, uint32_t materialIndex, int layer) const
 {
 	std::memcpy(push.modelView, modelView, sizeof(push.modelView));
-	std::memcpy(push.projection, projection, sizeof(push.projection));
-	push.projection[1] = -push.projection[1];
-	push.projection[5] = -push.projection[5];
-	push.projection[9] = -push.projection[9];
-	push.projection[13] = -push.projection[13];
-	push.lightDir[0] = vp.lightingParams[0];
-	push.lightDir[1] = vp.lightingParams[1];
-	push.lightDir[2] = vp.lightingParams[2];
-	push.lightDir[3] = vp.lightingParams[3];
-	push.lightParams[0] = vp.lightingParams[4];
-	push.lightParams[1] = m_sunClamp ? 1.0f : 0.0f;
-	push.lightParams[2] = vp.intensityClamp ? 1.0f : 0.0f;
-	push.lightParams[3] = (float)vp.hardwareStep;
-
 	push.fogParams[3] = model.alpha;
-	push.fogColour[0] = vp.fogColour[0];
-	push.fogColour[1] = vp.fogColour[1];
-	push.fogColour[2] = vp.fogColour[2];
-	push.fogColour[3] = vp.fogDensity;
 	push.fogParams[0] = vp.fogStart;
 	push.fogParams[1] = vp.fogAttenuation;
 	push.fogParams[2] = vp.fogAmbient;
@@ -3364,6 +3481,15 @@ void CVulkan3D::DrawBucket(VkCommandBuffer command, int priority, int overlay, i
 			void* ptr = nullptr;
 			if (!m_context.Ring().Alloc(sizeof(ViewportUBO), m_context.UniformAlignment(), uboOffset, ptr))
 				continue;
+			/*
+			 * Resolved before the block is written: the projection is now part of it. It used to be a
+			 * push constant, which is why this call sat at the end of the block - the 208-byte push
+			 * range was the reason the block could not be written earlier, and it is gone (see R3DPush in
+			 * VulkanCommon.h).
+			 */
+			projection = EffectiveProjection(item.nodeIndex, (float)alpha, interpProjection);
+			if (projection == nullptr)
+				continue;
 			ViewportUBO ubo = {};
 			ubo.spotEllipse[0] = vp.spotEllipse[0];
 			ubo.spotEllipse[1] = (float)m_color.height - vp.spotEllipse[1];
@@ -3381,6 +3507,27 @@ void CVulkan3D::DrawBucket(VkCommandBuffer command, int priority, int overlay, i
 			ubo.texFilter[1] = 4.0f;	// taps for the anisotropic mode
 			ubo.renderOptions[0] = m_quadInterpolation ? 1.0f : 0.0f;
 			ubo.renderOptions[1] = (m_alphaSortMode == 2) ? 1.0f : 0.0f;
+			// Per-viewport scene state, moved out of the push constant block so that block fits in the
+			// 128 bytes Vulkan guarantees (and AMD's Windows driver reports exactly that). The Y flip
+			// travels with the copy: the shader was written to receive the projection flipped, and
+			// nothing else here needs to know about it.
+			std::memcpy(ubo.projection, projection, sizeof(ubo.projection));
+			ubo.projection[1] = -ubo.projection[1];
+			ubo.projection[5] = -ubo.projection[5];
+			ubo.projection[9] = -ubo.projection[9];
+			ubo.projection[13] = -ubo.projection[13];
+			ubo.lightDir[0] = vp.lightingParams[0];
+			ubo.lightDir[1] = vp.lightingParams[1];
+			ubo.lightDir[2] = vp.lightingParams[2];
+			ubo.lightDir[3] = vp.lightingParams[3];
+			ubo.lightParams[0] = vp.lightingParams[4];
+			ubo.lightParams[1] = m_sunClamp ? 1.0f : 0.0f;
+			ubo.lightParams[2] = vp.intensityClamp ? 1.0f : 0.0f;
+			ubo.lightParams[3] = (float)vp.hardwareStep;
+			ubo.fogColour[0] = vp.fogColour[0];
+			ubo.fogColour[1] = vp.fogColour[1];
+			ubo.fogColour[2] = vp.fogColour[2];
+			ubo.fogColour[3] = vp.fogDensity;
 			std::memcpy(ptr, &ubo, sizeof(ubo));
 			uint32_t offsets[3] = {
 				(uint32_t)uboOffset,
@@ -3404,7 +3551,6 @@ void CVulkan3D::DrawBucket(VkCommandBuffer command, int priority, int overlay, i
 			vkCmdSetViewport(command, 0, 1, &view);
 			vkCmdSetScissor(command, 0, 1, &scissor);
 			currentNode = (int)item.nodeIndex;
-			projection = EffectiveProjection(item.nodeIndex, (float)alpha, interpProjection);
 		}
 
 		if (projection == nullptr)
@@ -3433,7 +3579,7 @@ void CVulkan3D::DrawBucket(VkCommandBuffer command, int priority, int overlay, i
 		}
 
 		R3DPush push;
-		FillPush(push, modelView, projection, model, node.viewport, item.materialIndex, attachment);
+		FillPush(push, modelView, model, node.viewport, item.materialIndex, attachment);
 		vkCmdPushConstants(command, m_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
 
 		/*
@@ -4188,6 +4334,9 @@ void CVulkan3D::PrepareFrame(void)
 	// Re-read every frame so the in-game overlay can toggle it live. It only changes the horizontal
 	// frustum, which CalcViewport derives per frame from this flag.
 	m_wide = m_config["WideScreen"].ValueAs<bool>() && m_internalExtent.width == 0;
+	const int stab = std::clamp(m_config["ChaseCameraStabilizer"].ValueAsDefault<int>(3), 0, 3);
+	m_scene.SetCullRadiusScale(Igloo::Camera::CullRadiusScaleFor(stab, m_wide));
+	m_scene.SetCullAngleMargin(Igloo::Camera::CullAngleSinMarginFor(stab, m_wide));
 	RefreshSceneViewport();
 	if (!(m_blockCulling && !m_noWhiteFlash))
 		m_scene.Build();

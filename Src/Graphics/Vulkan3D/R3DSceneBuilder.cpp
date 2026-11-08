@@ -23,6 +23,7 @@
  ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
  **/
 #include "R3DSceneBuilder.h"
+#include "IglooChaseCamera.h"
 #include "VulkanCommon.h"
 #include "../New3D/PolyHeader.h"
 #include "../New3D/R3DFloat.h"
@@ -32,6 +33,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <set>
@@ -89,6 +91,18 @@ void CR3DSceneBuilder::SetViewport(unsigned xOff, unsigned yOff, unsigned xRes, 
 
 void CR3DSceneBuilder::BeginFrame()
 {
+	/*
+	 * SM3D_HUD_DEBUG=1 makes the builder log the polygon states of HUD viewports, once per state per
+	 * session. This is the diagnosis hook for the Scud Race Deluxe (scuddx) grey HUD issue tracked in
+	 * issues_waitlist.md: the four small HUD viewports are dumped whole, and in full-screen viewports
+	 * only the overlay-ish states (highPriority / translucency / microtexture / alpha) are shown so
+	 * the Twin/DX HUD - which lives in the main viewport - can be compared against Deluxe.
+	 */
+	if (!m_hudDebug && std::getenv("SM3D_HUD_DEBUG") != nullptr)
+	{
+		m_hudDebug = true;
+		InfoLog("HUDDBG: SM3D_HUD_DEBUG is set; logging HUD viewport polygon states.");
+	}
 	/*
 	 * Double-buffer the traversal result. The previous frame has to survive so
 	 * the renderer can match instances and interpolate between the two; copying
@@ -176,26 +190,38 @@ bool CR3DSceneBuilder::DrawModel(uint32_t modelAddr)
 	New3D::Model* m = &m_nodes.back().models.back();
 	bool cached = false;
 
-	if (IsVROMModel(modelAddr) && !IsDynamicModel(const_cast<uint32_t*>(modelAddress)))
+	if (IsVROMModel(modelAddr))
 	{
-		m->meshes = m_romMap[modelAddr];
-		if (m->meshes)
+		auto it = m_romMap.find(modelAddr);
+		if (it != m_romMap.end() && it->second)
+		{
+			m->meshes = it->second;
+			m->dynamic = false;
 			cached = true;
-		else
+		}
+		else if (m_dynamicRomModels.find(modelAddr) != m_dynamicRomModels.end())
+		{
+			m->meshes = std::make_shared<std::vector<New3D::Mesh>>();
+			m->dynamic = true;
+		}
+		else if (!IsDynamicModel(const_cast<uint32_t*>(modelAddress)))
 		{
 			m->meshes = std::make_shared<std::vector<New3D::Mesh>>();
 			m_romMap[modelAddr] = m->meshes;
+			m->dynamic = false;
 		}
-		m->dynamic = false;
+		else
+		{
+			m_dynamicRomModels.insert(modelAddr);
+			m->meshes = std::make_shared<std::vector<New3D::Mesh>>();
+			m->dynamic = true;
+		}
 	}
 	else
 		m->meshes = std::make_shared<std::vector<New3D::Mesh>>();
 
-	for (int i = 0; i < 16; i++)
-	{
-		m->modelMat[i] = m_modelMat.currentMatrix[i];
-		m->localMat[i] = m_localMat.currentMatrix[i];
-	}
+	std::memcpy(m->modelMat, m_modelMat.currentMatrix, sizeof(m->modelMat));
+	std::memcpy(m->localMat, m_localMat.currentMatrix, sizeof(m->localMat));
 	m->sourceModelAddr = modelAddr;
 	m->matrixSlotID = m_lastMatrixSlotID;
 	m->instanceKey = MixKey(MixKey(m_pathHash, modelAddr), m_lastMatrixSlotID);
@@ -279,6 +305,19 @@ void CR3DSceneBuilder::DescendCullingNode(uint32_t addr)
 		MultMatrix(matrixOffset, m_modelMat);
 		MultMatrix(matrixOffset, m_localMat);
 		m_lastMatrixSlotID = m_matrixBaseAddr + matrixOffset;
+		// Capture the viewport's root node camera matrix (addr == m_vpRootAddr) so sibling2Ptr
+		// branches that recurse before the root node's PushMatrix cannot steal cameraMatrix.
+		New3D::Viewport& curVp = m_nodes.back().viewport;
+		if (addr == m_vpRootAddr && !curVp.hasCameraMatrix && !resetMatrix)
+		{
+			const float* bm = m_modelMat.currentMatrix;
+			if (Igloo::Camera::IsValidRigidCameraMatrix(bm))
+			{
+				for (int i = 0; i < 16; i++)
+					curVp.cameraMatrix[i] = bm[i];
+				curVp.hasCameraMatrix = true;
+			}
+		}
 	}
 	else
 		m_lastMatrixSlotID = 0;
@@ -291,7 +330,13 @@ void CR3DSceneBuilder::DescendCullingNode(uint32_t addr)
 	float x = m_modelMat.currentMatrix[12];
 	float y = m_modelMat.currentMatrix[13];
 	float z = m_modelMat.currentMatrix[14];
-	float cullRadius = R3DFloat::GetFloat16((uint16_t)(node[9 - m_offset] & 0xFFFF)) * m_nodeAttribs.currentModelScale;
+	float dist = std::sqrt(x * x + y * y + z * z);
+	// Angular frustum margin: rotating the camera by theta (ChaseCameraStabilizer) shifts a point
+	// at distance `dist` by `dist * sin(theta)` relative to the unstabilized frustum planes, which
+	// a multiplicative scale on a small cullRadius cannot cover for distant mountains or sky quads.
+	float cullRadius = Igloo::Camera::ComputeExpandedCullRadius(
+		R3DFloat::GetFloat16((uint16_t)(node[9 - m_offset] & 0xFFFF)),
+		m_nodeAttribs.currentModelScale, m_cullRadiusScale, m_cullAngleSin, dist);
 	float blendRadius = R3DFloat::GetFloat16((uint16_t)(node[9 - m_offset] >> 16)) * m_nodeAttribs.currentModelScale;
 
 	bool outside = (z * m_planes.bnlu - x * m_planes.bnlv * m_planes.correction) > cullRadius ||
@@ -299,7 +344,7 @@ void CR3DSceneBuilder::DescendCullingNode(uint32_t addr)
 		(z * m_planes.bnru - x * m_planes.bnrv * m_planes.correction) > cullRadius ||
 		(z * m_planes.bnbu + y * m_planes.bnbw) > cullRadius;
 
-	float lodScale = m_nodeAttribs.currentDisableCulling ? std::numeric_limits<float>::max() : (blendRadius / std::hypot(x, y, z));
+	float lodScale = m_nodeAttribs.currentDisableCulling ? std::numeric_limits<float>::max() : (blendRadius / dist);
 	lodScale = std::clamp(lodScale, 0.0f, std::numeric_limits<float>::max());
 
 	if (m_LODBlendTable && (m_nodeAttribs.currentDisableCulling || (!outside && lodScale >= m_LODBlendTable->table[lodTablePointer].lod[3].deleteSize)))
@@ -446,6 +491,65 @@ void CR3DSceneBuilder::ResetMatrix(New3D::Mat4& mat) const
 	mat.MultMatrix(m);
 }
 
+void CR3DSceneBuilder::DumpHudViewport(const New3D::Viewport& vp)
+{
+	if (!m_hudDebug)
+		return;
+
+	const bool hud = !vp.fullScreen && vp.screenArea < (496 * 384) / 4;
+
+	const auto& models = m_nodes.back().models;
+	size_t meshCount = 0, textured = 0, untextured = 0;
+	for (const New3D::Model& model : models)
+	{
+		if (!model.meshes)
+			continue;
+		for (const New3D::Mesh& mesh : *model.meshes)
+		{
+			++meshCount;
+			mesh.textured ? ++textured : ++untextured;
+		}
+	}
+
+	char vpKey[160];
+	std::snprintf(vpKey, sizeof(vpKey), "vp %s %s: %zu model(s), %zu mesh(es), %zu textured, %zu untextured",
+		m_dbgVpTag, hud ? "[HUD]" : "[full-screen]", models.size(), meshCount, textured, untextured);
+	if (m_hudVpsLogged.insert(vpKey).second)
+		InfoLog("HUDDBG: %s", vpKey);
+
+	for (const New3D::Model& model : models)
+	{
+		if (!model.meshes)
+			continue;
+		for (const New3D::Mesh& mesh : *model.meshes)
+		{
+			/*
+			 * Small viewports: every state, textured or not (the grey plate may be an untextured
+			 * polygon). Full-screen viewport: only the states that plausibly belong to a HUD drawn
+			 * inside the main viewport, otherwise the Twin/DX comparison prints the whole world.
+			 */
+			if (!hud && !(mesh.highPriority || mesh.transLSelect || mesh.microTexture ||
+				mesh.textureAlpha || mesh.polyAlpha || mesh.alphaTest))
+				continue;
+
+			char state[256];
+			std::snprintf(state, sizeof(state),
+				"  fmt=%d page=%d^%d aT=%d tA=%d pA=%d stipple=%d micro=%d/%d lit=%d hi=%d lay=%d "
+				"tMap=%d inv=%d tex=%dx%d@(%d,%d) eff=(%d,%d)%s",
+				mesh.format, mesh.page, (mesh.page ^ model.page) & 1,
+				mesh.alphaTest ? 1 : 0, mesh.textureAlpha ? 1 : 0, mesh.polyAlpha ? 1 : 0,
+				mesh.transLSelect ? 1 : 0, mesh.microTexture ? 1 : 0, mesh.microTextureID,
+				mesh.lighting ? 1 : 0, mesh.highPriority ? 1 : 0, mesh.layered ? 1 : 0,
+				mesh.translatorMap ? 1 : 0, mesh.inverted ? 1 : 0,
+				mesh.width, mesh.height, mesh.x, mesh.y,
+				mesh.x + model.textureOffsetX, mesh.y + model.textureOffsetY,
+				mesh.textured ? "" : " UNTEXTURED");
+			if (m_hudLogged.insert(state).second)
+				InfoLog("HUDDBG: %s", state);
+		}
+	}
+}
+
 void CR3DSceneBuilder::RenderViewport(uint32_t addr)
 {
 	static const float color[8][3] = {
@@ -547,15 +651,29 @@ void CR3DSceneBuilder::RenderViewport(uint32_t addr)
 
 	m_nodeAttribs.Reset();
 	m_pathHash = MixKey(0, vp->sourceAddress);
+	m_dbgInHudVp = m_hudDebug && !vp->fullScreen && vp->screenArea < (496 * 384) / 4;
+	std::snprintf(m_dbgVpTag, sizeof(m_dbgVpTag), "%.2fx%.2f@(%.2f,%.2f)p%d",
+		vp->vpWidth, vp->vpHeight, vp->vpX, vp->vpY, vp->priority);
 	InitMatrixStack(matrixBase, m_modelMat);
+
+	// VF3 starts rendering before its matrix memory is set up; the model matrix is then subnormal and the
+	// viewport would be drawn with garbage. The real hardware effectively skips it, which is why the game's
+	// start-up is only slow in the emulator when every one of those viewports is rendered.
+	if (std::fpclassify(m_modelMat.currentMatrix[0]) == FP_SUBNORMAL &&
+		std::fpclassify(m_modelMat.currentMatrix[1]) == FP_SUBNORMAL &&
+		std::fpclassify(m_modelMat.currentMatrix[2]) == FP_SUBNORMAL)
+		vpDisabled = true;
+
+	m_vpRootAddr = vpnode[0x02] & 0x00FFFFFF;
 	for (int i = 0; i < 16; i++)
 		vp->baseMatrix[i] = m_baseMat.currentMatrix[i];
 	if (!vpDisabled)
 	{
 		uint32_t childptr = vpnode[0x02];
-		if (((childptr >> 24) & 0x5) == 0)
+		if (((childptr >> 24) & 0x5) == 0 && (childptr & 0x00FFFFFF) != 0)
 			DescendNodePtr(vpnode[0x02]);
 	}
+	DumpHudViewport(*vp);
 	if (vpnode[0x01] != 0x01000000)
 		RenderViewport(vpnode[0x01]);
 }
@@ -581,10 +699,30 @@ void CR3DSceneBuilder::CopyVertexData(const New3D::R3DPoly& r3dPoly, std::vector
 {
 	if (r3dPoly.faceColour[3] == 0)
 		return;
-	vertexArray.emplace_back(r3dPoly, 0);
-	vertexArray.emplace_back(r3dPoly, 1);
-	vertexArray.emplace_back(r3dPoly, 2);
-	vertexArray.emplace_back(r3dPoly, r3dPoly.number == 4 ? 3 : 2);
+	const size_t oldSize = vertexArray.size();
+	vertexArray.resize(oldSize + 4);
+	New3D::FVertex* dst = vertexArray.data() + oldSize;
+
+	uint32_t packedColour;
+	std::memcpy(&packedColour, r3dPoly.faceColour, sizeof(packedColour));
+	const float fn0 = r3dPoly.faceNormal[0];
+	const float fn1 = r3dPoly.faceNormal[1];
+	const float fn2 = r3dPoly.faceNormal[2];
+	const float texNP = r3dPoly.textureNP;
+
+	dst[0].base = r3dPoly.v[0];
+	dst[1].base = r3dPoly.v[1];
+	dst[2].base = r3dPoly.v[2];
+	dst[3].base = r3dPoly.v[r3dPoly.number == 4 ? 3 : 2];
+
+	for (int i = 0; i < 4; i++)
+	{
+		dst[i].faceNormal[0] = fn0;
+		dst[i].faceNormal[1] = fn1;
+		dst[i].faceNormal[2] = fn2;
+		std::memcpy(dst[i].faceColour, &packedColour, sizeof(packedColour));
+		dst[i].textureNP = texNP;
+	}
 }
 
 void CR3DSceneBuilder::GetCoordinates(int width, int height, uint16_t uIn, uint16_t vIn, float uvScale, float& uOut, float& vOut) const
@@ -704,6 +842,33 @@ void CR3DSceneBuilder::CacheModel(New3D::Model* m, const uint32_t* data)
 				currentMesh = &meshes.back();
 				currentMesh->order = submission;
 				SetMeshValues(currentMesh, ph);
+				/*
+				 * HUD diagnosis: the face colour is deliberately NOT part of the batching hash, so two
+				 * builds of a game can submit the same state with different colours - which is exactly
+				 * how the same HUD plate can be a grey block in Deluxe and invisible in Twin.
+				 */
+				if (m_dbgInHudVp)
+				{
+					uint32_t col = ph.PolyColor() ? ph.header[4] : m_polyRAM[m_colorTableAddr + ph.ColorIndex()];
+					uint8_t trans = ph.Transparency();
+					if (ph.Discard1() && !ph.Discard2())
+						trans = (uint8_t)(trans / 2);
+					char dbg[260];
+					std::snprintf(dbg, sizeof(dbg),
+						"vp=%s hash=%016llX pc=%d col=%02X%02X%02X trans=%02X fmt=%d page=%d aT=%d tA=%d pA=%d "
+						"stipple=%d micro=%d/%d tex=%dx%d@(%d,%d) off=(%d,%d)%s",
+						m_dbgVpTag, (unsigned long long)hash, ph.PolyColor() ? 1 : 0,
+						(uint8_t)(col >> 24), (uint8_t)(col >> 16), (uint8_t)(col >> 8), trans,
+						currentMesh->format, currentMesh->page, currentMesh->alphaTest ? 1 : 0,
+						currentMesh->textureAlpha ? 1 : 0, currentMesh->polyAlpha ? 1 : 0,
+						currentMesh->transLSelect ? 1 : 0, currentMesh->microTexture ? 1 : 0,
+						currentMesh->microTextureID,
+						currentMesh->width, currentMesh->height, currentMesh->x, currentMesh->y,
+						m->textureOffsetX, m->textureOffsetY,
+						currentMesh->textured ? "" : " UNTEXTURED");
+					if (m_hudLogged.insert(dbg).second)
+						InfoLog("HUDDBG poly %s", dbg);
+				}
 				if (orderSensitive)
 				{
 					// A run is usually a handful of polygons, so the whole model's vertex count
@@ -848,6 +1013,7 @@ void CR3DSceneBuilder::CacheModel(New3D::Model* m, const uint32_t* data)
 					(unsigned)kMaxRomVerts, m_polyBufferRom.size());
 				m_polyBufferRom.clear();
 				m_romMap.clear();
+				m_dynamicRomModels.clear();
 				m_romReset = true;
 				return;
 			}

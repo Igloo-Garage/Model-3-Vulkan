@@ -2224,17 +2224,24 @@ bool CInputSystem::SendForceFeedbackCmd(int joyNum, int axisNum, ForceFeedbackCm
   {
     /*
      * Reported once, because this is the first gate a force-feedback command can die at and there
-     * is nothing else in the log to distinguish "the game sends none" from "the binding is not an
-     * analog pad axis". Vibration on a pad also stops here when the steering input is bound to a
-     * keyboard or a d-pad, which is the usual reason a pad that can rumble never does.
+     * is nothing else in the log to distinguish "the game sends none" from "the device has no
+     * haptic/rumble support" or "the binding is not an analog axis".
      */
     static bool reported = false;
     if (!reported)
     {
       reported = true;
-      InfoLog("FFB: command %d for joystick %d dropped (hasFFeedback=%d, axis %d hasFF=%d); "
-        "bind an analog pad axis to the steering input for vibration.",
-        (int)ffCmd.id, joyNum, (int)joyDetails->hasFFeedback, axisNum, (int)axisHasFF);
+      if (!joyDetails->hasFFeedback)
+      {
+        InfoLog("FFB: command %d for joystick %d ('%s') dropped because neither SDL_Haptic nor gamepad rumble is available on this device.",
+          (int)ffCmd.id, joyNum, joyDetails->name);
+      }
+      else
+      {
+        InfoLog("FFB: command %d for joystick %d ('%s') dropped (hasFFeedback=%d, axis %d hasFF=%d); "
+          "bind an analog axis to the steering input for force feedback.",
+          (int)ffCmd.id, joyNum, joyDetails->name, (int)joyDetails->hasFFeedback, axisNum, (int)axisHasFF);
+      }
     }
     return false;
   }

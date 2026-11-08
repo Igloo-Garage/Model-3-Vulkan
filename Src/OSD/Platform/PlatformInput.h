@@ -420,7 +420,8 @@ enum class HapticEffect : uint8_t
 {
     Constant = 0,
     Spring,
-    Friction
+    Friction,
+    Vibration
 };
 
 bool OpenHaptics(GamepadId id);
