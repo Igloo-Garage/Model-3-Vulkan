@@ -21,6 +21,9 @@
   </p>
 
 </div>
+
+**Discord Group:** https://discord.gg/C2yWpjE2m
+
 ---
 
 ## 🌟 Overview
@@ -30,6 +33,18 @@
 Re-architected from the ground up, the project transitions away from legacy OpenGL constraints in favor of a modern **pure Vulkan 1.3 rendering pipeline**, a cycle-accurate **Real3D graphics simulation**, a **native HD Texture Pack engine**, and an intuitive **frosted-glass eye-care UI**.
 
 ---
+
+## 🩹 What's New in v0.9.9.6
+
+A major emulation, audio and peripheral release:
+
+* **PowerPC 603e → x86-64 hybrid JIT**: hot basic blocks are translated once and executed natively. A lock-step check against the interpreter covered 675 million blocks with zero mismatches, and the same save state/frame is pixel-identical; a CPU-bound scene went from 55.2 Hz to 224.5 Hz. `PowerPCMode=0` keeps the C interpreter available as a reference.
+* **Real direct-drive force feedback**: SDL3 haptics are initialised before the joystick subsystem on Windows, so raw wheel bases (SIMAGIC, MOZA, Fanatec, ...) are recognised; the constant-force sign/axis encoding is fixed, the 20 ms attack envelope is retained, and the FFB / Sensitivity page has a live six-axis wheel/pedal deadzone and travel calibration table.
+* **Chase camera stabilizer and gamepad steering**: a spring-damper yaw filter around the car's pivot removes the horizon swing on a pad while keeping full-screen 3D HUDs (Daytona 2's speedometer, course map, turn arrows) still. Stick smoothing and sensitivity are configurable, and a physical wheel bypasses both filters.
+* **Native 4.0 / 5.1 audio and lossless recording**: quad and 5.1 output with a smart centre/LFE upmixer, 4-tap Catmull-Rom SCSP interpolation, 32-bit float DSB decoding, a C¹ soft-clipper, and a lock-free multi-channel WAV/FLAC recorder under `Data/Recordings/Sound/`.
+* **Save states that survive a cold boot**: the `53C810 PCI` state, the simulated network board, the DSB MPEG active window and the interrupt-line re-drive are now saved, so a state can be applied at the first frame instead of waiting for the boot to finish.
+* **Rendering and interface**: per-pixel alpha sorting (OIT), two-subpass on-chip composition, MSAA, exact quad interpolation, DDS/`.dds.zst` HD texture packs, frosted-glass light/dark/classic themes, 4K/Retina geometry and VRR integer multiples.
+* **Platform**: Windows AMD drivers that only expose 128-byte push constants now run, Linux is built on Ubuntu 24.04 (glibc 2.38 baseline), and macOS Retina 4K plus non-Windows in-game panel input are fixed.
 
 ## 🩹 What's New in v0.9.8.6
 
