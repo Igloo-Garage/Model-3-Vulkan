@@ -15,6 +15,9 @@
     <a href="https://www.reddit.com/r/Model3Vulkan/">
       <img src="https://img.shields.io/badge/Reddit-r%2FModel3Vulkan-orange.svg?style=flat-square" alt="Reddit">
     </a>
+    <a href="https://discord.gg/C2yWpjE2m">
+      <img src="https://img.shields.io/badge/Discord-Join%20the%20server-5865F2.svg?style=flat-square&logo=discord&logoColor=white" alt="Discord">
+    </a>
     <a href="https://ko-fi.com/igloogarage">
       <img src="https://img.shields.io/badge/Support%20on-Ko--fi-F16061?style=flat-square&logo=ko-fi&logoColor=white" alt="Ko-fi">
     </a>
@@ -310,7 +313,7 @@ The version string is defined in exactly one location: `Src/Version.h`:
 ```c
 #define SUPERMODEL_VERSION      "0.3a-WIP"     /* Upstream core; recorded in save states */
 #define MODEL3VULKAN_UPSTREAM_RELEASE "0.3a-2026.09.28"
-#define MODEL3VULKAN_VERSION "0.9.8.6"
+#define MODEL3VULKAN_VERSION "0.9.9.6"
 ```
 
 `MODEL3VULKAN_TITLE_FULL` is assembled from the title and the fork version, and `build.bat` reads these definitions via `Scripts/VersionString.ps1`. `SUPERMODEL_VERSION` is deliberately preserved: it is recorded in save states and NVRAM, preventing existing saves from being invalidated.
