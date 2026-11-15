@@ -417,3 +417,23 @@ za/
 
 
 
+
+# Local-only development notes, runbooks and ledgers. These stay on the workstation: AGENTS.md and
+# devdocs/ carry machine names, LAN addresses and the user-feedback ledger, and the runbooks are
+# working notes rather than documentation for players. They were published by accident once
+# (v0.9.9.8) and removed again; this list keeps that from recurring.
+AGENTS.md
+INDEX.md
+issues_from_users.md
+issues_waitlist.md
+JIT_runbook_for_X64.md
+runbook_sound_fix.md
+saves_fix.md
+vulkan_issues.md
+hdtexture_skills.md
+FightingVipers2_StageSound_glitch.md
+devdocs/
+Config/*.bak-*
+MacOS/
+Scripts/native.png
+Scripts/widescreen.png
