@@ -1,6 +1,6 @@
 # Model 3-Vulkan v0.9.9.8 — Release Notes
 
-**2026-11-14 · Windows x64 · Linux x86_64 · macOS Intel**
+**2026-11-14 · Windows x64 · Linux x86_64 · macOS Intel · macOS Apple Silicon**
 
 Model 3-Vulkan v0.9.9.8 is a performance release. Nothing in the emulation model changed: every
 game still renders the same picture it did in v0.9.9.6, and the same save states still load. What
@@ -19,6 +19,7 @@ that can actually be played at native resolution.
 | Windows x64 | `Model3-Vulkan.v0.9.9.8.for.Windows.zip` | Windows 10/11, Vulkan 1.3 |
 | Linux x86_64 | `Model3-Vulkan.v0.9.9.8.for.Linux.tar.gz` | glibc 2.38+, Vulkan 1.3 |
 | macOS Intel | `Model3-Vulkan.v0.9.9.8.for.macOS-Intel.tar.gz` | macOS 13.0+, bundled MoltenVK 1.3 |
+| macOS Apple Silicon | `Model3-Vulkan.v0.9.9.8.for.macOS-AppleSilicon.tar.gz` | macOS 13.3+, bundled MoltenVK 1.3 |
 
 `SHA256SUMS.txt` is attached to the release. Every archive extracts to a relocatable folder; put your
 ROM zips in its `roms/` directory (or point `ROMPath` at them). The Linux archive is built on Ubuntu
@@ -26,6 +27,9 @@ ROM zips in its `roms/` directory (or point `ROMPath` at them). The Linux archiv
 loads on Ubuntu 24.04, SteamOS 3.5+ and other current distributions. The macOS Intel build carries
 its own `libMoltenVK.dylib` and targets macOS 13.0; `.zst` saves need macOS 14+ because the host core
 links against a newer Swift runtime, and on macOS 13 the emulator falls back to `.st` automatically.
+The Apple Silicon archive is the arm64 slice of the same build: the application, the host core and
+MoltenVK are all pure arm64, so M1–M4 machines run it natively. Intel Macs should take the Intel-only
+archive instead.
 
 ---
 

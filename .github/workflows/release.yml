@@ -1,10 +1,10 @@
 name: Build and Release
 
+# Manual only since v0.9.9.8: a tag push used to trigger this, and it would rebuild the release from
+# the tag and overwrite assets that had just been uploaded by hand (Linux and macOS Intel are built
+# on the LAN laptop). Dispatch it when an Apple Silicon package should be produced in CI.
 on:
-  push:
-    tags:
-      - 'v*'
-  workflow_dispatch:      # Manual triggering
+  workflow_dispatch:
 
 jobs:
   build:
