@@ -163,6 +163,15 @@ Two changes reduce per-frame CPU in the renderer, which matters most on the Inte
 Both changes are pixel-identical: the four games above compare at **0 differing pixels** against
 the build without them.
 
+### What it looks like on an Intel iGPU
+
+Same save state (`vf3tb.zst1`), 1920×1080 output, 2× MSAA, frame pacing unlocked: **141.5 FPS
+(7.07 ms/frame)** on integrated Intel Arc graphics — about 2.5× the arcade's 57.52 Hz. Under the
+heavy 2480×1920 2× MSAA load used in the table above, the same scene went from 45.5 to 73.2 FPS
+(+60.9%).
+
+![VF3tb on Intel Arc at 1080p with unlocked frame pacing: 141.5 FPS, 7.07 ms per frame](https://raw.githubusercontent.com/Igloo-Garage/Model-3-Vulkan/master/Docs/images/v0.9.9.8/vf3tb-unlocked-intel-arc-1080p.webp)
+
 ---
 
 ## 🏁 Dirt Devils: the 4 KB page stutter is fixed
@@ -193,6 +202,12 @@ Result, same save state, 30 seconds:
 
 The code cache is 64 MB, and `SM3D_PPC_JIT_VERIFY=1` re-verifies the invalidation against the
 interpreter block by block (26.6 million blocks, 0 failures on the test matrix).
+
+Before the fix the same save was capped near 20 FPS by re-translation — 45–66 ms of simulation
+hand-off per frame, no matter how fast the GPU was. The card now renders it at **173.8 FPS
+(5.75 ms/frame)**, 2480×1920 with 2× MSAA and frame pacing unlocked.
+
+![Dirt Devils on RTX 5060 Ti at 2480×1920, 2× MSAA with unlocked frame pacing: 173.8 FPS, 5.75 ms per frame](https://raw.githubusercontent.com/Igloo-Garage/Model-3-Vulkan/master/Docs/images/v0.9.9.8/dirtdvls-unlocked-rtx5060ti.webp)
 
 ---
 
@@ -307,6 +322,9 @@ The two controls now stay in step: choosing `1x (496 x 384)` sets the internal s
    重译约 2300 次。现在改为三层失效：32 字节行门 + 每字节位图 + 4 KB 页 generation，只有真正
    覆盖到已翻译指令字节的写入才作废该页。仿真交接时间从 **45–66 ms/帧** 降到 **0.28–0.78 ms/帧**，
    存储触发的刷新从每帧约 2300 次降到 **0**。
+
+**实测截图（解锁帧率）**：RTX 5060 Ti 上《Dirt Devils》2480×1920 / 2× MSAA 为 **173.8 FPS**
+（5.75 ms/帧）；Intel Arc 核显上 `vf3tb` 1080p / 2× MSAA 为 **141.5 FPS**（7.07 ms/帧，约 2.5× 街机满速）。
 
 **其它：**
 
