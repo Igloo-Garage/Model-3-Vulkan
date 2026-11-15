@@ -445,8 +445,10 @@ void CInputs::LoadFromConfig(const Util::Config::Node &config)
 	const int defaultView = config["VRDefaultView"].ValueAsDefault<int>(2);
 	m_vrDefaultIndex = (defaultView >= 0 && defaultView <= 3) ? defaultView : 2;
 	m_vrCycleIndex = m_vrDefaultIndex;
+	m_vrPulseFrames = 0;
 
-	SetGamepadSteeringSmoothing(config["GamepadSteeringSmoothing"].ValueAsDefault<int>(0));
+	SetGamepadSteeringSmoothing(config["GamepadSteeringSmoothing"].ValueAsDefault<int>(3));
+	SetGamepadSteeringSensitivity(config["GamepadSteeringSensitivity"].ValueAsDefault<int>(66));
 
 	for (auto& i : m_inputs) {
 		i->LoadFromConfig(config);
@@ -490,9 +492,11 @@ bool CInputs::IsVRSelected(int index) const
 {
 	if (index < 0 || index > 3)
 		return false;
-	if (m_vrCycle)
+	if (vr[index] != nullptr && vr[index]->value != 0)
+		return true;
+	if (m_vrCycle && m_vrPulseFrames > 0)
 		return index == m_vrCycleIndex;
-	return vr[index] != nullptr && vr[index]->value != 0;
+	return false;
 }
 
 void CInputs::StoreToConfig(Util::Config::Node *config)
@@ -906,8 +910,23 @@ bool CInputs::Poll(const Game *game, unsigned dispX, unsigned dispY, unsigned di
 	// views.
 	if (m_vrCycle && vrNext != nullptr && (gameFlags & Game::INPUT_VR4))
 	{
+		if (m_vrPulseFrames > 0)
+			--m_vrPulseFrames;
+
+		for (int i = 0; i < 4; ++i)
+		{
+			if (vr[i] != nullptr && vr[i]->Pressed())
+				m_vrCycleIndex = i;
+		}
+
 		if (vrNext->Pressed())
+		{
 			m_vrCycleIndex = (m_vrCycleIndex + 1) & 3;
+			m_vrPulseFrames = 6; // ~104 ms momentary button press
+			// One line per press: when a player reports the camera "changing by itself",
+			// this log says whether the view button fired or the game moved the camera.
+			InfoLog("Input: view cycle -> VR%d.", m_vrCycleIndex + 1);
+		}
 	}
 
 	  return true;
@@ -948,49 +967,92 @@ void CInputs::PollPointerLate(const Game *game)
   }
 }
 
-namespace
-{
-	struct SteeringSmoothingPreset
-	{
-		double tau;      // first-order time constant, seconds
-		double maxStep;  // maximum normalized change per 57.524 Hz frame
-		double gamma;    // response curve exponent
-	};
-
-	// Index 0 is unused: off bypasses the filter entirely.
-	const SteeringSmoothingPreset s_steeringSmoothing[4] = {
-		{ 0.000, 1.00, 1.00 },
-		{ 0.035, 0.16, 1.25 },
-		{ 0.050, 0.10, 1.50 },
-		{ 0.075, 0.07, 1.70 },
-	};
-}
-
 void CInputs::SetGamepadSteeringSmoothing(int preset)
 {
-	preset = std::clamp(preset, 0, 3);
-	if (preset == m_gamepadSteeringSmoothing)
+	if (!m_steeringFilter.SetPreset(preset))
 		return;
 
-	m_gamepadSteeringSmoothing = preset;
-	m_steeringFilterValid = false;   // start from the current physical position, without a sweep
-	m_steeringFiltered = 0.0;
-
-	if (preset == 0)
+	const int activePreset = m_steeringFilter.Preset();
+	if (activePreset == 0)
+	{
 		InfoLog("Input: gamepad steering smoothing off.");
+	}
 	else
-		InfoLog("Input: gamepad steering smoothing preset %d (%.0f ms filter, %.0f%% full lock per frame, gamma %.2f).",
-			preset, s_steeringSmoothing[preset].tau * 1000.0,
-			s_steeringSmoothing[preset].maxStep * 100.0, s_steeringSmoothing[preset].gamma);
+	{
+		const auto& sp = Igloo::Input::GetSteeringSmoothingPreset(activePreset);
+		InfoLog("Input: gamepad steering smoothing preset %d (%.0f ms filter, %.1f%% full lock per frame, gamma %.2f).",
+			activePreset, sp.tau * 1000.0, sp.maxStep * 100.0, sp.gamma);
+	}
+}
+
+void CInputs::SetGamepadSteeringSensitivity(int percent)
+{
+	if (!m_steeringFilter.SetSensitivityPercent(percent))
+		return;
+	InfoLog("Input: gamepad steering sensitivity %d%%.", m_steeringFilter.SensitivityPercent());
+}
+
+bool CInputs::IsSteeringBoundToWheel() const
+{
+	if (steering == nullptr || m_system == nullptr)
+		return false;
+
+	const char* map = steering->GetMapping();
+	if (map == nullptr || map[0] == '\0')
+		return false;
+
+	const int numJoys = m_system->GetNumJoysticks();
+	bool anyJoyChecked = false;
+	bool allCheckedAreWheels = true;
+
+	// Scan for "JOY<N>_" tokens in the steering mapping
+	const char* p = map;
+	while ((p = std::strstr(p, "JOY")) != nullptr)
+	{
+		p += 3;
+		if (*p >= '1' && *p <= '9')
+		{
+			int joyNum = 0;
+			while (*p >= '0' && *p <= '9')
+			{
+				joyNum = joyNum * 10 + (*p - '0');
+				++p;
+			}
+			const int joyIdx = joyNum - 1;
+			if (joyIdx >= 0 && joyIdx < numJoys)
+			{
+				const JoyDetails* details = m_system->GetJoyDetails(joyIdx);
+				if (details != nullptr)
+				{
+					anyJoyChecked = true;
+					if (!details->isWheel)
+						allCheckedAreWheels = false;
+				}
+			}
+		}
+	}
+	return anyJoyChecked && allCheckedAreWheels;
 }
 
 void CInputs::FilterSteering()
 {
-	if (m_gamepadSteeringSmoothing <= 0 || steering == nullptr)
+	// Off mode (Preset() <= 0) or a physical steering wheel always runs 1:1
+	// direct pass-through without gamepad sensitivity scaling or damping.
+	if (m_steeringFilter.Preset() <= 0 || steering == nullptr)
 		return;
 
+	if (IsSteeringBoundToWheel())
+	{
+		static bool s_loggedWheelBypass = false;
+		if (!s_loggedWheelBypass)
+		{
+			s_loggedWheelBypass = true;
+			InfoLog("Input: steering is bound to a wheel peripheral; bypassing gamepad steering smoothing and sensitivity (1:1 direct response).");
+		}
+		return;
+	}
+
 	const double raw = steering->SignedFraction();
-	const SteeringSmoothingPreset& preset = s_steeringSmoothing[m_gamepadSteeringSmoothing];
 	double target = raw;
 
 	/*
@@ -1002,34 +1064,15 @@ void CInputs::FilterSteering()
 	if (forced != nullptr && forced[0] != '\0')
 		target = std::clamp((double)std::atof(forced), -1.0, 1.0);
 
-	// Centre-precision curve. Apply it before the first sample too, so enabling smoothing while the
-	// stick is held off-centre does not write one uncorrected value.
-	const double curved = std::copysign(std::pow(std::fabs(target), preset.gamma), target);
-
-	if (!m_steeringFilterValid)
-	{
-		m_steeringFiltered = curved;
-		m_steeringFilterValid = true;
-	}
-	else
-	{
-		const double dt = 1.0 / kModel3StepHz;
-		const double follow = dt / (preset.tau + dt);
-		double step = (curved - m_steeringFiltered) * follow;
-		step = std::clamp(step, -preset.maxStep, preset.maxStep);
-		// Never overshoot the target when the remaining error is smaller than the rate cap.
-		if (std::fabs(step) > std::fabs(curved - m_steeringFiltered))
-			step = curved - m_steeringFiltered;
-		m_steeringFiltered += step;
-	}
-
-	steering->SetSignedFraction(m_steeringFiltered);
+	double curved = 0.0;
+	const double filtered = m_steeringFilter.Process(target, kModel3StepHz, &curved);
+	steering->SetSignedFraction(filtered);
 
 	++m_steeringProbeFrame;
 	if (m_steeringProbe && ((m_steeringProbeFrame % 30) == 0 ||
-		std::fabs(m_steeringFiltered - curved) > 0.01))
+		std::fabs(filtered - curved) > 0.01))
 		InfoLog("SteerProbe: raw=%.3f curved=%.3f filtered=%.3f value=%u preset=%d.",
-			raw, curved, m_steeringFiltered, (unsigned)steering->value, m_gamepadSteeringSmoothing);
+			raw, curved, filtered, (unsigned)steering->value, m_steeringFilter.Preset());
 }
 
 void CInputs::PollGameInputsLate(const Game *game)

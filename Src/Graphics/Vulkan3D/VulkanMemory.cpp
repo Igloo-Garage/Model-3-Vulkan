@@ -110,7 +110,7 @@ VkDeviceSize CVulkanMemory::TotalFree() const
 	return total;
 }
 
-bool CVulkanMemory::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags props, AllocatedBuffer& out)
+bool CVulkanMemory::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags props, AllocatedBuffer& out, bool quietFailure)
 {
 	out = AllocatedBuffer();
 	VkBufferCreateInfo info = {};
@@ -120,7 +120,8 @@ bool CVulkanMemory::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, Vk
 	info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 	if (vkCreateBuffer(m_device, &info, nullptr, &out.buffer) != VK_SUCCESS)
 	{
-		ErrorLog("Vulkan: vkCreateBuffer failed (%llu bytes).", (unsigned long long)size);
+		if (!quietFailure)
+			ErrorLog("Vulkan: vkCreateBuffer failed (%llu bytes).", (unsigned long long)size);
 		return false;
 	}
 
@@ -131,7 +132,8 @@ bool CVulkanMemory::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, Vk
 	{
 		vkDestroyBuffer(m_device, out.buffer, nullptr);
 		out.buffer = VK_NULL_HANDLE;
-		ErrorLog("Vulkan: no memory type for buffer.");
+		if (!quietFailure)
+			ErrorLog("Vulkan: no memory type for buffer.");
 		return false;
 	}
 
@@ -143,7 +145,8 @@ bool CVulkanMemory::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, Vk
 	{
 		vkDestroyBuffer(m_device, out.buffer, nullptr);
 		out.buffer = VK_NULL_HANDLE;
-		ErrorLog("Vulkan: vkAllocateMemory failed (%llu bytes).", (unsigned long long)req.size);
+		if (!quietFailure)
+			ErrorLog("Vulkan: vkAllocateMemory failed (%llu bytes).", (unsigned long long)req.size);
 		return false;
 	}
 	if (vkBindBufferMemory(m_device, out.buffer, out.memory, 0) != VK_SUCCESS)

@@ -35,7 +35,7 @@ $VK = @{ '1' = 0x31; '3' = 0x33; 'UP' = 0x26; 'DOWN' = 0x28; 'LEFT' = 0x25; 'RIG
 
 $root = Split-Path -Parent $PSScriptRoot
 $exe = Join-Path $root "build-cmake\bin\Model3-Vulkan.exe"
-$log = Join-Path $root "build-cmake\bin\Data\Supermodel.log"
+$log = Join-Path $root "build-cmake\bin\Data\Model3Vulkan.log"
 $dir = Join-Path $root "build-cmake\bin\Data\Screenshots"
 if (Test-Path $log) { Remove-Item $log -Force }
 if (Test-Path $dir) { Get-ChildItem $dir -Filter *.png | Remove-Item -Force }

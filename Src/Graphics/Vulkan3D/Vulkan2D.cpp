@@ -593,6 +593,8 @@ bool CVulkan2D::CreatePipeline()
 	VkPipelineInputAssemblyStateCreateInfo assembly = {};
 	assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
 	assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+	// Metal (MoltenVK) cannot disable primitive restart; see UiBlur.cpp.
+	assembly.primitiveRestartEnable = VK_TRUE;
 	VkPipelineViewportStateCreateInfo viewport = {};
 	viewport.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
 	viewport.viewportCount = 1;
@@ -1245,6 +1247,8 @@ bool CVulkan2D::CreatePostPipeline()
 	VkPipelineInputAssemblyStateCreateInfo inputAssembly = {};
 	inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
 	inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+	// Metal (MoltenVK) cannot disable primitive restart; see UiBlur.cpp.
+	inputAssembly.primitiveRestartEnable = VK_TRUE;
 
 	VkPipelineViewportStateCreateInfo viewport = {};
 	viewport.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;

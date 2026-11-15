@@ -48,7 +48,7 @@ namespace Vulkan3D {
  * to spare, and an unbound slot costs nothing at run time: the binding is partially
  * bound and the shader only indexes a slot that has been resolved.
  */
-constexpr uint32_t kMaxHDTextures = 2048;
+constexpr uint32_t kMaxHDTextures = 8192;
 
 // Rough ceiling on device memory held by replacement textures, including mips. A pack larger than
 // this is truncated rather than allowed to exhaust the heap; the log says so.
@@ -132,16 +132,33 @@ public:
 	// Bindless slot for a hash, or -1 when the pack has no usable replacement (yet).
 	int Resolve(uint64_t hash, int wrapU, int wrapV);
 
-	// Snapshots a decoded sub-texture and queues the PNG write on the dump thread.
+	/*
+	 * Snapshots a decoded sub-texture and queues the PNG write on the dump thread.
+	 *
+	 * keepAlpha is false when every material drawn with this rectangle ignores the texture's alpha
+	 * (no contour, no alpha test): the shader forces alpha to 1 for those, so the PNG is written
+	 * fully opaque as well. The source bit is otherwise a 1-bit dither mask (T1RGB5 bit 15,
+	 * A4L4/RGBA4 alpha) that image viewers and GitHub show as white dotted lines, which reads as a
+	 * broken dump even though the game never uses it.
+	 */
 	void QueueDump(uint64_t hash, int page, int x, int y, int width, int height, int format,
-		const uint16_t* pageRam, int pageWidth, int pageHeight);
+		const uint16_t* pageRam, int pageWidth, int pageHeight, bool keepAlpha);
 
 	// Creates pending images, finishes their uploads/mips and publishes descriptors.
 	void RecordUploads(VkCommandBuffer cmd, CVulkanRingBuffer& ring);
 
 	const std::string& Directory() const { return m_directory; }
+	uint32_t IndexedCount() const { return (uint32_t)m_index.size(); }
+	uint32_t SlotCount() const { return (uint32_t)m_slots.size(); }
 	uint32_t LoadedCount() const { return m_loadedCount; }
 	uint32_t PendingCount() const { return m_pendingCount; }
+	uint32_t FailedCount() const { return m_failedCount; }
+	uint32_t MissingCount() const { return (uint32_t)m_missing.size(); }
+	uint64_t BytesUsed() const { return m_bytes; }
+	uint32_t DumpedCount() const { return m_dumpedCount; }
+	uint32_t DumpErrorCount() const { return m_dumpErrors; }
+	uint32_t AlphaFlattenedCount() const { return m_alphaFlattened; }
+	uint32_t DumpQueueSize();
 
 private:
 	struct LoadKey
@@ -227,6 +244,7 @@ private:
 		uint32_t width = 0;
 		uint32_t height = 0;
 		int format = 0;
+		bool keepAlpha = true;
 		std::vector<uint16_t> texels;
 	};
 
@@ -298,6 +316,7 @@ private:
 	bool m_dumperStop = false;
 	uint32_t m_dumpedCount = 0;
 	uint32_t m_dumpErrors = 0;
+	uint32_t m_alphaFlattened = 0;		// dumps written opaque because no material read alpha
 	bool m_dumpStarted = false;
 	bool m_firstResolveLogged = false;
 };

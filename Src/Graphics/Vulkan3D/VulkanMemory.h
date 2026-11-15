@@ -65,7 +65,7 @@ public:
 	// event in the log line, so the same function serves startup and an allocation failure.
 	void LogMemoryBudget(const char* reason) const;
 
-	bool CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags props, AllocatedBuffer& out);
+	bool CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags props, AllocatedBuffer& out, bool quietFailure = false);
 	void DestroyBuffer(AllocatedBuffer& buffer);
 
 	// samples is a VkSampleCountFlagBits value. Multisampled targets cannot be sampled, copied or

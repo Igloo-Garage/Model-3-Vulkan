@@ -1,7 +1,7 @@
 # Model 3-Vulkan User Manual (Vulkan + SDL3)
 
-> Applies to **v0.9.8.6**. Every version the program shows - window title bar, console banner, save
-> metadata - comes from `SUPERMODEL_FORK_VERSION` in `Src/Version.h`.
+> Applies to **v0.9.9.6**. Every version the program shows - window title bar, console banner, save
+> metadata - comes from `MODEL3VULKAN_VERSION` in `Src/Version.h`.
 > This manual is about *how to use the emulator and how to set it up*. Measured rendering data lives in
 > `sdl3_reports/`, the change history in `devdocs/CHANGELOG.md`, and troubleshooting patterns in
 > `devdocs/FIXES.md`.
@@ -27,7 +27,7 @@
 
 ## 1. The two executables
 
-The package ships two executables. **Their renderers are fixed at build time** — this is not a setting:
+The source tree builds two executables. **Their renderers are fixed at build time** — this is not a setting. The Windows release package ships **only `Model3-Vulkan.exe`**; `Supermodel-LegacyOG.exe` is still buildable from source but is no longer included in the download:
 
 | | `Model3-Vulkan.exe` | `Supermodel-LegacyOG.exe` |
 | --- | --- | --- |
@@ -44,12 +44,13 @@ a save made in the OpenGL build does not appear as a card in the Vulkan build's 
 but "Import legacy .st" converts it.
 
 The two builds also name themselves apart in the title bar, so a screenshot says which one is running:
-`Model 3-Vulkan v0.9.8.6 - <game>` for the Vulkan build and `Supermodel-OpenGL v0.9.8.6 - <game>` for
+`Model 3-Vulkan v0.9.9.6 - <game>` for the Vulkan build and `Supermodel-OpenGL v0.9.9.6 - <game>` for
 the OpenGL one.
 
 > The SDL3 build needs **Vulkan 1.3 core** (`dynamicRendering` and `synchronization2` are core 1.3
 > features). If the machine cannot provide it, a message box names the GPU and version it found;
-> in that case use `Supermodel-LegacyOG.exe`.
+> update the driver. This package has no OpenGL fallback; the OpenGL target remains available in the
+> source tree.
 
 ---
 
@@ -153,8 +154,17 @@ are on the **Video** tab, under **Presentation cadence**:
 
 - **One SCSP DSP path**: the `0x7C0–0x7FF` hole is no longer mirrored into `MADRS` — that mirroring made
   Fighting Vipers 2's effect channel self-oscillate (the loud buzzing).
-- **DSB (MPEG music)**: 32 kHz → 44.1 kHz via a 64-tap polyphase sinc (320:441), which removed the
-  per-frame boundary clicks.
+- **4-tap Catmull-Rom cubic interpolation on SCSP PCM voices**: non-FM PCM voices use 4-tap cubic spline
+  interpolation to remove pitch-transposition aliasing while keeping FM carrier/modulator slots bit-exact.
+- **DSB (MPEG music)**: direct 32-bit float decoding (`MINIMP3_FLOAT_OUTPUT`), 32 kHz → 44.1 kHz via a
+  64-tap polyphase sinc (320:441) with per-sample linear volume ramping, and restored pre-loop intros.
+- **Native 4.0 Quad & 5.1 Surround output + Smart 5.1 Upmixer**: `NbSoundChannels` supports `1`, `2`, `4`
+  (4.0 Quad `[FL, FR, RL, RR]`), and `6` (5.1 Surround `[FL, FR, FC, LFE, RL, RR]`). When `SurroundUpmix51`
+  is enabled, Center (`FC`) is extracted from front/rear common-mode signals and `LFE` is filtered through a
+  120 Hz 2nd-order Butterworth low-pass filter.
+- **Built-in lock-free multi-channel WAV / FLAC recorder**: records raw 4.0 / 5.1 output asynchronously via a
+  lock-free ring buffer to `Data/Recordings/Sound/<GameTitle>_YYYY-MM-DD<Day>_HH-MM-SS_<N>ch.wav/.flac`
+  (`wav_float32`, `wav_pcm16`, `flac_pcm24`, `flac_pcm16`), ready for Premiere, DaVinci Resolve, and Audacity.
 - **Per-game default volumes**: `scud/scudplus` effects 65%, `daytona2/dayto2pe` 70%, `swtrilgy` music
   70%, `spikeout/spikeofe` 75%. Applied only when you have not set the volumes yourself.
 - **Asynchronous sound-board thread** by default; in the high-refresh path the sound board runs inside the
@@ -205,7 +215,8 @@ Gamepads are the exception: they are in daily use here (an Xbox-layout pad and a
   DPI boundary re-derives the minimum and re-scales the interface.
 - **Stats panel** (`` ` `` key): renderer, sync method, present rate vs panel rate, render resolution,
   cadence (whether it is a whole multiple), the CPU and GPU model names, **CPU average and peak core
-  clock**, GPU load (and clock/VRAM on NVIDIA), RAM used, the **audio buffer fill as a two-second range
+  clock**, **CPU package power where Windows exposes RAPL and GPU board power on NVIDIA**, GPU load
+  (and clock/VRAM on NVIDIA), RAM used, the **audio buffer fill as a two-second range
   plus the sound board's L/R peak level**, under/over-run counts, FPS, frame time, 1% low,
   interpolation state.
 - Screenshots with `Alt+S` into `Data/Screenshots/`.
@@ -223,6 +234,22 @@ Gamepads are the exception: they are in daily use here (an Xbox-layout pad and a
   the folder without restarting, and a texture that finishes dumping can be upscaled and dropped
   straight into `HDTextures/<romset>/` under the same name. While the panel is open the emulator is
   paused, so the reload applies when you close it.
+  - **About the white dots in a dump:** the Model 3 has no smooth alpha. T1RGB5 keeps a one-bit mask
+    in bit 15 and the 4-bit formats in their alpha nibble, and the artwork uses that bit as a
+    **dither pattern** to fake translucency, so the alpha channel of a dumped PNG can be a grid of
+    dots. Image viewers, and GitHub, composite transparency onto white and turn that into white
+    dashes. A dump therefore carries alpha only for textures that some material actually samples
+    with alpha (contour or alpha test); everything else is written fully opaque, exactly like the
+    renderer treats it. To check a folder, run
+    `python Tools/inspect-texturedump.py Data/Assets/DumpTextures/<romset>`: it prints the alpha
+    histogram per format and can write RGB / alpha contact sheets for review.
+  - **Upscaling: let the model see colour only.** A neural upscaler is trained on photographs, not on a
+    one-bit dither mask, so running alpha through it turns the dot grid into a smooth gradient. The
+    surfaces that read alpha then blend where the hardware discarded, and the two-pass alpha materials
+    double-draw along their edges. Upscale RGB with the model and keep alpha hard: resize it with
+    **nearest**, or threshold it back to 0/255 afterwards. A "separate alpha" switch in the tool only
+    stops the model from touching alpha - the resize filter can still smear it, so check the result
+    with `inspect-texturedump.py`: the alpha histogram should show two spikes, not a curve.
 - **Appearance** (Common → Appearance, right under Language): three interface themes, **Light (eye-care,
   default)**, **Dark** and **Original interface**, applied immediately. The first two use neither pure white
   nor pure black - the light theme is a warm alabaster with terracotta accents and charcoal ink, the dark
@@ -234,6 +261,32 @@ Gamepads are the exception: they are in daily use here (an Xbox-layout pad and a
   it, so nothing taken away is lost. The same section has **Frosted glass**, which can be turned off for
   an opaque fill - the "ultra-low" hardware preset turns it off for you, and the original theme is opaque
   by design so the switch is greyed out there.
+
+### 3.7 PowerPC execution mode (`Core → PowerPC Execution Mode`)
+
+The PowerPC 603e runs one of two ways, chosen on the **Core** page and applied when the next game
+starts:
+
+- **Hybrid JIT (recommended)** - a baseline block compiler. The instructions that make up most of the
+time (integer arithmetic and logic, shifts, compares, branches, byte-reverse loads and stores, single
+and double precision loads and stores, register moves) become native x86-64 code; everything else
+calls the interpreter's own C handler, so the two paths are bit-for-bit equivalent and a game cannot
+tell them apart. Code is cached in 16 MB of executable memory, and a store into a page that holds
+translated code drops it.
+- **C interpreter (reference)** - the original per-instruction interpreter. Slower, but the path the
+JIT is verified against, so it is what to pick when a game misbehaves or when you want to A/B a
+picture.
+
+On a CPU-bound scene the difference is large: Daytona 2 in a race at the native 496x384, no V-Sync and
+no frame limit, measured 224.5 Hz (4.45 ms/frame) with the JIT against 55.2 Hz (18.12 ms) with the
+interpreter - the interpreter cannot even hold the 57.5 Hz logic rate there. At 4K with MSAA the GPU is
+the limit and the mode makes no measurable difference.
+
+Diagnostics, for bug reports rather than for play: `SM3D_PPC_JIT=0/1` forces a mode for one run
+(overriding the setting), `SM3D_PPC_JIT_VERIFY=1` runs every block again through the interpreter and
+aborts on any difference, and `SM3D_PPC_JIT_DUMP=1` writes the live blocks with their disassembly to
+the log. The log also carries a one-line summary at the end of each session (`PPC: x64 hybrid JIT: ...`
+with block counts, native instruction coverage and cache use).
 
 ---
 
@@ -407,10 +460,8 @@ real wheel, Sinden gun or second machine will be the first confirmation.
 
 - **Save** mid-race, mid-fight, or on a stable menu. **Do not** save on load/transition/score/K.O.
   screens: such a state can be parked in a cross-frame handshake and may hang when restored.
-- **Manage saves → Load** lets the game boot normally for about **3 seconds of emulated time**, covering
-  the screen with the start-up artwork, then applies the state and takes the artwork down. The result is
-  identical to loading with F7 during play.
-- Do not treat loading as "skip the boot": `-load-state` follows the same 3-second path.
+- **Manage saves → Load** and `-load-state` apply the save state immediately on the first frame
+  (`kDeferredLoadSeconds = 0.0`), matching the behaviour of loading with F7 during play.
 
 ### 4.8 Networking (currently mainly Daytona 2)
 
@@ -490,7 +541,7 @@ InputUIToggleOverlay = "KEY_TAB"
 - **F6 and F7 mean different things**: F6 selects the *next empty slot* (so F5 creates a new save); F7
   falls back to the **highest-numbered existing save** when the current slot is empty. That is why F7
   works right after a restart.
-- **LegacyOG** writes `.st` to `Data/Saves_Legacy/` and still falls back to reading `Data/Saves/*.st`.
+- **LegacyOG** (source build only) writes `.st` to `Data/Saves_Legacy/` and still falls back to reading `Data/Saves/*.st`.
 - **Manage saves** filters cards by the selected set and offers Load / Rename / Delete. Deleting removes
   both the `.zst` and any `.st` with the same slot; the slot is left as a hole (no renumbering) and the
   next F5 reuses it.
@@ -512,7 +563,7 @@ InputUIToggleOverlay = "KEY_TAB"
 | `Data/Screenshots/` | `Alt+S` screenshots |
 | `Data/Cache/` | Pipeline caches `pipelines-ui.bin` and `pipelines-game.bin` |
 | `Data/Assets/Boxarts/` | Box art WebP per set (sources in `SOURCES.txt`) |
-| `Data/Supermodel.log` | Runtime log (shared by both executables; the later one overwrites) |
+| `Data/Model3Vulkan.log` | Runtime log of the Vulkan build (an OpenGL source build writes its own log) |
 | `Scripts/` | `ArcadeDisplay.ps1` and its two launchers - the 57/58 Hz display helper (7.1) |
 
 - To keep logs apart: `-log-output=Data/xxx.log`.
@@ -539,7 +590,7 @@ ArcadeDisplay.bat -Action Run -Game "E:\roms\daytona2.zip"
 Other arguments: `-Monitor N` (Windows' display number), `-Hz 57.5242`, `-Width` / `-Height`,
 `-KeepMode` (do not restore afterwards), `-ExtraArgs "..."` (passed through to the emulator) and
 `-SupermodelExe <path>` (default: `Model3-Vulkan.exe` beside `Scripts\`; pass
-`Supermodel-LegacyOG.exe` for the OpenGL build). `-NoPause` closes the window without waiting for a key.
+`Supermodel-LegacyOG.exe` for an OpenGL source build; the release package does not include it). `-NoPause` closes the window without waiting for a key.
 
 Why it exists: Windows composites a borderless window at the desktop refresh rate, so a 60/144 Hz
 desktop cannot scan at 57.524 Hz and a 1:1 mapping is impossible. Running in exclusive fullscreen with
@@ -567,6 +618,32 @@ Measured in `sdl3_reports/` on the same machine (not theoretical):
 | End-of-frame spin (SDL3) | Process CPU 13.17 → **11.03 s per 20 s** (≈−10.7% of one core), zero audio under-runs |
 | Native crosshair | Median `poll-to-render` **77.6 → 13.2 µs** |
 | "Sharp + 4x anisotropic" texture filtering | About **+0.05 ms/frame** at 4K |
+
+### Measuring your own machine
+
+**Common → Performance test (unlocked frame rate)** at the bottom of the page runs the
+selected game from its newest save with the 57.524 Hz logic pacing removed, for ten
+seconds, then reports the result in the settings window and in the log:
+
+```
+BENCH: 10.00 s, 1952 emulated frame(s), 195.2 FPS (5.12 ms/frame), 3.39x arcade.
+```
+
+This is a throughput ceiling, not a playable frame rate: the game runs as fast as the
+machine can go (typically 3–4x arcade speed), audio is muted, and physics do not line up
+with real time. It exists to compare hardware and settings, and to check headroom for
+high-refresh presentation modes.
+
+The same run from a command line:
+
+```
+Model3-Vulkan.exe dirtdvls.zip -load-state "Data/Saves/dirtdvls.zst4" ^
+    -benchmark -benchmark-seconds=10
+```
+
+`-benchmark` forces vertical sync and the frame limiter off on its own; setting
+`Benchmark=1` in the ini does the same. The OpenGL build has no pacer, so the switch does
+nothing there.
 
 ---
 
@@ -604,10 +681,9 @@ no matter what the tooltip says.
 > and the log names the one in use.
 
 **After loading a save the characters do not move and the timer creeps up**
-That was the old behaviour of applying a state **before the game had finished booting** (logic ran at
-about 1/25 speed). It is fixed: the state is now applied after the boot has completed, with the artwork
-covering those three seconds. If you still see it, check the log for
-`loading deferred state ... after N emulated frame(s)` with N close to 172.
+That was the old behaviour when the 53C810 SCSI PCI base address was missing from the save state (logic
+ran at about 1/25 speed). It is fixed: save states now restore the complete hardware state immediately on
+frame 0 (`loading deferred state ... after 0 emulated frame(s)` in the log).
 
 **A loaded save is stuck on one picture**
 The save point itself was probably on a load/transition/score screen. Save again at a stable moment.
@@ -682,7 +758,7 @@ Three causes, in order of likelihood:
 **What does "Vulkan validation layers" do?**
 It is the Vulkan SDK's checker for the renderer itself, not a picture option. With it on, every draw
 call, descriptor binding and synchronisation is verified, and mistakes are written to
-`Data/Supermodel.log` as `Vulkan: ...` or `Vulkan warning: ...` lines (after 1000 messages the rest
+`Data/Model3Vulkan.log` as `Vulkan: ...` or `Vulkan warning: ...` lines (after 1000 messages the rest
 are suppressed). Expect a large slowdown, so leave it off for play. To report a rendering problem:
 enable it, start the game, reproduce the problem, close the game, and send the log. It applies when
 a Vulkan instance is created, so the next game session picks it up; the settings window's own
@@ -691,7 +767,8 @@ least `VK_LAYER_KHRONOS_validation`) is not installed, the log says `validation 
 retrying without it` and the emulator runs normally. `-vk-validation` is the command-line form.
 
 **A message box says Vulkan 1.3 is not available**
-Update the graphics driver. If the machine still cannot provide it, use `Supermodel-LegacyOG.exe`.
+Update the graphics driver. This package has no OpenGL fallback; the OpenGL target can still be built
+from source.
 
 **Linux: the program exits at start-up while loading a font, or Chinese text is missing**
 The interface uses a system CJK font, and the rasteriser bundled with ImGui reads TrueType outlines
@@ -718,7 +795,10 @@ confirm the fix.
 - **Not every moment can be saved**: states captured on load/transition/score screens may hang when loaded.
 - **Some ROM sets lack the drive-board program** (for example `vf3tb` is missing `epr-18022.ic2`): no force
   feedback, and the log says so explicitly.
-- **`scuddx` (Scud Race DX) HUD viewport position** still has a known offset, to be fixed.
+- **`scuddx` (Scud Race Deluxe) instrument panel stays grey**: the ROM set is correct and the OpenGL
+  build draws the same grey panel from the same save state - this panel has never been emulated
+  correctly, going back to the MAME days. Play the Twin/DX sets instead (`scud`, `scudau`,
+  `scudplus`, `scudplusa`).
 - **Box art and game-list changes need a restart**: missing-art caching and list metadata are built at
   start-up.
 - **No Store package is required for covers.** Windows tries WIC first and falls back to the bundled
@@ -736,13 +816,14 @@ The settings window covers almost everything; these exist for scripts and diagno
 ```
 -gui                         Open the settings window (also the default with no ROM argument)
 <romset>                     Start that set directly
--load-state=<file>           Start and load a state (same 3-second deferred path as Manage Saves)
+-load-state=<file>           Start and load a state immediately on the first frame
 -res=<x>,<y>                 Render resolution
 -fullscreen / -borderless    Fullscreen / borderless
 -wide-screen                 Widen the view frustum
 -vsync / -no-vsync           V-Sync on / off
 -no-throttle                 Disable frame limiting
 -ppc-frequency=<MHz>         Emulated PowerPC frequency
+-ppc-mode=<0|1>              PowerPC execution mode: 0 = interpreter, 1 = hybrid JIT
 -print-games                 List supported sets and quit
 -print-gl-info               Print OpenGL information and quit
 -log-output=<file>           Log destination
@@ -755,8 +836,8 @@ The settings window covers almost everything; these exist for scripts and diagno
 `-vk-validation` is the command-line form of the "Vulkan validation layers" switch; see
 Troubleshooting for when to use it.
 
-For timing experiments only: `SM3D_DEFER_LOAD_SECONDS=<seconds>` overrides the 3-second state-load wait
-(0 = apply immediately).
+For timing experiments only: `SM3D_DEFER_LOAD_SECONDS=<seconds>` optionally delays the initial state load
+by the given number of emulated seconds (default `0`).
 
 ---
 
@@ -773,6 +854,8 @@ For timing experiments only: `SM3D_DEFER_LOAD_SECONDS=<seconds>` overrides the 3
   then `cmake --build build-cmake`, then `cmake --build build-cmake --target hostcore`, and run
   `./build-cmake/bin/Model3-Vulkan -gui`. It needs the .NET 11 SDK and clang (Linux) or the Xcode
   command line tools (macOS). Without the host core the emulator still runs, but `.zst` is unavailable.
+  The official Linux and macOS packages already ship this module, so a downloaded build writes
+  `.zst` saves with no extra setup and no .NET installation.
 - **macOS**: window sizes are in points and Retina is handled through `io.DisplayFramebufferScale`, so the
   interface size does not change between Retina and non-Retina displays.
 - On both platforms the Makefile build is the SDL2/OpenGL one; the Vulkan backend comes from the CMake SDL3

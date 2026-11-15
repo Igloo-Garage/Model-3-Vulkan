@@ -287,6 +287,64 @@ typedef struct {
 static PPC_REGS ppc;
 static UINT32 ppc_rotate_mask[32][32];
 
+/*
+ * Fast memory windows published by CModel3 (see PPC_FAST_MEMORY). Fast is NULL
+ * until the model has published them, which is what tells the JIT that the
+ * machine is not executable yet.
+ */
+static PPC_FAST_MEMORY FastMemory;
+static PPC_FAST_MEMORY *Fast = NULL;
+
+/*
+ * Hybrid JIT entry points. Defined at the bottom of this file by
+ * ppc_jit_x64.inl, declared here because the interpreter loop and the
+ * initialisation code below are compiled before that include.
+ */
+#if defined(PPC_JIT_X64)
+static void ppc_jit_init(void);
+static void ppc_jit_shutdown(void);
+static void ppc_jit_execute(void);
+static bool ppc_jit_active(void);
+static void ppc_jit_flush_all(void);
+static void ppc_jit_note_fast_memory(const PPC_FAST_MEMORY *fast);
+
+namespace PpcJit
+{
+	static void SetEnabled(bool enabled);
+	static void LogStats(void);
+}
+#endif
+
+void ppc_set_fast_memory(const PPC_FAST_MEMORY *fast)
+{
+	if (fast != NULL)
+		FastMemory = *fast;
+	else
+		memset(&FastMemory, 0, sizeof(FastMemory));
+
+	Fast = (fast != NULL) ? &FastMemory : NULL;
+
+#if defined(PPC_JIT_X64)
+	ppc_jit_note_fast_memory(Fast);
+#endif
+}
+
+void ppc_set_jit_enabled(bool enabled)
+{
+#if defined(PPC_JIT_X64)
+	PpcJit::SetEnabled(enabled);
+#else
+	(void)enabled;
+#endif
+}
+
+void ppc_log_jit_stats(void)
+{
+#if defined(PPC_JIT_X64)
+	PpcJit::LogStats();
+#endif
+}
+
 static void ppc_change_pc(UINT32 newpc)
 {
 	UINT32 offset	= newpc - ppc.cur_fetch.start;		//  unsigned wrap around can happen, that's defined behavour 
@@ -844,10 +902,24 @@ void ppc_init(const PPC_CONFIG *config)
 	}
 
 	ppc.hid1 = pll_config << 28;
+
+#if defined(PPC_JIT_X64)
+	// The code cache is allocated here rather than lazily inside the dispatcher so that a
+	// machine that never runs a block (the settings window builds one for NVRAM) does not
+	// pay for it, and so that "could not allocate" is reported once, at start-up.
+	//
+	// Every block compiled for the previous machine is dropped: ROM sets can differ in size
+	// and layout, so the same guest address may hold different code this time.
+	ppc_jit_init();
+	ppc_jit_flush_all();
+#endif
 }
 
 void ppc_shutdown(void)
 {
+#if defined(PPC_JIT_X64)
+	ppc_jit_shutdown();
+#endif
 
 }
 
@@ -1060,6 +1132,15 @@ void ppc_load_state(CBlockFile *SaveState)
 	
 	SaveState->Read(ppc.fpr, sizeof(ppc.fpr));
 	SaveState->Read(ppc.sr, sizeof(ppc.sr));
+
+#if defined(PPC_JIT_X64)
+	/*
+	 * The RAM image was read straight into memory, not through the bus, so translated
+	 * blocks are looking at the previous contents and any page marked as holding code is
+	 * stale. Dropping everything is cheap here - this runs once per load, not per frame.
+	 */
+	ppc_jit_flush_all();
+#endif
 }
 
 UINT32 ppc_get_gpr(unsigned num)
@@ -1161,3 +1242,13 @@ UINT32 ppc_read_msr()
 {
 	return ppc_get_msr();
 }
+
+/******************************************************************************
+ PowerPC hybrid JIT (x86-64)
+
+ Included last, so that it sees everything above: PPC_REGS ppc, the optable*
+ tables, ppc_rotate_mask, the READ/WRITE helpers and ppc_execute_one_instruction.
+ It compiles to nothing unless PPC_JIT_X64 is defined (see ppc.h).
+******************************************************************************/
+
+#include "ppc_jit_x64.inl"

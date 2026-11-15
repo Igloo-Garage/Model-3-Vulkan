@@ -40,8 +40,23 @@ namespace Util
 // other sections are preserved when the file is written back out.
 struct GuiState;
 
+/*
+ * Extra switches for the session GuiRunOnce() is about to start.
+ *
+ * The performance test lives in the settings window, but the session it starts is
+ * an ordinary game session: this carries the three command-line switches rather
+ * than adding a second launch path that would have to duplicate everything
+ * RunGameSession() already does.
+ */
+struct GuiLaunchOptions
+{
+    bool benchmark = false;
+    int benchmarkSeconds = 10;
+    std::string loadState;
+};
+
 GuiState* GuiCreate(const std::string& configPath, const Util::Config::Node& fileConfig);
-std::vector<std::string> GuiRunOnce(GuiState* state);
+std::vector<std::string> GuiRunOnce(GuiState* state, GuiLaunchOptions* options = nullptr);
 void GuiDestroy(GuiState* state);
 
 /*
@@ -244,6 +259,15 @@ void DrawAdvancedSettingsPanel(Util::Config::Node& config, bool overlayMode);
  * applies immediately. The function draws its own section heading.
  */
 void DrawHDTextureSettings(Util::Config::Node& config, bool overlayMode);
+
+/*
+ * PowerPC execution mode: the C interpreter or the x86-64 hybrid JIT.
+ *
+ * Draws its own control and help marker, no section heading: it belongs with the other
+ * Core keys and the surrounding list already separates them. The value is read when a
+ * game session builds its machine, so a change takes effect on the next launch.
+ */
+void DrawPowerPCModeSettings(Util::Config::Node& config);
 
 /*
  * CRT colour and 2D upscaling, shared by the settings window's Video page and the top of the

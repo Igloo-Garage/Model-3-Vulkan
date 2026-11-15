@@ -123,6 +123,13 @@ struct CpuStats
 	unsigned loadPercent = 0;
 
 	/*
+	 * Package power, when Windows exposes a RAPL source through the "Energy Meter"
+	 * performance counters. Zero means the reading is not available on this machine
+	 * and the figure is left out, exactly like a missing GPU clock.
+	 */
+	double packageWatts = 0.0;
+
+	/*
 	 * The marketing name, from the registry, and empty where it could not be read.
 	 *
 	 * Shown above the figures for the same reason the GPU line carries its model: "2050 MHz" means
@@ -152,6 +159,8 @@ struct GpuStats
 	unsigned loadPercent = 0;
 	double vramUsedGb = 0.0;
 	double vramTotalGb = 0.0;
+	/* Board power from NVML; zero where the driver does not report it. */
+	double powerWatts = 0.0;
 	char name[96] = {};
 };
 
@@ -591,6 +600,17 @@ struct PdhApi
 	bool gpuReady = false;
 	bool gpuWarm = false;
 
+	/*
+	 * CPU package power, from the "Energy Meter" counter set (RAPL on Intel parts
+	 * with the energy-estimation driver). A third query for the same reason as the
+	 * second: a machine without this set must not cost the CPU clock or GPU load.
+	 */
+	PDH_HQUERY powerQuery = nullptr;
+	PDH_HCOUNTER powerCounter = nullptr;
+	bool powerProbed = false;
+	bool powerReady = false;
+	bool powerWarm = false;
+
 	bool apiProbed = false;
 	bool apiReady = false;
 };
@@ -944,6 +964,7 @@ typedef nvmlReturn_t (*PFN_nvmlDeviceGetUtilizationRates)(nvmlDevice_t, NvmlUtil
 typedef nvmlReturn_t (*PFN_nvmlDeviceGetMemoryInfo)(nvmlDevice_t, NvmlMemory*);
 typedef nvmlReturn_t (*PFN_nvmlDeviceGetClockInfo)(nvmlDevice_t, int, unsigned int*);
 typedef nvmlReturn_t (*PFN_nvmlDeviceGetName)(nvmlDevice_t, char*, unsigned int);
+typedef nvmlReturn_t (*PFN_nvmlDeviceGetPowerUsage)(nvmlDevice_t, unsigned int*);
 
 struct Nvml
 {
@@ -956,6 +977,7 @@ struct Nvml
 	PFN_nvmlDeviceGetMemoryInfo memory = nullptr;
 	PFN_nvmlDeviceGetClockInfo clock = nullptr;
 	PFN_nvmlDeviceGetName name = nullptr;
+	PFN_nvmlDeviceGetPowerUsage power = nullptr;
 	bool ready = false;
 };
 
@@ -964,6 +986,18 @@ Nvml g_nvml;
 void ProbeNvml()
 {
 	g_gpuProbed = true;
+
+	// If the renderer has already reported the active Vulkan device name and it is not an NVIDIA
+	// adapter (e.g. Intel Arc / AMD Radeon iGPU on a dual-GPU machine), do not let NVML overwrite
+	// the readout with telemetry from the idle discrete NVIDIA card.
+	if (g_gpu.name[0] != '\0' && std::strstr(g_gpu.name, "NVIDIA") == nullptr &&
+		std::strstr(g_gpu.name, "GeForce") == nullptr && std::strstr(g_gpu.name, "Quadro") == nullptr &&
+		std::strstr(g_gpu.name, "RTX") == nullptr && std::strstr(g_gpu.name, "GTX") == nullptr)
+	{
+		InfoLog("Stats OSD: active GPU '%s' is not an NVIDIA adapter; using Windows GPU Engine counters.",
+			g_gpu.name);
+		return;
+	}
 
 	g_nvml.module = LoadLibraryA("nvml.dll");
 	if (g_nvml.module == nullptr)
@@ -990,6 +1024,7 @@ void ProbeNvml()
 	g_nvml.memory = (PFN_nvmlDeviceGetMemoryInfo)GetProcAddress(g_nvml.module, "nvmlDeviceGetMemoryInfo");
 	g_nvml.clock = (PFN_nvmlDeviceGetClockInfo)GetProcAddress(g_nvml.module, "nvmlDeviceGetClockInfo");
 	g_nvml.name = (PFN_nvmlDeviceGetName)GetProcAddress(g_nvml.module, "nvmlDeviceGetName");
+	g_nvml.power = (PFN_nvmlDeviceGetPowerUsage)GetProcAddress(g_nvml.module, "nvmlDeviceGetPowerUsage");
 
 	if (g_nvml.init == nullptr || g_nvml.handle == nullptr)
 	{
@@ -1042,6 +1077,96 @@ bool ContainsNoCase(const wchar_t* haystack, const wchar_t* needle)
 			return true;
 	}
 	return false;
+}
+
+/*
+ * CPU package power, through the Windows "Energy Meter" counter set.
+ *
+ * The set is the RAPL interface Intel's energy-estimation driver publishes: the
+ * instances are named "rapl_package0_pkg" (whole package), "..._pp0"/"..._pp1"
+ * (cores) and "..._dram". The package instances are summed so a multi-socket
+ * machine still reports the whole CPU; the value is in milliwatts.
+ *
+ * There is no vendor-neutral Windows API for this. AMD parts and Intel machines
+ * without the driver have no such set, so the figure is omitted rather than
+ * printed as zero - the same rule the GPU clock follows.
+ */
+bool SampleCpuPowerFromPdh()
+{
+	if (!g_pdh.powerProbed)
+	{
+		g_pdh.powerProbed = true;
+		if (!LoadPdhApi())
+			return false;
+		if (g_pdh.open(nullptr, 0, &g_pdh.powerQuery) != 0)
+			return false;
+
+		static const wchar_t* path = L"\\Energy Meter(*)\\Power";
+		const long status = g_pdh.addEnglish != nullptr
+			? g_pdh.addEnglish(g_pdh.powerQuery, path, 0, &g_pdh.powerCounter)
+			: g_pdh.addCounter(g_pdh.powerQuery, path, 0, &g_pdh.powerCounter);
+		if (status != 0)
+		{
+			InfoLog("Stats OSD: the Energy Meter counters are not available (0x%08X), so CPU power will not be shown.",
+				(unsigned long)status);
+			return false;
+		}
+
+		g_pdh.collect(g_pdh.powerQuery);
+		g_pdh.powerReady = true;
+		InfoLog("Stats OSD: CPU power comes from the Windows Energy Meter (RAPL) counters.");
+	}
+	if (!g_pdh.powerReady)
+		return false;
+	if (!g_pdh.powerWarm)
+	{
+		g_pdh.powerWarm = true;
+		return false;
+	}
+
+	if (g_pdh.collect(g_pdh.powerQuery) != 0)
+		return false;
+
+	unsigned long bytes = 0;
+	unsigned long items = 0;
+	long status = g_pdh.array(g_pdh.powerCounter, kPdhFmtDouble, &bytes, &items, nullptr);
+	if ((unsigned long)status != kPdhMoreData || bytes == 0)
+		return false;
+
+	std::vector<unsigned char> buffer(bytes);
+	status = g_pdh.array(g_pdh.powerCounter, kPdhFmtDouble, &bytes, &items,
+		(PdhFmtCounterValueItemW*)buffer.data());
+	if (status != 0)
+		return false;
+
+	const PdhFmtCounterValueItemW* values = (const PdhFmtCounterValueItemW*)buffer.data();
+	double totalMilliwatts = 0.0;
+	for (unsigned long i = 0; i < items; ++i)
+	{
+		const wchar_t* name = values[i].name;
+		if (name == nullptr)
+			continue;
+		// PDH_CSTATUS_VALID_DATA and PDH_CSTATUS_NEW_DATA are the two usable codes.
+		if (values[i].value.status != 0 && values[i].value.status != 1)
+			continue;
+		// The package instances are the whole-package figure; pp0/pp1/dram are parts of it.
+		if (!ContainsNoCase(name, L"rapl_package") || !ContainsNoCase(name, L"_pkg"))
+			continue;
+		const double milliwatts = values[i].value.value.doubleValue;
+		if (milliwatts > 0.0)
+			totalMilliwatts += milliwatts;
+	}
+	if (totalMilliwatts <= 0.0)
+		return false;
+
+	g_cpu.packageWatts = totalMilliwatts / 1000.0;
+	static bool logged = false;
+	if (!logged)
+	{
+		logged = true;
+		InfoLog("Stats OSD: CPU package power %.1f W (RAPL).", g_cpu.packageWatts);
+	}
+	return true;
 }
 
 /*
@@ -1130,7 +1255,7 @@ bool SampleGpuLoadFromPdh()
 		total += percent;
 		any = true;
 	}
-	if (!any)
+	if (!any && g_gpu.name[0] == '\0')
 		return false;
 
 	// A laptop with two GPUs has a 3D engine on each, and the sum can pass 100. The figure is meant to
@@ -1242,6 +1367,20 @@ void SampleGpu()
 			g_gpu.vramTotalGb = GbFromBytes(mem.total);
 		}
 	}
+	if (g_nvml.power != nullptr)
+	{
+		unsigned milliwatts = 0;
+		if (g_nvml.power(g_nvml.device, &milliwatts) == NVML_SUCCESS && milliwatts > 0)
+		{
+			g_gpu.powerWatts = (double)milliwatts / 1000.0;
+			static bool logged = false;
+			if (!logged)
+			{
+				logged = true;
+				InfoLog("Stats OSD: GPU power %.1f W (NVML).", g_gpu.powerWatts);
+			}
+		}
+	}
 	g_gpu.valid = true;
 }
 
@@ -1276,6 +1415,7 @@ void ResetSlowSampleWarmup()
 void SampleCpu() {}
 void SampleMemory() {}
 void SampleGpu() {}
+bool SampleCpuPowerFromPdh() { return false; }
 void ShutdownNvml() {}
 void ResetSlowSampleWarmup() {}
 #endif
@@ -1306,8 +1446,10 @@ void SampleDisplay()
 		// The readout prints an integer rate; SDL3 reports a float. Rounded rather than truncated so
 		// 59.94 Hz reports 60, which is what the display's own OSD says.
 		g_display.refreshHz = (int)(mode.refreshHz + 0.5f);
-		g_display.width = mode.width;
-		g_display.height = mode.height;
+		// Device pixels, not the mode's coordinate size: a 4K Mac in its default scaled mode reports
+		// 1920x1080 with a density of 2, and the panel line is about the panel.
+		g_display.width = (int)std::lround((double)mode.width * mode.pixelDensity);
+		g_display.height = (int)std::lround((double)mode.height * mode.pixelDensity);
 		g_display.valid = true;
 	}
 }
@@ -1362,6 +1504,7 @@ void SampleAudio()
 void SampleSlowStats()
 {
 	SampleCpu();
+	SampleCpuPowerFromPdh();
 	SampleMemory();
 	SampleAudio();
 	SampleGpu();
@@ -1983,7 +2126,7 @@ void StatsOsdBuildWindow(const Util::Config::Node& config)
 		 */
 		if (g_cpu.totalThreads > 0)
 		{
-			char figures[160];
+			char figures[192];
 			if (g_cpu.valid && g_cpu.hybrid)
 				std::snprintf(figures, sizeof(figures), "P %u MHz  peak %u  %uP+%uE threads  %u%%",
 					g_cpu.currentMhz, g_cpu.peakMhz, g_cpu.performanceThreads,
@@ -1997,6 +2140,12 @@ void StatsOsdBuildWindow(const Util::Config::Node& config)
 			else
 				std::snprintf(figures, sizeof(figures), "-  %u threads  %u%%",
 					g_cpu.totalThreads, g_cpu.loadPercent);
+			if (g_cpu.packageWatts > 0.0)
+			{
+				const std::size_t used = std::strlen(figures);
+				if (used < sizeof(figures))
+					std::snprintf(figures + used, sizeof(figures) - used, "  %.1f W", g_cpu.packageWatts);
+			}
 			StatsPairNamed(palette, "CPU", g_cpu.name, palette.value, figures);
 		}
 
@@ -2019,6 +2168,12 @@ void StatsOsdBuildWindow(const Util::Config::Node& config)
 					used = sizeof(figures) - 1;
 				const std::string vram = SizeText(g_gpu.vramUsedGb) + " / " + SizeText(g_gpu.vramTotalGb);
 				std::snprintf(figures + used, sizeof(figures) - used, "  VRAM %s", vram.c_str());
+			}
+			if (g_gpu.powerWatts > 0.0)
+			{
+				const std::size_t length = std::strlen(figures);
+				if (length < sizeof(figures))
+					std::snprintf(figures + length, sizeof(figures) - length, "  %.1f W", g_gpu.powerWatts);
 			}
 			StatsPairNamed(palette, "GPU", g_gpu.name, palette.value, figures);
 		}
@@ -2251,10 +2406,19 @@ void StatsOsdSetGpuName(const char* name)
 	if (name == nullptr || name[0] == '\0')
 		return;
 
+	ShutdownNvml();
+	g_gpuProbed = false;
+#ifdef _WIN32
+	// Windows-only: guarded because the flag lives in the NVML / GPU Engine section, which does not
+	// exist in builds for other platforms.
+	g_gpuSourceLogged = false;
+#endif
+	g_gpu = GpuStats();
 	// Kept short: this shares the readout's widest line with the figures. A driver's full device name is
 	// well under this ("Intel(R) UHD Graphics 620"); the truncation only guards against a vendor string
 	// that is not.
 	std::snprintf(g_gpu.name, sizeof(g_gpu.name), "%s", name);
+	g_gpu.valid = true;
 }
 
 void StatsOsdSetTargetRate(float hz)

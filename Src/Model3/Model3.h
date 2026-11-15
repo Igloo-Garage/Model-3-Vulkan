@@ -224,6 +224,7 @@ private:
   UINT32    ReadSecurity(unsigned reg);
   void      WriteSecurity(unsigned reg, UINT32 data);
   void      SetCROMBank(unsigned idx);
+  void      PublishFastMemory(void);
   UINT8     ReadSystemRegister(unsigned reg) const;
   void      WriteSystemRegister(unsigned reg, UINT8 data);
 
@@ -268,6 +269,7 @@ private:
   UINT8   serialFIFO1, serialFIFO2;
   UINT8   gunReg;
   int     adcChannel;
+  bool    m_lostWorldReloaded[2] = {};
 
   // MIDI port
   UINT8   midiCtrlPort; // controls MIDI (SCSP) IRQ behavior

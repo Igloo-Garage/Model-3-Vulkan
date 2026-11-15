@@ -28,11 +28,34 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 
 namespace
 {
 constexpr double kUnknownPanelHz = 60.0;
 constexpr uint64_t kRateWindowNs = 1000000000ull;
+
+/*
+ * Benchmark hook: advance one emulated frame per Tick() instead of following the
+ * wall clock.
+ *
+ * The accumulator below is what keeps the logic at 57.524 Hz no matter how fast
+ * the main loop runs. That is correct for play, but it hides the emulator's real
+ * throughput: with -no-throttle the loop simply presents more often, so the
+ * window-title frame rate measures present capacity, not simulation capacity.
+ *
+ * SM3D_UNLOCK_LOGIC=1 removes the pacing so the reported rate becomes the
+ * emulator's ceiling. The game runs at whatever speed that is and the audio
+ * cannot keep up; this is a measurement mode, not a play mode.
+ */
+bool BenchmarkUnlockLogic()
+{
+    static const bool enabled = [] {
+        const char *value = std::getenv("SM3D_UNLOCK_LOGIC");
+        return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }();
+    return enabled;
+}
 }
 
 void CDisplayPacer::Configure(const DisplayPacerConfig& config, uint64_t nowNs)
@@ -42,6 +65,7 @@ void CDisplayPacer::Configure(const DisplayPacerConfig& config, uint64_t nowNs)
     m_panelHz = config.panelHz;
     m_vsync = config.vsync;
     m_throttle = config.throttle;
+    m_unlockLogic = config.unlockLogic;
     m_interpolation = config.interpolation;
     // A new mode or panel means the old vblank phase says nothing about the new one.
     m_presentLeadNs = 0;
@@ -186,6 +210,18 @@ CDisplayPacer::TickResult CDisplayPacer::Tick(uint64_t nowNs)
      * on phase 0; every other phase presents the snapshot pair at a fixed
      * weight.
      */
+    if (m_unlockLogic || BenchmarkUnlockLogic())
+    {
+        result.step = true;
+        result.alpha = 1.0;
+        m_lastAlpha = 1.0;
+        m_lastTick = nowNs;
+        m_simSteps++;
+        m_logicWindowSteps++;
+        UpdateMeasured(nowNs);
+        return result;
+    }
+
     if (m_phaseCount > 0)
     {
         result.step = (m_phase == 0);

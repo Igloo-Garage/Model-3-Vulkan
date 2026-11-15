@@ -15,18 +15,12 @@
     <a href="https://www.reddit.com/r/Model3Vulkan/">
       <img src="https://img.shields.io/badge/Reddit-r%2FModel3Vulkan-orange.svg?style=flat-square" alt="Reddit">
     </a>
-    <a href="https://discord.gg/C2yWpjE2m">
-      <img src="https://img.shields.io/badge/Discord-Join%20the%20server-5865F2.svg?style=flat-square&logo=discord&logoColor=white" alt="Discord">
-    </a>
     <a href="https://ko-fi.com/igloogarage">
       <img src="https://img.shields.io/badge/Support%20on-Ko--fi-F16061?style=flat-square&logo=ko-fi&logoColor=white" alt="Ko-fi">
     </a>
   </p>
 
 </div>
-
-**Discord Group:** https://discord.gg/C2yWpjE2m
-
 ---
 
 ## 🌟 Overview
@@ -37,17 +31,33 @@ Re-architected from the ground up, the project transitions away from legacy Open
 
 ---
 
+## 🩹 What's New in v0.9.9.8
+
+A performance release with an unchanged picture — the emulation model, the save formats and the settings are all compatible with v0.9.9.6:
+
+* **The hybrid JIT now covers over 80 % of the guest instruction stream** (measured **87.32 %** on *Dirt Devils*): more PowerPC 603e instruction classes translate to native x86-64, so the C interpreter fallback runs far less often. Uncapped-frame-rate sessions (`-benchmark`, or **Common → Performance test**) are noticeably faster, and the session log prints `PPC: translated code is N/N instruction(s) native (xx.xx%)` so the coverage can be checked per game.
+* **Intel integrated GPUs are 20–50 % faster, and the fix is architectural**: the scene fragment shader no longer writes `gl_FragDepth`. Every projection this backend builds comes from `Mat4::FrustumRZ`, whose third row is `(0, 0, 0, near)`, so the hardware-interpolated `gl_FragCoord.z` was already exactly equal to that expression — but writing it forced the GPU to disable Early-Z / Hi-Z and shade every occluded pixel. Measured on **Intel Arc Graphics (Core Ultra 5 125H)** at 2480×1920 / 2x MSAA: `vf3tb` **+60.9 %**, `daytona2` **+30.9 %**, `scuddx` **+21.9 %**, `dirtdvls` **+14.0 %**; at 1080p `daytona2` went from 87.8 to **112.8 FPS**. AMD integrated GPUs use the same architecture and should benefit as well. Same save, same frame: 99.92–99.97 % of pixels identical, mean error under 0.02 / 255.
+* **UMA (unified-memory) zero-copy geometry upload**: the 384 MB ROM vertex buffer is allocated `DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT` where the driver offers it, and new vertices are written straight through the mapping — no staging copy, no `vkCmdCopyBuffer`, no transfer barrier. Discrete GPUs fall back automatically; the log says `ROM vertex buffer is host-visible (UMA direct write)`.
+* **Dirt Devils no longer stutters**: its variable tables and hot code share one 4 KB page, which the old self-modifying-code check invalidated on any store to that page. Invalidation is now three-level (32-byte line gate, one bit per guest byte, 4 KB page generation), so **simulation time per frame dropped from 45–66 ms to 0.28–0.78 ms** and store-triggered flushes went from ~2,300 per frame to **0**.
+* **Save states load on frame 0**: the 3-second boot guard is gone (`kDeferredLoadSeconds = 0.0`). *Manage Saves → Load* and `-load-state` apply the state immediately, with no start-up artwork in between; verified across 15 ROM sets with both `.zst` and legacy `.st` files.
+* **Renderer CPU trim**: the HD-texture descriptor set is bound once per frame instead of once per viewport node, and opaque draws are grouped by vertex source so a node switches pipelines at most once. Both changes are pixel-identical (0 differing pixels in the A/B runs).
+* **Dual-GPU statistics fix**: on a laptop, the stats overlay no longer names (or reads telemetry from) an idle NVIDIA card when the Vulkan renderer is on the integrated GPU.
+* **Resolution presets and low-resolution rendering stay in step**: choosing `2x (992 x 768)` on the Common page after having used the ultra-low preset now also moves `InternalResolution` to 992×768 instead of silently rendering the 3D scene at 496×384.
+
+---
+
 ## 🩹 What's New in v0.9.9.6
 
-A major emulation, audio and peripheral release:
+A major feature, audio, performance, and peripheral release built on the v0.9.8.6 line:
 
-* **PowerPC 603e → x86-64 hybrid JIT**: hot basic blocks are translated once and executed natively. A lock-step check against the interpreter covered 675 million blocks with zero mismatches, and the same save state/frame is pixel-identical; a CPU-bound scene went from 55.2 Hz to 224.5 Hz. `PowerPCMode=0` keeps the C interpreter available as a reference.
-* **Real direct-drive force feedback**: SDL3 haptics are initialised before the joystick subsystem on Windows, so raw wheel bases (SIMAGIC, MOZA, Fanatec, ...) are recognised; the constant-force sign/axis encoding is fixed, the 20 ms attack envelope is retained, and the FFB / Sensitivity page has a live six-axis wheel/pedal deadzone and travel calibration table.
-* **Chase camera stabilizer and gamepad steering**: a spring-damper yaw filter around the car's pivot removes the horizon swing on a pad while keeping full-screen 3D HUDs (Daytona 2's speedometer, course map, turn arrows) still. Stick smoothing and sensitivity are configurable, and a physical wheel bypasses both filters.
-* **Native 4.0 / 5.1 audio and lossless recording**: quad and 5.1 output with a smart centre/LFE upmixer, 4-tap Catmull-Rom SCSP interpolation, 32-bit float DSB decoding, a C¹ soft-clipper, and a lock-free multi-channel WAV/FLAC recorder under `Data/Recordings/Sound/`.
-* **Save states that survive a cold boot**: the `53C810 PCI` state, the simulated network board, the DSB MPEG active window and the interrupt-line re-drive are now saved, so a state can be applied at the first frame instead of waiting for the boot to finish.
-* **Rendering and interface**: per-pixel alpha sorting (OIT), two-subpass on-chip composition, MSAA, exact quad interpolation, DDS/`.dds.zst` HD texture packs, frosted-glass light/dark/classic themes, 4K/Retina geometry and VRR integer multiples.
-* **Platform**: Windows AMD drivers that only expose 128-byte push constants now run, Linux is built on Ubuntu 24.04 (glibc 2.38 baseline), and macOS Retina 4K plus non-Windows in-game panel input are fixed.
+* **Native 4.0 / 5.1 Surround Output, Smart 5.1 Upmixer & Lock-Free WAV/FLAC Recorder**: `NbSoundChannels` now supports `6` (`[FL, FR, FC, LFE, RL, RR]`) alongside `4` (`[FL, FR, RL, RR]`), `2`, and `1`. `SurroundUpmix51` extracts common-mode vocals/navigator audio into Center (`FC`) and filters engine/collision bass into `LFE` through a 120 Hz 2nd-order Butterworth low-pass filter. A lock-free asynchronous recorder (`RecordWav` / `RecordWavFormat`) captures discrete multi-channel **WAV (32-bit IEEE Float / 16-bit PCM)** or **FLAC (24-bit / 16-bit PCM)** files to `Data/Recordings/Sound/`.
+* **SCSP 4-Tap Cubic Interpolation, Direct Float DSB & Master Soft-Clipper**: pure PCM SCSP voices now use loop-aware 4-tap Catmull-Rom cubic spline interpolation (keeping FM voices bit-exact), slave-SCSP FM ring-buffer cross-talk and Slot 16/17 `EXTS` routing are fixed, the DSB MPEG decoder outputs 32-bit float directly into the 64-tap resampler with per-sample volume ramping, and the master bus uses a $C^1$-continuous knee soft-clipper.
+* **Restored MPEG Music Intros & Fixed Daytona USA 2 Same-Track Bug**: looped DSB tracks keep their pre-loop intros (such as the 9.9-second intro of *Daytona USA 2*'s attract theme and 12.6-second race intros), and single-button view cycling (`VRCycle`) now emits a 6-frame momentary pulse instead of holding `VR3` down permanently (which previously triggered *Daytona USA 2*'s hidden track-8 BGM override cheat on every course).
+* **PowerPC 603e to x86-64 Hybrid JIT (`PowerPCMode`)**: translates 603e blocks to native x86-64 (~4.1× faster in CPU-bound scenes and pixel-identical to the interpreter across 675M lock-step blocks), paired with `CR3DSceneBuilder` optimisations ported from the Android branch.
+* **Steering Wheel Force Feedback & Live Axis Calibration**: fixed SDL3 DirectInput haptic initialisation order, raw-joystick wheel filtering, Cartesian constant-force sign, and `SDL_HAPTIC_SINE` road vibration. Added a DPI-aware wheel/pedal deadzone and travel calibration table on **FFB / Sensitivity** and a one-click "H-shifter release to neutral" generator on **Controls**.
+* **Need for Speed-Style Chase Camera & Stick Steering**: `ChaseCameraStabilizer` smooths camera yaw about the car's pivot without shaking 3D HUDs, paired with `GamepadSteeringSensitivity` (25%–100%, default 66%) and stronger stick smoothing (automatically bypassed for 1:1 direct response when a racing wheel is used, and reset to 100% when smoothing is Off).
+* **Attract-Mode Save States & Clean HD Texture Dumps**: `CSimNetBoard` state is now saved (and synthesized for older saves) so attract-mode saves no longer time out or hang on *"Please Wait"*; HD texture dumps write opaque alpha (`255`) for materials that ignore the 1-bit `T1RGB5` dither mask.
+* **macOS Retina 4K, Consolidated Platform Hotfixes (`v0.9.8.6a` / `v0.9.8.6x`) & Enriched Diagnostics**: native high-density 4K rendering on macOS Retina displays, 96-byte push constants for Windows + AMD GPUs (`maxPushConstantsSize = 128`), Ubuntu 24.04 `GLIBC_2.38` baseline + bundled font + Wayland title bars + in-game overlay input on Linux/macOS, a single `Data/Config/Model3-Vulkan.ini` configuration file, and expanded hardware/audio/calibration diagnostics in `Data/Model3Vulkan.log`.
 
 ## 🩹 What's New in v0.9.8.6
 
@@ -129,7 +139,11 @@ No installer required. Grab the archive for your platform from the [latest relea
 | :--- | :--- | :--- |
 | **Windows 10/11 (64-bit)** | `Model3-Vulkan.v…for.Windows.zip` | Double-click `Model3-Vulkan.exe` |
 | **Linux (x86-64)** | `Model3-Vulkan.v…for.Linux.tar.gz` | `./Model3-Vulkan` |
-| **macOS 13.3+ (Universal)** | `Model3-Vulkan.v…for.macOS.tar.gz` | `./Model3-Vulkan` |
+| **macOS 13.0+ (Intel)** | `Model3-Vulkan.v…for.macOS-Intel.tar.gz` | `./Model3-Vulkan` |
+
+> The Apple Silicon package is built from the same source; check the release page for the current
+> set of assets. macOS 13.x uses `.st` save states — `.zst` needs macOS 14+ because the host core
+> links against a newer Swift runtime.
 
 ### Windows Setup
 
@@ -313,7 +327,7 @@ The version string is defined in exactly one location: `Src/Version.h`:
 ```c
 #define SUPERMODEL_VERSION      "0.3a-WIP"     /* Upstream core; recorded in save states */
 #define MODEL3VULKAN_UPSTREAM_RELEASE "0.3a-2026.09.28"
-#define MODEL3VULKAN_VERSION "0.9.9.6"
+#define MODEL3VULKAN_VERSION "0.9.9.8"
 ```
 
 `MODEL3VULKAN_TITLE_FULL` is assembled from the title and the fork version, and `build.bat` reads these definitions via `Scripts/VersionString.ps1`. `SUPERMODEL_VERSION` is deliberately preserved: it is recorded in save states and NVRAM, preventing existing saves from being invalidated.
@@ -343,6 +357,16 @@ The version string is defined in exactly one location: `Src/Version.h`:
 
 ---
 
+## 💖 Community & Support
+
+* **Reddit Community:** [r/Model3Vulkan](https://www.reddit.com/r/Model3Vulkan/) *(Join us for HD texture pack sharing, compatibility discussions, and netplay updates)*
+* **GitHub Discussions / Issues:** Open for technical discussions, bug reports, and hardware feedback.
+* **Support via Ko-fi:** Development is fueled by late-night reverse engineering, hardware validation, and community passion. If you find this project valuable, consider supporting via Ko-fi:
+
+[![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/igloogarage)
+
+---
+
 ## 📜 License & Credits
 
 Model 3-Vulkan is licensed under the **GNU General Public License v3.0 (GPLv3)**. See [Docs/LICENSE.txt](Docs/LICENSE.txt) for details.
@@ -360,14 +384,3 @@ In accordance with **Section 7(e) of the GNU General Public License v3.0 (GPLv3)
 Note: ™ denotes an unregistered / common-law trademark or brand asset; see [TRADEMARK.md](TRADEMARK.md) for the full policy, the company details, and the enforcement process.
 
 This project builds upon the reverse-engineering foundations laid by **Bart Trzynadlowski**, **Nik Henson**, **Ian (dukey)**, **Ville Linde**, **Stefano Teso**, and the original **Supermodel** team. Third-party components and attribution details are documented in [`Docs/NOTICE.md`](Docs/NOTICE.md).
-
----
-## 💖 Community & Support
-
-* **Reddit Community:** [r/Model3Vulkan](https://www.reddit.com/r/Model3Vulkan/) *(Join us for HD texture pack sharing, compatibility discussions, and netplay updates)*
-* **GitHub Discussions / Issues:** Open for technical discussions, bug reports, and hardware feedback.
-* **Support via Ko-fi:** Development is fueled by late-night reverse engineering, hardware validation, and community passion. If you find this project valuable, consider supporting via Ko-fi:
-
-[![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/igloogarage)
-
-

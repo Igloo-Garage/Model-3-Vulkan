@@ -106,6 +106,7 @@ void CVulkanTextureCache::Shutdown()
 	vkDeviceWaitIdle(device);
 	m_hashCache.clear();
 	m_dumpedHashes.clear();
+	m_dumpedOpaque.clear();
 	for (auto& slot : m_slots)
 		DestroySlot(slot);
 	m_slots.clear();
@@ -939,6 +940,27 @@ void CVulkanTextureCache::ReportUploads()
 	m_coverageNone = 0;
 	m_coverageNoneInWindow = 0;
 	m_coveragePartialInWindow = 0;
+
+	if (m_hdLoad || m_hdDump || m_hdPack.IndexedCount() > 0 || m_hdPack.DumpedCount() > 0)
+	{
+		InfoLog("HD textures: status - load=%s (indexed %u, slots %u/%u, ready %u, pending %u, failed %u, "
+			"missing %u, VRAM %.1f MB), dump=%s (written %u, queued %u, opaque-flattened %u, alpha-redumped %u, errors %u).",
+			m_hdLoad ? "on" : "off",
+			m_hdPack.IndexedCount(), m_hdPack.SlotCount(), kMaxHDTextures,
+			m_hdPack.LoadedCount(), m_hdPack.PendingCount(), m_hdPack.FailedCount(),
+			m_hdPack.MissingCount(), (double)m_hdPack.BytesUsed() / (1024.0 * 1024.0),
+			m_hdDump ? "on" : "off",
+			m_hdPack.DumpedCount(), m_hdPack.DumpQueueSize(),
+			m_hdPack.AlphaFlattenedCount(), m_redumpedAlpha, m_hdPack.DumpErrorCount());
+		InfoLog("HD textures: hash cache - %zu live rect(s), %llu hit(s), %llu new rect(s), "
+			"%llu tile-upload invalidation(s) (%llu content change(s)), %llu offset-wrapped query(s).",
+			m_hashCache.size(),
+			(unsigned long long)m_hashCacheHits,
+			(unsigned long long)m_hashCacheMisses,
+			(unsigned long long)m_hashInvalidations,
+			(unsigned long long)m_hashReplacements,
+			(unsigned long long)m_wrappedOriginRefs);
+	}
 }
 
 void CVulkanTextureCache::RecordSync(VkCommandBuffer cmd, CVulkanRingBuffer& ring, uint64_t frameSerial)
@@ -1285,6 +1307,15 @@ void CVulkanTextureCache::CpuDecode(VkCommandBuffer cmd, CVulkanRingBuffer& ring
 
 void CVulkanTextureCache::TickHDTextures(bool load, bool dump)
 {
+	const uint32_t prevSerial = HDTextureReloadSerial();
+	if (prevSerial != m_lastReloadSerial)
+	{
+		m_lastReloadSerial = prevSerial;
+		m_hashCache.clear();
+		m_dumpedHashes.clear();
+		m_dumpedOpaque.clear();
+		m_dumpLimitReported = false;
+	}
 	m_hdLoad = load;
 	m_hdDump = dump;
 	m_hdPack.Tick(load, dump);
@@ -1303,37 +1334,80 @@ uint64_t CVulkanTextureCache::TextureHash(int page, int x, int y, int width, int
 		return 0;
 
 	page &= 1;
+	if ((x & ~(kPageWidth - 1)) != 0 || (y & ~(kPageHeight - 1)) != 0)
+		++m_wrappedOriginRefs;
+	x &= (kPageWidth - 1);
+	y &= (kPageHeight - 1);
 
-	// Which tiles the rectangle covers, and therefore which upload counters decide whether a cached
-	// hash is still valid. Truncating division is wrong for a negative origin (a mesh can carry a
-	// negative texture offset), so floor it explicitly.
-	auto floorDiv = [](int value, int divisor)
-	{
-		return (value >= 0) ? value / divisor : -((-value + divisor - 1) / divisor);
-	};
-	const int x0 = std::clamp(floorDiv(x, kTile), 0, kTilesX - 1);
-	const int y0 = std::clamp(floorDiv(y, kTile), 0, kTilesY - 1);
-	const int x1 = std::clamp(floorDiv(x + width - 1, kTile), 0, kTilesX - 1);
-	const int y1 = std::clamp(floorDiv(y + height - 1, kTile), 0, kTilesY - 1);
+	/*
+	 * Which tiles the rectangle covers, and therefore which upload counters decide whether a cached
+	 * hash is still valid.
+	 *
+	 * Two invariants matter here:
+	 *   1. The origin (x, y) is wrapped into [0, kPageWidth) x [0, kPageHeight) first (a mesh with a
+	 *      culling-node textureOffsetX/Y can place x >= 2048 or y >= 1024, which the hardware and
+	 *      HashTextureRegion() wrap with & 2047 / & 1023), and a rectangle that crosses the right or
+	 *      bottom page edge wraps its tile coordinates into tile 0, 1, ... rather than clamping to
+	 *      the border tile.
+	 *   2. Every covered tile's upload counter is mixed into a 64-bit revision fingerprint instead
+	 *      of taking std::max(). With std::max(), a multi-tile rectangle where one corner tile had a
+	 *      high upload count (e.g. 20) would never invalidate when the game later overwrote the rest
+	 *      of the rectangle with a new texture whose tile counts only rose from 3 to 4 - leaving
+	 *      m_hashCache permanently stuck on the previous stage's texture hash (and skipped during
+	 *      dumping).
+	 */
+	const int x0 = x / kTile;
+	const int y0 = y / kTile;
+	const int x1 = (x + width - 1) / kTile;
+	const int y1 = (y + height - 1) / kTile;
 
-	uint64_t revision = 0;
+	uint64_t revision = 1469598103934665603ull;
 	if (page < 2 && !m_tileRevision[page].empty())
 	{
 		for (int ty = y0; ty <= y1; ++ty)
+		{
+			const int wy = ty & (kTilesY - 1);
 			for (int tx = x0; tx <= x1; ++tx)
-				revision = (std::max)(revision,
-					(uint64_t)m_tileRevision[page][(size_t)ty * kTilesX + tx]);
+			{
+				const int wx = tx & (kTilesX - 1);
+				const uint32_t tileRev = m_tileRevision[page][(size_t)wy * kTilesX + wx];
+				revision ^= (uint64_t)tileRev + 0x9e3779b97f4a7c15ull + (revision << 6) + (revision >> 2);
+			}
+		}
 	}
 
 	const uint64_t key = MakeKey(page, x, y, width, height, format, false);
 	auto found = m_hashCache.find(key);
 	if (found != m_hashCache.end() && found->second.revision == revision)
+	{
+		++m_hashCacheHits;
 		return found->second.hash;
+	}
 
 	const uint64_t hash = HashTextureRegion(
 		m_textureRam + (size_t)page * (kPageWidth * kPageHeight),
 		x, y, width, height, format, kPageWidth, kPageHeight);
 
+	if (found != m_hashCache.end())
+	{
+		++m_hashInvalidations;
+		if (found->second.hash != hash)
+		{
+			++m_hashReplacements;
+			if (m_hashReplacements <= 8)
+			{
+				InfoLog("HD textures: rect page %d (%d,%d %dx%d fmt %d) overwritten in texture RAM: "
+					"hash %016llx -> %016llx (revision %016llx -> %016llx).",
+					page, x, y, width, height, format,
+					(unsigned long long)found->second.hash, (unsigned long long)hash,
+					(unsigned long long)found->second.revision, (unsigned long long)revision);
+			}
+		}
+		found->second = HashEntry{ revision, hash };
+		return hash;
+	}
+
+	++m_hashCacheMisses;
 	// A scene with many animated textures can churn through rectangles quickly. The table is a
 	// memo, not state: dropping it costs one rehash per live rectangle and nothing else.
 	if (m_hashCache.size() > 65536)
@@ -1342,26 +1416,49 @@ uint64_t CVulkanTextureCache::TextureHash(int page, int x, int y, int width, int
 	return hash;
 }
 
-void CVulkanTextureCache::DumpTexture(uint64_t hash, int page, int x, int y, int width, int height, int format)
+void CVulkanTextureCache::DumpTexture(uint64_t hash, int page, int x, int y, int width, int height, int format,
+	bool useAlpha)
 {
 	if (!m_hdDump || m_textureRam == nullptr || hash == 0)
 		return;
-	if (m_dumpedHashes.find(hash) != m_dumpedHashes.end())
-		return;
-	if (m_dumpedHashes.size() >= 50000)
+
+	const bool dumped = m_dumpedHashes.find(hash) != m_dumpedHashes.end();
+	if (dumped)
 	{
-		if (!m_dumpLimitReported)
+		// Written before the first material that reads alpha drew this rectangle, so the file has
+		// the alpha channel flattened. Redo it now: draw order is arbitrary, and a pack built from
+		// the flattened copy would lose the original's contour. The hash stays, so the file name -
+		// and therefore any replacement already made for it - does not change.
+		if (useAlpha && m_dumpedOpaque.erase(hash) != 0)
 		{
-			m_dumpLimitReported = true;
-			ErrorLog("HD textures: 50000 textures dumped this session; stopping. Reload the game to start a fresh set.");
+			++m_redumpedAlpha;
+			InfoLog("HD textures: '%016llx' is also used with alpha; re-dumping it with the source alpha channel.",
+				(unsigned long long)hash);
 		}
-		return;
+		else
+		{
+			return;
+		}
+	}
+	else
+	{
+		if (m_dumpedHashes.size() >= 50000)
+		{
+			if (!m_dumpLimitReported)
+			{
+				m_dumpLimitReported = true;
+				ErrorLog("HD textures: 50000 textures dumped this session; stopping. Reload the game to start a fresh set.");
+			}
+			return;
+		}
+		m_dumpedHashes.insert(hash);
+		if (!useAlpha)
+			m_dumpedOpaque.insert(hash);
 	}
 
 	page &= 1;
-	m_dumpedHashes.insert(hash);
 	m_hdPack.QueueDump(hash, page, x, y, width, height, format,
-		m_textureRam + (size_t)page * (kPageWidth * kPageHeight), kPageWidth, kPageHeight);
+		m_textureRam + (size_t)page * (kPageWidth * kPageHeight), kPageWidth, kPageHeight, useAlpha);
 }
 
 int CVulkanTextureCache::ResolveHDTexture(uint64_t hash, int wrapX, int wrapY)

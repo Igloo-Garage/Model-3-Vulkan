@@ -188,6 +188,15 @@ struct DisplayPacerConfig
     bool vsync = true;
     bool throttle = true;
     bool interpolation = true;
+    /*
+     * Advance one emulated frame per Tick() instead of following the wall clock.
+     *
+     * This is the benchmark mode: the logic rate becomes whatever the machine can
+     * sustain instead of 57.524 Hz, so the reported frame rate is the emulator's
+     * throughput. The game runs at that speed and the audio cannot keep up; it is
+     * for measurement, not for playing.
+     */
+    bool unlockLogic = false;
 };
 
 class CDisplayPacer
@@ -320,6 +329,7 @@ private:
     double m_panelHz = 0.0;
     bool m_vsync = true;
     bool m_throttle = true;
+    bool m_unlockLogic = false;
     bool m_interpolation = true;
     bool m_paused = false;
 

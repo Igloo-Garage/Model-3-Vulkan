@@ -14,6 +14,29 @@ cabinet bezel are trademarks and brand assets of **REXABYTE SOFTWARE INC.**
 licensed by the GPL.  The ™ symbol denotes an unregistered / common-law mark;
 see that file for the full policy.
 
+## Original standalone dual-licensed SDK modules (REXABYTE SOFTWARE INC.)
+
+The following clean-room header-only modules were developed from scratch by **REXABYTE SOFTWARE INC.**
+with zero code, types, or headers from upstream Supermodel. They are the exclusive intellectual property
+of **REXABYTE SOFTWARE INC.** and are distributed under a **Dual License**:
+
+1. **Commercial / Proprietary License (Paid Authorization Required)**: Any use, integration, or
+   distribution of these modules in closed-source software, proprietary commercial products, paid
+   applications, or commercial arcade hardware **strictly requires a prior written, paid commercial
+   license from REXABYTE SOFTWARE INC.** (authorized for official REXABYTE SOFTWARE INC. commercial
+   products, including the Android edition).
+2. **Open-Source GPLv3 Grant**: Permitted for use in complete open-source GPLv3 distributions
+   subject to mandatory GPLv3 Section 7 author attribution and origin marking terms
+   (see [`LICENSE-ADDITIONAL-TERMS.md`](../LICENSE-ADDITIONAL-TERMS.md)). Any removal of attribution
+   or closed-source commercial exploitation immediately terminates the open-source grant.
+
+| Module | Path | Purpose |
+| --- | --- | --- |
+| **IglooAudioDSP** (`Igloo::AudioDSP`) | `Src/Sound/IglooAudioDSP.h` | $C^1$-continuous master soft-clipper (`MasterSoftClip`), bilinear-prewarped 2nd-order Butterworth LFE low-pass filter (`ButterworthBiquadLPF`), 4.0-to-5.1 surround upmixer (`UpmixQuadTo51`), 12-bit 4-tap Catmull-Rom cubic pitch interpolator (`CubicInterpolate4Tap`), and per-sample linear gain ramper (`LinearGainRamper`). |
+| **IglooMultiChannelRecorder** (`Igloo::Audio`) | `Src/Sound/IglooMultiChannelRecorder.h` | Lock-free SPSC asynchronous multi-channel audio recorder (`MultiChannelRecorder<SampleT>`), 68-byte `WAVE_FORMAT_EXTENSIBLE` Float32/PCM16 writer, and built-in RFC 9639 lossless 24-bit/16-bit multi-channel FLAC encoder with `VORBIS_COMMENT` speaker masks. |
+| **IglooChaseCamera** (`Igloo::Camera`) | `Src/Graphics/Vulkan3D/IglooChaseCamera.h` | Need-for-Speed style spring-damper horizontal yaw-lag chase camera stabilizer (`ChaseCameraStabilizer`), non-linear deadband integrator, view-space player-car pivot tracker, and frustum culling angular margin helpers. |
+| **IglooInputFilter** (`Igloo::Input`) | `Src/Inputs/IglooInputFilter.h` | Non-linear center-precision gamma curve + exponential low-pass + slew-rate limiter for gamepad steering (`GamepadSteeringFilter`), and heuristic racing wheel classifier (`IsRacingWheelDeviceName`). |
+
 ## Emulation core
 
 - **Supermodel** — Sega Model 3 emulator by Bart Trzynadlowski, Nik Henson, Ville Linde,

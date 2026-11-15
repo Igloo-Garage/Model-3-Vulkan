@@ -396,6 +396,15 @@ void CHDTexturePack::Shutdown()
 	if (m_dumper.joinable())
 		m_dumper.join();
 
+	if (m_scanned || m_dumpedCount > 0 || m_dumpErrors > 0)
+	{
+		InfoLog("HD textures: session summary for '%s' - %zu indexed, %u/%u bindless slot(s) used (%u ready, "
+			"%u failed, %.1f MB VRAM), %zu unique hash(es) had no replacement; %u texture(s) dumped (%u opaque-flattened, %u error(s)).",
+			m_gameName.c_str(), m_index.size(), (uint32_t)m_slots.size(), kMaxHDTextures, m_loadedCount,
+			m_failedCount, (double)m_bytes / (1024.0 * 1024.0), m_missing.size(),
+			m_dumpedCount, m_alphaFlattened, m_dumpErrors);
+	}
+
 	if (m_context != nullptr && m_context->Device() != VK_NULL_HANDLE)
 	{
 		vkDeviceWaitIdle(m_context->Device());
@@ -572,6 +581,12 @@ void CHDTexturePack::Scan()
 		{
 			++duplicates;
 			const bool replaces = (uint8_t)kind > (uint8_t)found->second.kind;
+			if (duplicates <= 8)
+			{
+				InfoLog("HD textures: duplicate hash %016llx in pack - '%s' vs '%s' (keeping '%s').",
+					(unsigned long long)hash, found->second.path.c_str(), path.string().c_str(),
+					replaces ? path.string().c_str() : found->second.path.c_str());
+			}
 			if (replaces)
 			{
 				if (found->second.kind == HDTextureFileKind::Dds || found->second.kind == HDTextureFileKind::DdsZst)
@@ -690,7 +705,7 @@ int CHDTexturePack::Resolve(uint64_t hash, int wrapU, int wrapV)
 }
 
 void CHDTexturePack::QueueDump(uint64_t hash, int page, int x, int y, int width, int height,
-	int format, const uint16_t* pageRam, int pageWidth, int pageHeight)
+	int format, const uint16_t* pageRam, int pageWidth, int pageHeight, bool keepAlpha)
 {
 	if (!m_dumpEnabled || hash == 0 || pageRam == nullptr || width <= 0 || height <= 0)
 		return;
@@ -712,6 +727,7 @@ void CHDTexturePack::QueueDump(uint64_t hash, int page, int x, int y, int width,
 	job.width = (uint32_t)width;
 	job.height = (uint32_t)height;
 	job.format = format;
+	job.keepAlpha = keepAlpha;
 	job.texels.resize((size_t)width * height);
 	const int maskX = pageWidth - 1;
 	const int maskY = pageHeight - 1;
@@ -733,6 +749,12 @@ void CHDTexturePack::QueueDump(uint64_t hash, int page, int x, int y, int width,
 		m_dumpJobs.push_back(std::move(job));
 	}
 	m_dumperCv.notify_one();
+}
+
+uint32_t CHDTexturePack::DumpQueueSize()
+{
+	std::lock_guard<std::mutex> guard(m_dumperMutex);
+	return (uint32_t)m_dumpJobs.size();
 }
 
 void CHDTexturePack::StartLoader()
@@ -850,6 +872,22 @@ void CHDTexturePack::DumperMain()
 		for (size_t i = 0; i < job.texels.size(); ++i)
 			DecodeTexel(job.format, job.texels[i], &rgba[i * 4]);
 
+		/*
+		 * Alpha that no material reads is not part of the picture.
+		 *
+		 * T1RGB5 spends bit 15 and the 4-bit formats spend their alpha nibble on a 1-bit mask, and
+		 * Model 3 art uses it as a dither pattern for translucency. A material without contour and
+		 * without alpha test never samples it - the shader overwrites alpha with 1 - so writing the
+		 * raw bit turns a clean photo into one covered in white dots as soon as the image is viewed
+		 * (or uploaded to GitHub) on a light background. That looks like a broken dump and hides the
+		 * fact that the RGB is exactly right.
+		 */
+		if (!job.keepAlpha)
+		{
+			for (size_t i = 0; i < job.texels.size(); ++i)
+				rgba[i * 4 + 3] = 255;
+		}
+
 		// WriteRGBA follows the older helper convention and reports true on failure.
 		if (Util::PNG::WriteRGBA(job.path, rgba.data(), (int32_t)job.width, (int32_t)job.height))
 		{
@@ -860,6 +898,10 @@ void CHDTexturePack::DumperMain()
 		{
 			std::lock_guard<std::mutex> guard(m_dumperMutex);
 			++m_dumpedCount;
+			if (!job.keepAlpha && m_alphaFlattened++ == 0)
+				InfoLog("HD textures: '%s' is drawn by materials that ignore the texture's alpha; the dump "
+					"is written opaque (the source bit is a 1-bit transparency dither, not colour data).",
+					job.path.c_str());
 			if (m_dumpedCount == 1)
 				InfoLog("HD textures: dumped the first texture to '%s'.", job.path.c_str());
 		}

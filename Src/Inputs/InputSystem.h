@@ -313,6 +313,8 @@ struct JoyDetails
   bool hasAxis[NUM_JOY_AXES];                       // Flags to indicate which axes available on joystick
   char axisName[NUM_JOY_AXES][MAX_NAME_LENGTH + 1]; // Axis names (if available)
   bool axisHasFF[NUM_JOY_AXES];                     // Flags to indicate which axes are force feedback enabled
+  bool isGamepad = false;                           // True if classified as a standard gamepad
+  bool isWheel = false;                             // True if classified as a steering wheel / raw racing peripheral
 };
 
 /*
@@ -917,6 +919,18 @@ public:
    * backends keep their current behaviour.
    */
   virtual void RefreshState();
+
+  /*
+   * Refreshes joystick/gamepad state caches without touching keyboard/mouse snapshots or draining
+   * events. Used by the GUI axis calibration panel to display live raw axis values.
+   */
+  virtual void RefreshJoyStateOnly() {}
+
+  /*
+   * Public read-only access to the raw axis value (-32768..+32767) for GUI calibration and live
+   * axis preview.
+   */
+  int ReadJoyAxisRaw(int joyNum, int axisNum) const { return GetJoyAxisValue(joyNum, axisNum); }
 
   virtual void GrabMouse();
 

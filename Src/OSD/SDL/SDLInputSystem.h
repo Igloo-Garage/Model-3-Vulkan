@@ -119,6 +119,10 @@ private:
 	// "the pad does not rumble" report can be answered from the log: nothing here means the game
 	// never asked, everything here means the request is leaving the emulator.
 	unsigned m_ffbCounts[4] = {};
+	// FFStop has no slot in the array above (its id is -1). Counted separately because it is the
+	// one command that turns the torque off on purpose: without it, a wheel that goes light cannot
+	// be told apart from the game cutting the motor.
+	unsigned m_ffbStopCount = 0;
 	void ReportForceFeedback();
 
 	void RefreshGamepadStates();
@@ -308,6 +312,7 @@ public:
 
 	void RefreshPointer();
 	void RefreshState();
+	void RefreshJoyStateOnly() override;
 
 	// Copies the platform snapshot into the caches the bindings read; shared by Poll() and
 	// RefreshState().

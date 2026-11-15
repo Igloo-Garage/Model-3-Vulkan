@@ -36,8 +36,10 @@
 #include "CPU/Bus.h"
 #include "CPU/68K/68K.h"
 #include "CPU/Z80/Z80.h"
+#include "Sound/IglooAudioDSP.h"
 #include "Util/NewConfig.h"
 
+#include <atomic>
 #include <vector>
 
 #define FIFO_STACK_SIZE			0x100
@@ -109,7 +111,7 @@ inline int MpegSamplesForFrame(int numSamples, double& carry)
 class CDSBResampler
 {
 public:
-	int		UpSampleAndMix(float *outL, float *outR, INT16 *inL, INT16 *inR, UINT8 volumeL, UINT8 volumeR, int sizeOut, int sizeIn, int outRate, int inRate);
+	int		UpSampleAndMix(float *outL, float *outR, float *inL, float *inR, UINT8 volumeL, UINT8 volumeR, int sizeOut, int sizeIn, int outRate, int inRate);
 	void	Reset(void);
 	CDSBResampler(const Util::Config::Node &config)
 	  : m_config(config)
@@ -138,6 +140,10 @@ private:
 	// m_phase/m_phases its fraction. Integer arithmetic only, so the ratio cannot drift.
 	int		m_inPos = 0;
 	int		m_phase = 0;
+
+	// Per-sample gain smoothing state to eliminate 57.5 Hz frame-boundary zipper noise when
+	// the DSB firmware steps its hardware attenuation registers during track fades.
+	Igloo::AudioDSP::LinearGainRamper m_gainRamper;
 
 	// The k_half input samples immediately preceding the current block, so the first outputs of a
 	// frame can be filtered without a special case at the buffer start.
@@ -273,8 +279,8 @@ private:
 	int				retainedSamples;	// how many MPEG samples carried over from previous frame
 	double			mpegFrameCarry;		// fractional 32 kHz sample carry (see MpegSamplesForFrame)
 
-  // MPEG decode buffers (48KHz, 1/60th second + 2 extra padding samples)
-	INT16	*mpegL, *mpegR;
+  // MPEG decode buffers (32-bit float direct output from synthesis filter)
+	float	*mpegL, *mpegR;
 
 	// DSB memory
 	const UINT8	*progROM;		// Z80 program ROM (passed in from parent object)
@@ -285,7 +291,7 @@ private:
 	// Command FIFO
 	UINT8	fifo[FIFO_STACK_SIZE];
 	int		fifoIdxR;		// read position
-	int		fifoIdxW;		// write position
+	std::atomic<int>	fifoIdxW{0};	// write position, shared with the sound thread
 
 	// MPEG playback variables
 	int		mpegStart;
@@ -354,8 +360,8 @@ private:
 	int				retainedSamples;	// how many MPEG samples carried over from previous frame
 	double			mpegFrameCarry;		// fractional 32 kHz sample carry (see MpegSamplesForFrame)
 
-	// MPEG decode buffers (48KHz, 1/60th second + 2 extra padding samples)
-	INT16	*mpegL, *mpegR;
+	// MPEG decode buffers (32-bit float direct output from synthesis filter)
+	float	*mpegL, *mpegR;
 
 	// Output routing for the two mono programmes packed into one stereo MP2 stream (Sega Rally 2).
 	// Command 0xA0 selects Channel0, whose audio the decoder delivers in its SECOND buffer (mpegR);
@@ -379,7 +385,7 @@ private:
 	// Command FIFO
 	UINT8	fifo[FIFO_STACK_SIZE];
 	int		fifoIdxR;		// read position
-	int		fifoIdxW;		// write position
+	std::atomic<int>	fifoIdxW{0};	// write position, shared with the sound thread
 
 	// Registers
 	int 	cmdLatch;

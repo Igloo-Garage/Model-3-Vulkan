@@ -114,6 +114,10 @@ private:
 
 	inline bool IsGame(const char* gameName);
 	void ConnectProc(void);
+
+	// Rebuilds the single-machine "ready" state for saves that predate the
+	// SimNetBoard block. See LoadState() for why this is needed.
+	void SynthesizeReadyState(void);
 };
 
 #endif

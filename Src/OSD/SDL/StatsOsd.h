@@ -69,10 +69,11 @@ enum class StatsSyncMode
  *   renderer        the configuration - which backend is actually running
  *   sync / rate     the fullscreen mode, the emulator's pacing rate and the arcade's own
  *   panel           the display mode the window is on, from the desktop mode
- *   CPU             model, average and peak frequency, thread count and load, over the performance
- *                   cores on a hybrid CPU
- *   GPU             model, frequency, load and video memory: NVML where an NVIDIA driver is present,
- *                   otherwise the load alone from the Windows "GPU Engine" counters
+ *   CPU             model, average and peak frequency, thread count, load and package power
+ *                   (Windows "Energy Meter" / RAPL where available), over the performance cores
+ *   GPU             model, frequency, load, video memory and board power: NVML where an NVIDIA
+ *                   driver is present, otherwise the load alone from the Windows "GPU Engine"
+ *                   counters
  *   memory          this process's working set
  *   FPS              measured from the emulator's own frame loop, not from the display
  *   1% low          the 99th percentile frame time over the last few seconds, inverted
@@ -85,9 +86,16 @@ enum class StatsSyncMode
  *
  * The GPU figures need a vendor API: NVML ships with the NVIDIA driver. Where it is missing, the
  * Windows GPU Engine counters still provide the load - the one figure that says whether the GPU is
- * the limit - but not the clock or the video memory, and Windows offers no vendor-neutral source for
- * either. Whatever cannot be read is left out rather than shown as zero, which would read as "the GPU
- * is idle" instead of "this build cannot see it".
+ * the limit - but not the clock, the video memory or the board power, and Windows offers no
+ * vendor-neutral source for those. Whatever cannot be read is left out rather than shown as zero,
+ * which would read as "the GPU is idle" instead of "this build cannot see it".
+ *
+ * Power is best effort in the same way. CPU package power comes from the Windows "Energy Meter"
+ * counter set (the RAPL interface Intel's energy-estimation driver publishes) and GPU board power
+ * from NVML's nvmlDeviceGetPowerUsage. A missing source omits the figure. The CPU figure is the
+ * whole package and the GPU figure the whole board, not this process's share: they are for
+ * comparing two builds or two settings on the same scene, not for adding up to the emulator's own
+ * consumption.
  *
  * Both frequency figures are printed for the CPU because they answer different questions: the average
  * describes the package, and the peak describes the core the emulation thread is actually on. On a

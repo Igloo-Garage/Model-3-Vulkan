@@ -432,6 +432,19 @@ void CReal3D::BeginFrame(void)
 
 void CReal3D::PrepareFrame(void)
 {
+  // Drain queued texture uploads before PrepareFrame() builds the draw list and hashes sub-textures:
+  // SyncSnapshots() has already copied the new texels into textureRAMRO, so CVulkanTextureCache's
+  // per-tile revision counters and dirty bits must be updated before BuildDrawList() queries
+  // TextureHash(). Otherwise TextureHash() sees the old revision and either returns a stale hash
+  // or caches the new hash under the old revision number.
+  if (m_gpuMultiThreaded)
+  {
+    for (const auto &it : queuedUploadTexturesRO) {
+      Render3D->UploadTextures(it.level, it.x, it.y, it.width, it.height);
+    }
+    queuedUploadTexturesRO.clear();
+  }
+
   Render3D->PrepareFrame();
 }
 
@@ -1188,7 +1201,8 @@ Result CReal3D::Init(const uint8_t *vromPtr, IBus *BusObjectPtr, CIRQ *IRQObject
 
 CReal3D::CReal3D(const Util::Config::Node &config)
   : m_config(config),
-    m_gpuMultiThreaded(config["GPUMultiThreaded"].ValueAs<bool>())
+    m_gpuMultiThreaded(config["GPUMultiThreaded"].ValueAs<bool>()),
+    m_configRegisters{}
 {
   DebugLog("Built Real3D\n");
 }

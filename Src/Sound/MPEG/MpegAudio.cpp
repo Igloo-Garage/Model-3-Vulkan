@@ -19,6 +19,7 @@
  ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
  **/
 
+#define MINIMP3_FLOAT_OUTPUT
 #define MINIMP3_IMPLEMENTATION
 #include "Pkgs/minimp3.h"
 #include "MpegAudio.h"
@@ -208,12 +209,12 @@ struct Decoder
 	mp3dec_t			mp3d;
 	mp3dec_frame_info_t	info;
 	const uint8_t*		buffer;
-	int					size, pos;
+	int					size, pos, minPos;
 	bool				loop;
 	bool				stopped;
 	int					numSamples;
 	int					pcmPos;
-	short				pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
+	mp3d_sample_t		pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
 
 	std::shared_ptr<uint8_t[]>  custom_mpeg_data;
 };
@@ -238,6 +239,7 @@ void MpegDec::SetMemory(const uint8_t *data, int offset, int length, bool loop)
     // MPEG ROM
     dec.buffer            = data + offset;
     dec.size              = length;
+    dec.minPos            = -offset;
     dec.custom_mpeg_data  = nullptr;
   }
   else {
@@ -253,6 +255,7 @@ void MpegDec::SetMemory(const uint8_t *data, int offset, int length, bool loop)
 
     dec.buffer            = track.mpeg_data.get() + offset_in_file;
     dec.size              = track.mpeg_data_size - offset_in_file;
+    dec.minPos            = -(int)offset_in_file;
     dec.custom_mpeg_data  = track.mpeg_data;
   }
 
@@ -294,6 +297,7 @@ void MpegDec::UpdateMemory(const uint8_t* data, int offset, int length, bool loo
   		}
   		dec.buffer  = data + offset;
   		dec.size    = length;
+  		dec.minPos  = -offset;
   		dec.pos     = dec.pos - diff; // update position relative to our new start location
   		dec.custom_mpeg_data = nullptr;
   	}
@@ -321,6 +325,7 @@ void MpegDec::UpdateMemory(const uint8_t* data, int offset, int length, bool loo
     	}
       dec.buffer  = track.mpeg_data.get() + offset_in_file;
       dec.size    = track.mpeg_data_size - offset_in_file;  // ignoring length specified by caller because MPEG ROM end offsets won't in general match with track, so we always have to use EOF
+      dec.minPos  = -(int)offset_in_file;
       dec.pos     = dec.pos - diff; // update position relative to our new start location
     }
   }
@@ -362,11 +367,44 @@ bool MpegDec::GetLoop()
 
 void MpegDec::SetPosition(int pos)
 {
-	// The saved offset is relative to the active window. A stale or out-of-range value is
-	// clamped rather than trusted; DecodeAudio() then starts from the beginning of the window.
-	if (pos < 0 || dec.size <= 0 || pos >= dec.size)
+	// The saved offset is relative to the active window (which UpdateMemory() moves to loopStart,
+	// leaving dec.pos negative while the pre-loop intro is still playing). Allow negative positions
+	// down to dec.minPos (the start of the underlying ROM/file buffer).
+	if (dec.size <= 0 || pos < dec.minPos || pos >= dec.size)
 		pos = 0;
 	dec.pos = pos;
+}
+
+static void FlushBufferFloat(float*& left, float*& right, int& numStereoSamples)
+{
+	int numChans = dec.info.channels;
+	int &i = dec.pcmPos;
+
+	// Scale normalized [-1.0, 1.0] float output from minimp3's polyphase synthesis filter directly
+	// to the S16-scaled float domain (32768.0f) used by the resampler and SCSP without integer
+	// quantization or hard clipping.
+	for (; i < (dec.numSamples * numChans) && numStereoSamples; i += numChans) {
+		*left++  = dec.pcm[i] * 32768.0f;
+		*right++ = dec.pcm[i + numChans - 1] * 32768.0f;
+		numStereoSamples--;
+	}
+}
+
+static void EndWithSilenceFloat(float*& left, float*& right, int& numStereoSamples)
+{
+	while (numStereoSamples)
+	{
+		*left++ = 0.0f;
+		*right++ = 0.0f;
+		numStereoSamples--;
+	}
+}
+
+static inline int16_t FloatToClampedS16(float s) noexcept
+{
+	if (s >= 32767.0f) return 32767;
+	if (s <= -32768.0f) return -32768;
+	return static_cast<int16_t>(s + (s >= 0.0f ? 0.5f : -0.5f));
 }
 
 static void FlushBuffer(int16_t*& left, int16_t*& right, int& numStereoSamples)
@@ -376,8 +414,8 @@ static void FlushBuffer(int16_t*& left, int16_t*& right, int& numStereoSamples)
 	int &i = dec.pcmPos;
 
 	for (; i < (dec.numSamples * numChans) && numStereoSamples; i += numChans) {
-		*left++ = dec.pcm[i];
-		*right++ = dec.pcm[i + numChans - 1];
+		*left++ = FloatToClampedS16(dec.pcm[i] * 32768.0f);
+		*right++ = FloatToClampedS16(dec.pcm[i + numChans - 1] * 32768.0f);
 		numStereoSamples--;
 	}
 }
@@ -407,6 +445,7 @@ void MpegDec::Stop()
 	dec.buffer = nullptr;
 	dec.size = 0;
 	dec.pos = 0;
+	dec.minPos = 0;
 	dec.pcmPos = 0;
 	dec.numSamples = 0;
 	dec.loop = false;
@@ -437,7 +476,13 @@ void MpegDec::DecodeAudio(int16_t* left, int16_t* right, int numStereoSamples)
 
 	while (numStereoSamples > 0)
 	{
-		if (dec.pos < 0 || EndOfBuffer())
+		// Note: dec.pos is legitimately negative (< 0, >= dec.minPos) while playing a track's
+		// pre-loop intro after UpdateMemory() has moved dec.buffer to loopStart. Only clamp if
+		// it ever points before the start of the ROM/file buffer, and only loop at EndOfBuffer().
+		if (dec.pos < dec.minPos)
+			dec.pos = 0;
+
+		if (EndOfBuffer())
 		{
 			if (dec.loop && zeroSampleFrames == 0)
 				dec.pos = 0;
@@ -517,4 +562,101 @@ void MpegDec::DecodeAudio(int16_t* left, int16_t* right, int numStereoSamples)
 		}
 	}
 
+}
+
+void MpegDec::DecodeAudioFloat(float* left, float* right, int numStereoSamples)
+{
+if (dec.stopped || dec.buffer == nullptr || dec.size <= 0)
+{
+	EndWithSilenceFloat(left, right, numStereoSamples);
+	return;
+}
+
+FlushBufferFloat(left, right, numStereoSamples);
+
+static const bool loadDebug = std::getenv("SM3D_LOAD_DEBUG") != nullptr;
+int noProgress = 0;
+int zeroSampleFrames = 0;
+
+while (numStereoSamples > 0)
+{
+	if (dec.pos < dec.minPos)
+		dec.pos = 0;
+
+	if (EndOfBuffer())
+	{
+		if (dec.loop && zeroSampleFrames == 0)
+			dec.pos = 0;
+		else
+		{
+			EndWithSilenceFloat(left, right, numStereoSamples);
+			break;
+		}
+	}
+
+	const int remaining = dec.size - dec.pos;
+	if (remaining <= 0)
+	{
+		EndWithSilenceFloat(left, right, numStereoSamples);
+		break;
+	}
+
+	const int posBefore = dec.pos;
+	const int samplesBefore = numStereoSamples;
+
+	dec.numSamples = mp3dec_decode_frame(
+		&dec.mp3d,
+		dec.buffer + dec.pos,
+		remaining,
+		dec.pcm,
+		&dec.info);
+
+	if (dec.info.frame_bytes <= 0)
+	{
+		EndWithSilenceFloat(left, right, numStereoSamples);
+		break;
+	}
+
+	dec.pos += dec.info.frame_bytes;
+	dec.pcmPos = 0;
+
+	if (dec.pos <= posBefore)
+	{
+		EndWithSilenceFloat(left, right, numStereoSamples);
+		break;
+	}
+
+	if (dec.numSamples > 0)
+	{
+		zeroSampleFrames = 0;
+		FlushBufferFloat(left, right, numStereoSamples);
+	}
+	else if (++zeroSampleFrames > 8)
+	{
+		EndWithSilenceFloat(left, right, numStereoSamples);
+		break;
+	}
+
+	if (EndOfBuffer())
+	{
+		if (dec.loop)
+			dec.pos = 0;
+		else
+		{
+			EndWithSilenceFloat(left, right, numStereoSamples);
+			break;
+		}
+	}
+
+	if (loadDebug && dec.pos == posBefore && numStereoSamples == samplesBefore)
+	{
+		if (++noProgress == 1000)
+			InfoLog("LoadDebug mpeg stalled pos=%d size=%d frame_bytes=%d samples=%d",
+				dec.pos, dec.size, dec.info.frame_bytes, dec.numSamples);
+	}
+	else
+	{
+		noProgress = 0;
+	}
+}
 }

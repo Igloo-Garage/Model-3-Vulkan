@@ -200,6 +200,11 @@ bool CUiBlur::CreatePipelines()
 	VkPipelineInputAssemblyStateCreateInfo inputAssembly = {};
 	inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
 	inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+	// Metal (MoltenVK) cannot disable primitive restart and logs
+	// "VK_ERROR_FEATURE_NOT_PRESENT: Metal does not support disabling primitive restart" for
+	// every strip pipeline. These full-screen quads never use a restart index, so requesting
+	// the Metal behaviour is safe and keeps the console clean.
+	inputAssembly.primitiveRestartEnable = VK_TRUE;
 
 	VkPipelineViewportStateCreateInfo viewport = {};
 	viewport.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;

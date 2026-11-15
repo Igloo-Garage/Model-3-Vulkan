@@ -71,13 +71,11 @@ void main()
 
 	vec4 colour = ShadeFragment();
 
-	// Real3D writes a 1/w depth so nearer fragments compare greater.
-	//
-	// Deliberately the rasteriser's 1/w and not the value implied by the quad solve:
-	// the depth buffer has to agree with the surface that was actually rasterised,
-	// or a decal sitting on a surface would z-fight against the quad underneath it.
-	// The two agree exactly for planar quads and differ only inside a twisted one.
-	gl_FragDepth = pc.projection[3][2] * gl_FragCoord.w;
+	// Every 3D projection built by CR3DSceneBuilder::CalcViewport comes from Mat4::FrustumRZ,
+	// whose third row is (0, 0, 0, near), so the hardware-interpolated gl_FragCoord.z is already
+	// identically equal to ubo.projection[3][2] * gl_FragCoord.w (see real3d_oit.frag). Omitting
+	// the redundant gl_FragDepth assignment keeps hardware Early-Z / Hi-Z depth culling active
+	// on opaque geometry instead of forcing late-Z after the full fragment shader.
 
 	// Same dispatch as New3D's WriteOutputs(): colour zeroes both transparency layers, each
 	// transparency layer writes only itself. The pipeline's colour write mask drops the others.

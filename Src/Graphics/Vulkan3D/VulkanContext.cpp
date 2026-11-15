@@ -571,13 +571,27 @@ static BackendRoute ClassifyDevice(VkPhysicalDevice device, const VkPhysicalDevi
 	return BackendRoute::Unsupported;
 }
 
+/* Human-readable device class, so a log line says whether the CPU fallback or a real GPU was seen. */
+static const char* DeviceTypeName(VkPhysicalDeviceType type)
+{
+	switch (type)
+	{
+	case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return "integrated GPU";
+	case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:   return "discrete GPU";
+	case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:    return "virtual GPU";
+	case VK_PHYSICAL_DEVICE_TYPE_CPU:            return "software device";
+	default:                                     return "other device";
+	}
+}
+
 bool CVulkanContext::PickDevice()
 {
 	uint32_t count = 0;
 	vkEnumeratePhysicalDevices(m_instance, &count, nullptr);
 	if (count == 0)
 	{
-		ErrorLog("Vulkan: no physical devices.");
+		ErrorLog("Vulkan: no physical devices. The Vulkan loader found no installed driver: install the "
+			"GPU vendor's Vulkan driver, and check that VK_ICD_FILENAMES / VK_DRIVER_FILES does not hide it.");
 		return false;
 	}
 	std::vector<VkPhysicalDevice> devices(count);
@@ -611,9 +625,10 @@ bool CVulkanContext::PickDevice()
 			vkGetPhysicalDeviceProperties(device, &props);
 			if (m_devicePreference != props.deviceName)
 				continue;
-			if (props.limits.maxPushConstantsSize < 256)
+			if (props.limits.maxPushConstantsSize < 128)
 			{
-				ErrorLog("Vulkan: requested device '%s' has insufficient push constant space.", m_devicePreference.c_str());
+				ErrorLog("Vulkan: requested device '%s' has insufficient push constant space (%u bytes).",
+					m_devicePreference.c_str(), props.limits.maxPushConstantsSize);
 				break;
 			}
 			uint32_t family = presentFamily(device);
@@ -651,7 +666,13 @@ bool CVulkanContext::PickDevice()
 			vkGetPhysicalDeviceProperties(device, &props);
 			if (!includeHidden && !IsDisplayDevice(props))
 				continue;
-			if (props.limits.maxPushConstantsSize < 256)
+			/*
+			 * 128 bytes, the amount Vulkan itself guarantees, not the 256 most desktop drivers happen to
+			 * report. The scene push block is 96 bytes (see R3DPush), and it used to be 208 - which shut
+			 * every AMD GPU on Windows out before the first frame, because AMD's Windows driver reports
+			 * exactly 128.
+			 */
+			if (props.limits.maxPushConstantsSize < 128)
 				continue;
 
 			uint32_t family = presentFamily(device);
@@ -682,8 +703,45 @@ bool CVulkanContext::PickDevice()
 	}
 	if (m_physical == VK_NULL_HANDLE)
 	{
+		/*
+		 * List what was actually enumerated before giving the summary. "No usable device" on its own
+		 * cannot tell a missing driver apart from a software-only Vulkan loader, from a GPU that
+		 * cannot present to this window, from Vulkan 1.2 hardware missing one of the two extensions -
+		 * and each of those has a different fix. Reports are only actionable if the log says which.
+		 */
+		ErrorLog("Vulkan: %u physical device(s) enumerated, none usable:", count);
+		for (uint32_t i = 0; i < count; i++)
+		{
+			VkPhysicalDeviceProperties props = {};
+			vkGetPhysicalDeviceProperties(devices[i], &props);
+			const uint32_t family = presentFamily(devices[i]);
+			const BackendRoute route = ClassifyDevice(devices[i], props);
+
+			std::string reason;
+			if (route == BackendRoute::Unsupported)
+			{
+				if (props.apiVersion < VK_API_VERSION_1_2)
+					reason = "API version older than Vulkan 1.2";
+				else if (!HasDeviceExtension(devices[i], VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME))
+					reason = "Vulkan 1.2 without VK_KHR_dynamic_rendering";
+				else
+					reason = "Vulkan 1.2 without VK_KHR_synchronization2";
+			}
+			if (reason.empty() && props.limits.maxPushConstantsSize < 128)
+				reason = "push constant limit below 128 bytes";
+			if (reason.empty() && family == UINT32_MAX)
+				reason = "no graphics queue family can present to this window";
+			if (reason.empty())
+				reason = "usable, but not selected";
+
+			ErrorLog("Vulkan:   [%u] '%s' - %s, API %u.%u.%u, driver 0x%08x, push constants %u B: %s.",
+				i, props.deviceName, DeviceTypeName(props.deviceType),
+				VK_API_VERSION_MAJOR(props.apiVersion), VK_API_VERSION_MINOR(props.apiVersion),
+				VK_API_VERSION_PATCH(props.apiVersion), props.driverVersion,
+				props.limits.maxPushConstantsSize, reason.c_str());
+		}
 		ErrorLog("Vulkan: no device offers a usable API version (Vulkan 1.3, or 1.2 with dynamic "
-			"rendering and synchronization2) together with graphics, present and 256-byte push constants. "
+			"rendering and synchronization2) together with graphics, present and 128-byte push constants. "
 			"The OpenGL renderer (New 3D or Legacy 3D) can be chosen on the Video tab; a driver update "
 			"may also help.");
 		return false;
@@ -1173,7 +1231,11 @@ bool CVulkanContext::CreateSwapchain()
 	else
 	{
 		int w = 0, h = 0;
-		OSD::Platform::GetWindowSize(m_window, &w, &h);
+		// Device pixels: the surface follows the drawable, which on a Retina Mac is a multiple of the
+		// window's coordinate size.
+		OSD::Platform::GetWindowPixelSize(m_window, &w, &h);
+		if (w <= 0 || h <= 0)
+			OSD::Platform::GetWindowSize(m_window, &w, &h);
 		m_extent.width = std::max(caps.minImageExtent.width, std::min(caps.maxImageExtent.width, (uint32_t)w));
 		m_extent.height = std::max(caps.minImageExtent.height, std::min(caps.maxImageExtent.height, (uint32_t)h));
 	}

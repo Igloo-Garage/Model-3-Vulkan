@@ -33,6 +33,10 @@
 
 static const uint64_t netGUID = 0x5bf177da34872;
 
+// Magic for the SimNetBoard save-state block. "SNBT". Older saves have no block at all,
+// so LoadState() also has a fallback that rebuilds a single-machine ready state.
+static constexpr UINT32 kSimNetBoardMagic = 0x534E4254;
+
 static const char *LoadDebugNetStateName(State state)
 {
 	switch (state)
@@ -85,12 +89,201 @@ CSimNetBoard::~CSimNetBoard(void)
 
 void CSimNetBoard::SaveState(CBlockFile* SaveState)
 {
-	
+	if (!m_attached)
+		return;
+
+	SaveState->NewBlock("SimNetBoard", __FILE__);
+
+	UINT32	magic = kSimNetBoardMagic;
+	UINT8	state = (UINT8)m_state;
+	UINT8	running = m_running ? 1 : 0;
+	UINT8	commbank = m_commbank ? 1 : 0;
+
+	SaveState->Write(&magic, sizeof(magic));
+	SaveState->Write(&state, sizeof(state));
+	SaveState->Write(&running, sizeof(running));
+	SaveState->Write(&m_numMachines, sizeof(m_numMachines));
+	SaveState->Write(&m_counter, sizeof(m_counter));
+	SaveState->Write(&m_segmentSize, sizeof(m_segmentSize));
+	SaveState->Write(&m_IRQ2ack, sizeof(m_IRQ2ack));
+	SaveState->Write(&m_status0, sizeof(m_status0));
+	SaveState->Write(&m_status1, sizeof(m_status1));
+	SaveState->Write(&commbank, sizeof(commbank));
+
+	// The main board also maps these buffers, but CModel3 only stores its own RAM; save them
+	// here so the handshake state and the shared RAM/buffer stay consistent.
+	if (RAM != nullptr)
+		SaveState->Write(RAM, 0x10000);
+	if (Buffer != nullptr)
+		SaveState->Write(Buffer, 0x20000);
 }
 
 void CSimNetBoard::LoadState(CBlockFile* SaveState)
 {
+	if (!m_attached)
+		return;
 
+	// Saves written before the SimNetBoard block existed carry no network state. Rebuild the
+	// single-machine ready state instead of returning: without it the game's network check
+	// reads a zero status register, times out and reboots back to the system test.
+	if (Result::OKAY != SaveState->FindBlock("SimNetBoard"))
+	{
+		SynthesizeReadyState();
+		return;
+	}
+
+	UINT32	magic = 0;
+	UINT8	state = 0;
+	UINT8	running = 0;
+	UINT8	commbank = 0;
+
+	SaveState->Read(&magic, sizeof(magic));
+	SaveState->Read(&state, sizeof(state));
+	SaveState->Read(&running, sizeof(running));
+	SaveState->Read(&m_numMachines, sizeof(m_numMachines));
+	SaveState->Read(&m_counter, sizeof(m_counter));
+	SaveState->Read(&m_segmentSize, sizeof(m_segmentSize));
+	SaveState->Read(&m_IRQ2ack, sizeof(m_IRQ2ack));
+	SaveState->Read(&m_status0, sizeof(m_status0));
+	SaveState->Read(&m_status1, sizeof(m_status1));
+	SaveState->Read(&commbank, sizeof(commbank));
+
+	if (magic != kSimNetBoardMagic)
+	{
+		ErrorLog("SimNetBoard state has an unrecognized format; rebuilding a single-machine state.");
+		SynthesizeReadyState();
+		return;
+	}
+
+	m_state = (State)state;
+	m_running = running != 0;
+	m_commbank = commbank != 0;
+
+	if (RAM != nullptr)
+		SaveState->Read(RAM, 0x10000);
+	if (Buffer != nullptr)
+		SaveState->Read(Buffer, 0x20000);
+
+	// CommRAM/externalCommRAM are the two halves of Buffer, chosen by m_commbank. Re-derive
+	// them so the next RunFrame() writes to the bank the saved frame expected to write to.
+	if (m_commbank)
+	{
+		CommRAM = Buffer + 0x10000;
+		externalCommRAM = Buffer;
+	}
+	else
+	{
+		CommRAM = Buffer;
+		externalCommRAM = Buffer + 0x10000;
+	}
+
+	// Repair saves created while the 3-second boot's NETWORK CHECKING diagnostic segment size
+	// (256 bytes, RAM16[0x402]=0x0200) had been left in place instead of Daytona 2's gameplay
+	// segment size (848 bytes, RAM16[0x402]=0x3ef0). With a 256-byte segment, the loopback copy
+	// lands at 0x200 instead of 0x450, leaving the car-select screen stuck on "Please wait" and
+	// still playing the attract-mode music.
+	if (m_localLoop && m_gameType == GameType::one && IsGame("daytona2") &&
+		m_state == State::ready && m_segmentSize == 0x100 && RAM != nullptr && Buffer != nullptr)
+	{
+		RAM16[0x400] = 0;
+		RAM16[0x402] = 0x3ef0;
+		RAM16[0x404] = 848;
+		m_segmentSize = 848;
+		for (int bank = 0; bank < 2; ++bank)
+		{
+			uint8_t* bankPtr = Buffer + bank * 0x10000;
+			*(uint16_t*)&bankPtr[0x0] = RAM16[0x400];
+			*(uint16_t*)&bankPtr[0x2] = 0;
+			*(uint16_t*)&bankPtr[0x4] = 0;
+			*(uint16_t*)&bankPtr[0x8] = FLIPENDIAN16(0x100 + m_segmentSize);
+			*(uint16_t*)&bankPtr[0xa] = FLIPENDIAN16(RAM16[0x402] - m_segmentSize - 1);
+			*(uint16_t*)&bankPtr[0xc] = FLIPENDIAN16(0x100);
+			*(uint16_t*)&bankPtr[0xe] = FLIPENDIAN16(RAM16[0x402] - m_segmentSize + 0x200);
+			memmove(bankPtr + 0x100 + m_segmentSize, bankPtr + 0x100, m_segmentSize);
+		}
+		InfoLog("Net board: upgraded saved 256-byte diagnostic segment to 848 bytes for '%s'.",
+			m_gameInfo.name.c_str());
+	}
+}
+
+void CSimNetBoard::SynthesizeReadyState(void)
+{
+	// Only a machine linked to itself has a deterministic single-machine ready state to rebuild.
+	// A real multi-machine link needs the socket handshake, which cannot be reconstructed from
+	// an old save.
+	if (!m_attached || !m_localLoop)
+		return;
+
+	m_running = true;
+	m_counter = 0;
+	m_IRQ2ack = 0x01;
+
+	if (m_gameType == GameType::one)
+	{
+		// The net RAM header the main board wrote during boot is not part of old saves, and at
+		// the 3-second deferred-load mark the machine is still in NETWORK CHECKING where the
+		// diagnostic uses a 256-byte (0x100) test segment (RAM16[0x402]=0x0200). Rebuild the
+		// post-boot gameplay header (master flag 0, segment area ending at 0x3ef0, 848-byte
+		// segments) so the loopback copy lands at 0x450 where the game expects its peer slot.
+		if (RAM16[0x404] == 0 || RAM16[0x404] == 0x100 || IsGame("daytona2"))
+		{
+			RAM16[0x400] = 0;
+			RAM16[0x402] = 0x3ef0;
+			RAM16[0x404] = 848;
+		}
+
+		m_numMachines = 1;
+		m_status0 = 0;
+		m_status1 = 0x2021;
+		m_segmentSize = RAM16[0x404];
+
+		// Populate both CommRAM banks so externalCommRAM is valid immediately after LoadState(),
+		// before the next RunFrame() swaps banks.
+		for (int bank = 0; bank < 2; ++bank)
+		{
+			uint8_t* bankPtr = Buffer + bank * 0x10000;
+			*(uint16_t*)&bankPtr[0x0] = RAM16[0x400];
+			*(uint16_t*)&bankPtr[0x2] = 0;
+			*(uint16_t*)&bankPtr[0x4] = 0;
+			*(uint16_t*)&bankPtr[0x6] = 0;
+			*(uint16_t*)&bankPtr[0x8] = FLIPENDIAN16(0x100 + m_segmentSize);
+			*(uint16_t*)&bankPtr[0xa] = FLIPENDIAN16(RAM16[0x402] - m_segmentSize - 1);
+			*(uint16_t*)&bankPtr[0xc] = FLIPENDIAN16(0x100);
+			*(uint16_t*)&bankPtr[0xe] = FLIPENDIAN16(RAM16[0x402] - m_segmentSize + 0x200);
+		}
+	}
+	else if (m_gameType == GameType::two)
+	{
+		m_numMachines = 1;
+		m_status0 = 5;
+		if (IsGame("dirtdvls"))
+			m_status1 = 0x7400;
+		else
+			m_status1 = 0;
+
+		m_segmentSize = RAM16[0x204];
+
+		CommRAM16[0x0] = RAM16[0x200];
+		CommRAM16[0x2] = 0;
+		CommRAM16[0x4] = 0;
+		CommRAM16[0x6] = 0;
+		CommRAM16[0x8] = FLIPENDIAN16(0x100 + m_segmentSize);
+		CommRAM16[0xa] = FLIPENDIAN16(RAM16[0x206]);
+		CommRAM16[0xc] = FLIPENDIAN16(0x100);
+		CommRAM16[0xe] = FLIPENDIAN16(RAM16[0x206] + 0x80);
+	}
+	else
+	{
+		return;
+	}
+
+	m_state = State::ready;
+	m_commbank = false;
+	CommRAM = Buffer;
+	externalCommRAM = Buffer + 0x10000;
+
+	InfoLog("Net board: no saved state; rebuilt single-machine ready state (status1=%04X, %u segment(s) of %u bytes).",
+		(unsigned)m_status1, (unsigned)m_numMachines, (unsigned)m_segmentSize);
 }
 
 std::string CSimNetBoard::DebugState(void) const

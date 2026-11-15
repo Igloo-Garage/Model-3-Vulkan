@@ -90,86 +90,16 @@ if exist "%ROOT%\Scripts\VersionString.ps1" (
     )
 )
 if not defined VERSIONTEXT set "VERSIONTEXT=v?.? (Scripts\VersionString.ps1 failed)"
-echo Building Supermodel-LegacyOG !VERSIONTEXT!
+echo Building Model 3-Vulkan !VERSIONTEXT!
 echo.
 
-rem ---- Toolset -----------------------------------------------------------------
-rem The project file names v145, which only ships with the newest toolchains. Rather
-rem than failing with MSB8020 - which reads like a broken project - look at what this
-rem Visual Studio actually has installed and use the newest of those. An explicit
-rem argument always wins.
-rem
-rem Only the requests the project might name are listed. Passing a toolset as a
-rem property overrides it for every project in the build, so the auxiliary projects
-rem (SDL, zlib, Musashi) follow along.
-set "WANTED="
 set "PACKAGE="
 for %%A in (%*) do (
-    if /i "%%~A"=="v143" set "WANTED=v143"
-    if /i "%%~A"=="v144" set "WANTED=v144"
-    if /i "%%~A"=="v145" set "WANTED=v145"
     if /i "%%~A"=="-package" set "PACKAGE=1"
     if /i "%%~A"=="package"  set "PACKAGE=1"
 )
 
-rem ---- Find MSBuild ------------------------------------------------------------
-set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
-set "MSBUILD="
-if exist "%VSWHERE%" (
-    for /f "usebackq tokens=*" %%I in (`"%VSWHERE%" -latest -prerelease -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe`) do set "MSBUILD=%%I"
-)
-rem Fall back to a PATH lookup, which covers Build Tools installs and shells that
-rem were opened from a developer command prompt.
-if not defined MSBUILD (
-    for %%I in (MSBuild.exe) do if not "%%~$PATH:I"=="" set "MSBUILD=%%~$PATH:I"
-)
-if not defined MSBUILD (
-    echo [ERROR] MSBuild not found.
-    echo         Install Visual Studio with the "Desktop development with C++" workload,
-    echo         or run this from a Developer Command Prompt.
-    exit /b 1
-)
-
-rem ---- Pick a toolset that is actually installed -------------------------------
-rem Note the !VAR! form inside the parenthesised block below. %VAR% there would be expanded when
-rem the whole block is parsed, which is before MSBUILDDIR and VSROOT are assigned, so the search
-rem would look in an empty path and report every toolset as missing.
-set "TOOLSET="
-if defined WANTED (
-    set "TOOLSET=%WANTED%"
-) else (
-    rem MSBuild.exe lives at <VS>\MSBuild\Current\Bin\, so three levels up from its
-    rem directory is the install root; the toolset folders sit under it next to the
-    rem MSBuild of the same VS version. Note the directory is taken first - appending
-    rem ..\ to a file path does not resolve, it just makes a nonsense name.
-    for %%I in ("%MSBUILD%") do set "MSBUILDDIR=%%~dpI"
-    for %%I in ("!MSBUILDDIR!..\..\..") do set "VSROOT=%%~fI"
-
-    rem Walk the VC\<version>\Platforms\x64\PlatformToolsets folders. for /d is used
-    rem rather than dir with a wildcard, because dir only expands wildcards in the
-    rem last path component - a glob like VC\*\...\v143 silently matches nothing and
-    rem looks exactly like "no toolset installed".
-    for /d %%V in ("!VSROOT!\MSBuild\Microsoft\VC\*") do (
-        for %%T in (v145 v144 v143) do (
-            if not defined TOOLSET (
-                if exist "%%V\Platforms\x64\PlatformToolsets\%%T" set "TOOLSET=%%T"
-            )
-        )
-    )
-)
-
-echo MSBuild : %MSBUILD%
-if defined TOOLSET (
-    echo Toolset : %TOOLSET%
-) else (
-    echo Toolset : as declared in the project ^(none of v143/v144/v145 found^)
-)
-echo.
-
 rem ---- Close a running copy so the linker can replace the exe ------------------
-rem Both names are checked: the Visual Studio build produces Supermodel-LegacyOG.exe while the
-rem assembled distribution is the same name, so the developer's copy and the one they handed out
-rem are different processes and either can be the one holding the file open.
 for %%N in (Supermodel-LegacyOG.exe Model3-Vulkan.exe) do (
     tasklist /fi "imagename eq %%N" 2>nul | findstr /i /c:"%%N" >nul
     if not errorlevel 1 (
@@ -181,48 +111,12 @@ rem Give Windows a moment to release the file mapping.
 ping -n 2 127.0.0.1 >nul 2>&1
 
 rem ---- Start-up artwork signature ---------------------------------------------
-rem  The splash picture is compiled in as a resource and checked at start-up against the SHA-256
-rem  recorded in Src\OSD\Windows\SplashResource.h. Editing the picture without refreshing that hash
-rem  would make every build announce itself as UNOFFICIAL, so it is regenerated here instead of
-rem  being left to be remembered. Idempotent: unchanged artwork prints the same hash and writes
-rem  nothing.
 if exist "%ROOT%\Scripts\UpdateSplashSignature.ps1" (
     powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\Scripts\UpdateSplashSignature.ps1"
     echo.
 )
 
-rem ---- Build ------------------------------------------------------------------
-set "TOOLSETARG="
-if defined TOOLSET set "TOOLSETARG=/p:PlatformToolset=%TOOLSET%"
-
-echo Building Release x64...
-echo ----------------------------------------------------------------------------
-"%MSBUILD%" "%ROOT%\MSVC\Supermodel.vcxproj" ^
-    /p:Configuration=Release ^
-    /p:Platform=x64 ^
-    %TOOLSETARG% ^
-    /m ^
-    /v:minimal ^
-    /nologo
-if errorlevel 1 (
-    echo.
-    echo [ERROR] Build failed. Nothing was assembled.
-    exit /b 1
-)
-echo ----------------------------------------------------------------------------
-echo.
-
-set "BIN=%ROOT%\MSVC\x64\Release"
-if not exist "%BIN%\Supermodel-LegacyOG.exe" (
-    echo [ERROR] Build reported success but "%BIN%\Supermodel-LegacyOG.exe" is missing.
-    exit /b 1
-)
-
 rem ---- Translation audit ------------------------------------------------------
-rem A missing English entry cannot break anything: Tr() falls back to the Chinese source text, so
-rem the only symptom is one label staying Chinese while English is selected - and that is easy to
-rem ship without noticing, because in Chinese mode it looks perfectly correct. Reported on every
-rem build so the count stays visible. Not fatal, since a false positive should not block a release.
 if exist "%ROOT%\Scripts\AuditTranslations.ps1" (
     echo Checking the English translation table...
     powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\Scripts\AuditTranslations.ps1"
@@ -230,16 +124,9 @@ if exist "%ROOT%\Scripts\AuditTranslations.ps1" (
 )
 
 rem ---- Vulkan target (CMake/Ninja) ----------------------------------------------
-rem  The second executable is built by CMake, not by the MSVC project. build-cmake.bat
-rem  brings up vcvars64 itself and builds both CMake targets; the SDL2 one is a
-rem  no-op here because MSBuild just produced the same sources, but leaving both on
-rem  keeps the CMake cache stable instead of flipping USE_SDL2 between runs.
-rem
-rem  A failure is fatal: shipping a folder whose second executable is missing (or
-rem  is an older build than the first) is worse than not shipping it at all.
 echo Building Model 3-Vulkan...
 echo ----------------------------------------------------------------------------
-call "%ROOT%\build-cmake.bat" -DUSE_SDL3=ON
+call "%ROOT%\build-cmake.bat"
 if errorlevel 1 (
     echo.
     echo [ERROR] SDL3 build failed. Nothing was assembled.
@@ -305,7 +192,7 @@ rem user-data locations is the conservative direction: worst case a stale file s
 set "KEEPDIR=%TEMP%\supermodel-vk-keep"
 set "HAVEKEEP="
 if exist "%KEEPDIR%" rmdir /s /q "%KEEPDIR%"
-for %%D in (Saves Saves_Legacy NVRAM Screenshots Cache) do (
+for %%D in (Saves Saves_Legacy NVRAM Screenshots Recordings Cache) do (
     if exist "%DIST%\Data\%%D" (
         xcopy /e /i /q /y "%DIST%\Data\%%D" "%KEEPDIR%\%%D\" >nul 2>nul
         set "HAVEKEEP=1"
@@ -320,15 +207,7 @@ for %%D in (HDTextures DumpTextures) do (
         set "HAVEKEEP=1"
     )
 )
-if exist "%DIST%\Data\Config\Supermodel.ini" (
-    mkdir "%KEEPDIR%\Config" 2>nul
-    copy /y "%DIST%\Data\Config\Supermodel.ini" "%KEEPDIR%\Config\Supermodel.ini" >nul
-    set "HAVEKEEP=1"
-)
-rem The Vulkan build keeps its own settings file (<exe stem>.ini, now Model3-Vulkan.ini). It is a
-rem user file just like Supermodel.ini, and without this a rebuild would silently reset every
-rem Vulkan-only option by reseeding it from the global file.  The previous fork name is kept too,
-rem so an installation that has not run the renamed executable yet can still be migrated.
+rem The Vulkan build keeps its settings in Data\Config\Model3-Vulkan.ini.
 for %%F in (Model3-Vulkan.ini) do (
     if exist "%DIST%\Data\Config\%%F" (
         mkdir "%KEEPDIR%\Config" 2>nul
@@ -354,6 +233,7 @@ mkdir "%DIST%\Data\NVRAM"           2>nul
 mkdir "%DIST%\Data\Saves"           2>nul
 mkdir "%DIST%\Data\Saves_Legacy"    2>nul
 mkdir "%DIST%\Data\Screenshots"     2>nul
+mkdir "%DIST%\Data\Recordings\Sound" 2>nul
 mkdir "%DIST%\Data\Cache"           2>nul
 mkdir "%DIST%\Data\Analysis"        2>nul
 mkdir "%DIST%\roms"                2>nul
@@ -361,13 +241,12 @@ mkdir "%DIST%\roms"                2>nul
 
 rem Put the user's own data back, on top of the freshly assembled tree.
 if defined HAVEKEEP (
-    for %%D in (Saves Saves_Legacy NVRAM Screenshots Cache) do (
+    for %%D in (Saves Saves_Legacy NVRAM Screenshots Recordings Cache) do (
         	if exist "%KEEPDIR%\%%D" xcopy /e /i /q /y "%KEEPDIR%\%%D" "%DIST%\Data\%%D\" >nul
     )
     for %%D in (HDTextures DumpTextures) do (
         if exist "%KEEPDIR%\Assets\%%D" xcopy /e /i /q /y "%KEEPDIR%\Assets\%%D" "%DIST%\Data\Assets\%%D\" >nul
     )
-    if exist "%KEEPDIR%\Config\Supermodel.ini" copy /y "%KEEPDIR%\Config\Supermodel.ini" "%DIST%\Data\Config\Supermodel.ini" >nul
     for %%F in (Model3-Vulkan.ini) do (
         if exist "%KEEPDIR%\Config\%%F" copy /y "%KEEPDIR%\Config\%%F" "%DIST%\Data\Config\%%F" >nul
     )
@@ -380,14 +259,7 @@ if defined HAVEKEEP (
     echo Kept     : nothing - this is a fresh layout
 )
 
-copy /y "%BIN%\Supermodel-LegacyOG.exe" "%DIST%\%EXENAME%" >nul
-if errorlevel 1 (
-    echo [ERROR] Could not replace "%DIST%\%EXENAME%". Close the running emulator and rebuild.
-    exit /b 1
-)
-
-rem The Vulkan build, from the CMake output. Same Data\ tree, no separate config:
-rem switching executables is meant to be a copy-and-run decision, not a migration.
+rem The Vulkan build, from the CMake output.
 copy /y "%BIN_SDL3%" "%DIST%\%EXENAME_SDL3%" >nul
 if errorlevel 1 (
     echo [ERROR] Could not replace "%DIST%\%EXENAME_SDL3%". Close the running emulator and rebuild.
@@ -430,6 +302,18 @@ if exist "%ROOT%\Assets\Boxarts\*.webp" (
     echo Boxarts  : copied from Assets\Boxarts
 ) else (
     echo Boxarts  : not found ^(game list will have no artwork^)
+)
+
+rem ---- Bundled interface font --------------------------------------------------
+rem The Linux package needs this: a stock distribution installs no CJK font, and the fallback it does
+rem have (Droid Sans Fallback) has no Latin glyphs, so every interface label disappeared. Windows and
+rem macOS prefer their own system face and use this only as a last resort, but it ships in every
+rem package so the three layouts stay identical and an English Windows install without msyh/simhei/
+rem simsun still renders Chinese text.
+if exist "%ROOT%\Assets\Fonts\*" (
+    mkdir "%DIST%\Data\Assets\Fonts" 2>nul
+    copy /y "%ROOT%\Assets\Fonts\*" "%DIST%\Data\Assets\Fonts\" >nul
+    echo Fonts    : copied from Assets\Fonts
 )
 
 rem ---- Bezel backdrop ----------------------------------------------------------
@@ -533,6 +417,13 @@ for %%F in (usermanual.md usermanual_chs.md) do (
     )
 )
 
+rem ---- Release notes ----------------------------------------------------------
+rem README.txt points at this file for the full feature list, so it has to travel with the package.
+if exist "%ROOT%\RELEASE_NOTES.md" (
+    copy /y "%ROOT%\RELEASE_NOTES.md" "%DIST%\RELEASE_NOTES.md" >nul
+    echo Notes    : RELEASE_NOTES.md
+)
+
 rem ---- The arcade display helper ships with the build -------------------------
 rem Scripts\ArcadeDisplay.ps1 handles the 57/58 Hz display mode: listing whether one exists, and
 rem switching to it for a session and restoring the desktop afterwards. Both the settings window and
@@ -593,7 +484,7 @@ mkdir "%STAGE%" 2>nul
 
 rem One line rather than caret continuations: robocopy inside a parenthesised block with line
 rem continuations is a reliable way to produce a command cmd interprets differently than intended.
-robocopy "%DIST%" "%STAGE%" /E /XD "%DIST%\Data\Saves" "%DIST%\Data\Saves_Legacy" "%DIST%\Data\Screenshots" "%DIST%\Data\NVRAM" "%DIST%\Data\Cache" "%DIST%\Data\Analysis" "%DIST%\Data\Assets\HDTextures" "%DIST%\Data\Assets\DumpTextures" /XF "*.log" "Supermodel.ini" "Model3-Vulkan.ini" "*.zip" /NFL /NDL /NJH /NJS /NP >nul
+robocopy "%DIST%" "%STAGE%" /E /XD "%DIST%\Data\Saves" "%DIST%\Data\Saves_Legacy" "%DIST%\Data\Screenshots" "%DIST%\Data\Recordings" "%DIST%\Data\NVRAM" "%DIST%\Data\Cache" "%DIST%\Data\Analysis" "%DIST%\Data\Assets\HDTextures" "%DIST%\Data\Assets\DumpTextures" /XF "*.log" "Supermodel.ini" "Model3-Vulkan.ini" "*.bak-*" "*.zip" /NFL /NDL /NJH /NJS /NP >nul
 if errorlevel 8 (
     echo [ERROR] robocopy could not stage the release copy.
     exit /b 1
@@ -602,7 +493,7 @@ if errorlevel 8 (
 rem The runtime folders are recreated empty so the extracted tree has the same shape as the
 rem assembled one. A zip may not store empty directories; the program creates them on demand either
 rem way, so this is for the person who copies the staged folder instead of the archive.
-for %%D in (Saves Saves_Legacy NVRAM Screenshots Cache Analysis) do mkdir "%STAGE%\Data\%%D" 2>nul
+for %%D in (Saves Saves_Legacy NVRAM Screenshots Recordings\Sound Cache Analysis) do mkdir "%STAGE%\Data\%%D" 2>nul
 
 rem Progress reporting is suppressed: Compress-Archive draws a progress bar, and in this
 rem non-interactive console the bar's arithmetic fails ("bottom cannot be greater than or equal to

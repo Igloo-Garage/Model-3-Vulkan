@@ -5,7 +5,7 @@
 #
 # Press the buttons/sticks/triggers you want to check, quit the game with Esc, then read the log:
 #
-#   Select-String Data\Supermodel.log -Pattern "Input:"
+#   Select-String Data\Model3Vulkan.log -Pattern "Input:"
 #
 # Every pad is listed with its name and capabilities when opened, and each press appears as
 # "Input: pad N <button> down/up" (both the raw button number and, for a pad SDL recognises, the
@@ -48,7 +48,7 @@ if (-not (Test-Path $Rom)) {
 
 $env:SM3D_PAD_PROBE = "1"
 Write-Output ("running {0}" -f $Rom)
-Write-Output ("log: {0}" -f (Join-Path $bin "Data\Supermodel.log"))
+Write-Output ("log: {0}" -f (Join-Path $bin "Data\Model3Vulkan.log"))
 Push-Location $bin
 try {
     & $exe $Rom
