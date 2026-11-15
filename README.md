@@ -140,10 +140,10 @@ No installer required. Grab the archive for your platform from the [latest relea
 | **Windows 10/11 (64-bit)** | `Model3-Vulkan.v…for.Windows.zip` | Double-click `Model3-Vulkan.exe` |
 | **Linux (x86-64)** | `Model3-Vulkan.v…for.Linux.tar.gz` | `./Model3-Vulkan` |
 | **macOS 13.0+ (Intel)** | `Model3-Vulkan.v…for.macOS-Intel.tar.gz` | `./Model3-Vulkan` |
+| **macOS 13.3+ (Apple Silicon)** | `Model3-Vulkan.v…for.macOS-AppleSilicon.tar.gz` | `./Model3-Vulkan` |
 
-> The Apple Silicon package is built from the same source; check the release page for the current
-> set of assets. macOS 13.x uses `.st` save states — `.zst` needs macOS 14+ because the host core
-> links against a newer Swift runtime.
+> macOS 13.x uses `.st` save states — `.zst` needs macOS 14+ because the host core links against a
+> newer Swift runtime.
 
 ### Windows Setup
 
